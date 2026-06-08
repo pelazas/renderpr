@@ -1,7 +1,7 @@
 # RenderPR: Core Agents & System Architecture
 
 ## Overview
-RenderPR is an open-source GitHub bot that visually reviews Next.js Pull Requests. It dynamically provisions ephemeral infrastructure, captures UI screenshots across different viewports, and utilizes a multimodal LLM to analyze frontend regressions alongside the code diff. It is deployed strictly into the user's own cloud environment (BYOC = zero trust).
+GitHub bot that VISUALLY reviews frontend Pull Requests changes. It dynamically provisions ephemeral infrastructure, captures UI screenshots across different viewports, and uses a LLM to analyze frontend regressions alongside the code diff. It is deployed strictly into the user's own cloud environment (BYOC = zero trust).
 
 Following the initial review, the bot shifts into a conversational state. It remains active for a predefined idle window (e.g., 10 minutes), polling the PR thread for developer follow-up questions. Developers can request real-time modifications—such as rendering specific viewports, toggling dark mode, or testing accessibility contrast—allowing the bot to re-render the application and analyze the output on the fly. 
 
