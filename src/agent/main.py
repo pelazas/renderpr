@@ -16,6 +16,7 @@ from src.agent.config import (
     DEV_SERVER_PORT,
     DEV_SERVER_START_TIMEOUT,
     DEV_SERVER_POLL_INTERVAL,
+    REPO_DIR,
     RETRY_MAX_ATTEMPTS,
 )
 
@@ -47,9 +48,6 @@ def _fetch_secrets() -> dict:
         "private_key": github_data["private_key"],
         "openrouter_api_key": openrouter_data["openrouter_api_key"],
     }
-
-
-REPO_DIR = "/app/repo"
 
 
 def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:

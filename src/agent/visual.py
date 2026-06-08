@@ -4,7 +4,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from src.agent.config import VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import REPO_DIR, VIEWPORTS, VIEWPORT_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ def capture_screenshots(
     screenshot_dir: Path | None = None,
 ) -> list[Path]:
     if screenshot_dir is None:
-        screenshot_dir = Path("/app/repo/.renderpr/screenshots")
+        screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
 
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
