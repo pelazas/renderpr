@@ -4,7 +4,7 @@ import logging
 import pytest
 from pytest import MonkeyPatch
 
-from src.agent.main import _clone_repo, _fetch_secrets, _get_installation_token, _start_dev_server, run
+from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _start_dev_server, run
 
 
 def _mock_all_deps(monkeypatch, caplog=None):
@@ -275,6 +275,54 @@ class TestFetchSecrets:
 
         with pytest.raises(SystemExit):
             _fetch_secrets()
+
+
+class TestFetchDiff:
+    def test_fetch_diff_success(self, monkeypatch: MonkeyPatch):
+        import httpx
+        mock_resp = httpx.Response(200, text="diff --git a/file.tsx b/file.tsx")
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        result = _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+        assert "diff --git" in result
+
+    def test_fetch_diff_4xx_exits(self, monkeypatch: MonkeyPatch):
+        import httpx
+        mock_resp = httpx.Response(404, text="Not found")
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        with pytest.raises(SystemExit):
+            _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+
+    def test_fetch_diff_5xx_retry_then_exit(self, monkeypatch: MonkeyPatch):
+        import httpx
+        call_count = [0]
+        responses = [
+            httpx.Response(500, text="Server error"),
+            httpx.Response(500, text="Server error"),
+            httpx.Response(500, text="Server error"),
+        ]
+
+        def mock_get(self, *a, **kw):
+            idx = call_count[0]
+            call_count[0] += 1
+            return responses[idx]
+
+        mock_client = type(
+            "MockClient",
+            (),
+            {
+                "__enter__": lambda s: s,
+                "__exit__": lambda s, *a: None,
+                "get": mock_get,
+            },
+        )()
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: mock_client)
+
+        from src.agent.config import RETRY_MAX_ATTEMPTS
+        with pytest.raises(SystemExit):
+            _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+        assert call_count[0] == RETRY_MAX_ATTEMPTS
 
 
 SAMPLE_DIFF = """diff --git a/src/page.tsx b/src/page.tsx

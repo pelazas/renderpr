@@ -171,9 +171,25 @@ def _fetch_diff(token: str, repo_full_name: str, pr_number: str) -> str:
         "User-Agent": "RenderPR/1.0",
     }
 
-    resp = httpx.get(url, headers=headers)
-    resp.raise_for_status()
-    return resp.text
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url, headers=headers)
+
+        if resp.status_code == 200:
+            return resp.text
+
+        logger.error(
+            "GitHub API error fetching diff (attempt %d/%d): %d %s",
+            attempt + 1, RETRY_MAX_ATTEMPTS, resp.status_code, resp.text,
+        )
+
+        if 400 <= resp.status_code < 500:
+            break
+
+        if attempt < RETRY_MAX_ATTEMPTS - 1:
+            time.sleep(3)
+
+    sys.exit(1)
 
 
 def _parse_diff_summary(diff: str) -> str:
