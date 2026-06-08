@@ -30,8 +30,11 @@ DEV_SERVER_POLL_INTERVAL: int = 2
 LLM_RETRY_BASE_DELAY: int = 2
 LLM_RETRY_MAX_DELAY: int = 30
 LLM_RETRY_JITTER: float = 0.1
+LLM_CLIENT_TIMEOUT: int = 120
 
 PLAYWRIGHT_TIMEOUT: int = 30000
 PLAYWRIGHT_NAVIGATION_TIMEOUT: int = 15000
 
 REPO_DIR: str = "/app/repo"
+LLM_MODEL: str = "google/gemini-2.5-flash"
+OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"

@@ -4,7 +4,7 @@ import logging
 import pytest
 from pytest import MonkeyPatch
 
-from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _start_dev_server, run
+from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _start_dev_server, run
 
 
 def _mock_all_deps(monkeypatch, caplog=None):
@@ -14,6 +14,8 @@ def _mock_all_deps(monkeypatch, caplog=None):
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: [])
+    monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
+    monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
 
 
 def test_run_logs_env_vars(caplog, monkeypatch):
@@ -31,6 +33,7 @@ def test_run_logs_env_vars(caplog, monkeypatch):
     assert "Dev server ready. Proceeding to review..." in caplog.text
     assert "Fetched diff for PR #42" in caplog.text
     assert "Captured 0 screenshots" in caplog.text
+    assert "RenderPR agent finished" in caplog.text
 
 
 def test_run_defaults_when_missing_env(caplog, monkeypatch):
@@ -47,6 +50,7 @@ def test_run_defaults_when_missing_env(caplog, monkeypatch):
     assert "PR Number: unknown" in caplog.text
     assert "Fetched diff for PR #unknown" in caplog.text
     assert "Captured 0 screenshots" in caplog.text
+    assert "RenderPR agent finished" in caplog.text
 
 
 def _mock_client(response):
@@ -386,3 +390,29 @@ class TestParseDiffSummary:
 
         result = _parse_diff_summary("no diff content here")
         assert result == "(no file changes detected)"
+
+class TestPostComment:
+    def test_post_comment_success(self, monkeypatch):
+        import httpx
+        mock_resp = httpx.Response(201, json={"id": 1})
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        _post_comment(
+            token="fake-token",
+            repo_full_name="owner/repo",
+            pr_number="42",
+            body="## Review\n\nLooks good.",
+        )
+
+    def test_post_comment_failure_exits(self, monkeypatch):
+        import httpx
+        mock_resp = httpx.Response(400, json={"message": "Error"})
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        with pytest.raises(SystemExit):
+            _post_comment(
+                token="fake-token",
+                repo_full_name="owner/repo",
+                pr_number="42",
+                body="## Review",
+            )
