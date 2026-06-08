@@ -94,7 +94,10 @@ def run_review(
 
         if resp.status_code == 200:
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            try:
+                return data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                raise ReviewError(f"Unexpected OpenRouter response shape: {str(data)[:200]}")
 
         logger.error(
             "OpenRouter API error (attempt %d/%d): %d %s",

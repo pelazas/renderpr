@@ -137,6 +137,21 @@ def test_run_review_4xx_exits(tmp_path, mock_httpx_client):
         )
 
 
+def test_run_review_malformed_response(tmp_path, mock_httpx_client):
+    mock_httpx_client([
+        httpx.Response(200, json={"unexpected": "structure"}),
+    ])
+
+    from src.agent.review import ReviewError, run_review
+
+    with pytest.raises(ReviewError):
+        run_review(
+            diff=SAMPLE_DIFF,
+            screenshot_paths=[],
+            openrouter_api_key="sk-or-fake",
+        )
+
+
 def test_run_review_screenshot_read_error(tmp_path, mock_httpx_client):
     missing = tmp_path / "does-not-exist.png"
 
