@@ -4,7 +4,7 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from src.agent.config import REPO_DIR, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, VIEWPORTS, VIEWPORT_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +30,8 @@ def capture_screenshots(
             page.set_viewport_size({"width": width, "height": vp["height"]})
 
             try:
-                page.goto(dev_server_url, wait_until="networkidle", timeout=15000)
-            except Exception:
+                page.goto(dev_server_url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+            except TimeoutError:
                 logger.warning("Navigation timeout for viewport %d, skipping", width)
                 continue
 
@@ -44,7 +44,7 @@ def capture_screenshots(
                 logger.info("Screenshot saved: %s", filename)
                 paths.append(filename)
             except Exception:
-                logger.warning("Screenshot failed for viewport %d, skipping", width)
+                logger.warning("Screenshot failed for viewport %d", width, exc_info=True)
 
         browser.close()
 
