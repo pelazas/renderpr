@@ -100,9 +100,9 @@ def test_run_review_4xx_exits(tmp_path, mock_httpx_client):
         httpx.Response(401, json={"error": "Unauthorized"}),
     ])
 
-    from src.agent.review import run_review
+    from src.agent.review import ReviewError, run_review
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(ReviewError):
         run_review(
             diff=SAMPLE_DIFF,
             screenshot_paths=[screenshot],

@@ -1,6 +1,5 @@
 import base64
 import logging
-import sys
 import time
 from pathlib import Path
 
@@ -16,6 +15,10 @@ from src.agent.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ReviewError(Exception):
+    pass
 
 REVIEW_PROMPT = """You are a frontend review bot for a Pull Request.
 Review the code diff and screenshots below.
@@ -95,8 +98,7 @@ def run_review(
         )
 
         if 400 <= resp.status_code < 500 and resp.status_code != 429:
-            logger.error("Non-retryable error from OpenRouter, exiting")
-            sys.exit(1)
+            raise ReviewError(f"Non-retryable OpenRouter error: {resp.status_code} {resp.text[:200]}")
 
         if attempt < RETRY_MAX_ATTEMPTS - 1:
             delay = min(
@@ -106,5 +108,4 @@ def run_review(
             jitter = delay * LLM_RETRY_JITTER
             time.sleep(delay + jitter)
 
-    logger.error("OpenRouter API failed after %d attempts", RETRY_MAX_ATTEMPTS)
-    sys.exit(1)
+    raise ReviewError(f"OpenRouter API failed after {RETRY_MAX_ATTEMPTS} attempts")

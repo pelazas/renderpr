@@ -282,13 +282,17 @@ def run() -> None:
         ", ".join(p.name for p in screenshot_paths),
     )
 
-    from src.agent.review import run_review
+    from src.agent.review import ReviewError, run_review
 
-    review_body = run_review(
-        diff=diff,
-        screenshot_paths=screenshot_paths,
-        openrouter_api_key=secrets["openrouter_api_key"],
-    )
+    try:
+        review_body = run_review(
+            diff=diff,
+            screenshot_paths=screenshot_paths,
+            openrouter_api_key=secrets["openrouter_api_key"],
+        )
+    except ReviewError:
+        logger.exception("Review failed")
+        sys.exit(1)
 
     _post_comment(
         token=token,
