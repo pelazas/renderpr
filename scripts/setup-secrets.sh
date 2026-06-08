@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SECRET_ID="renderpr/github-app"
-SECRET_NAME="${1:-$SECRET_ID}"
+PARAM_NAME="${1:-/renderpr/github-app}"
 
 if ! command -v aws &> /dev/null; then
   echo "Error: AWS CLI is not installed." >&2
@@ -10,7 +9,7 @@ if ! command -v aws &> /dev/null; then
 fi
 
 echo "=== RenderPR — Post-Deploy Secret Injection ==="
-echo "Target secret: $SECRET_NAME"
+echo "Target SSM parameter: $PARAM_NAME"
 echo ""
 
 read -rp "GitHub App ID: " APP_ID
@@ -36,9 +35,12 @@ SECRET_JSON=$(jq -n \
   }'
 )
 
-aws secretsmanager put-secret-value \
-  --secret-id "$SECRET_NAME" \
-  --secret-string "$SECRET_JSON"
+aws ssm put-parameter \
+  --name "$PARAM_NAME" \
+  --type "SecureString" \
+  --value "$SECRET_JSON" \
+  --overwrite \
+  --output json
 
 echo ""
-echo "Secret '$SECRET_NAME' updated successfully."
+echo "SSM parameter '$PARAM_NAME' updated successfully."

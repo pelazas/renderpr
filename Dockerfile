@@ -12,10 +12,11 @@ RUN pip install --no-cache-dir playwright \
     && playwright install chromium \
     && playwright install-deps chromium
 
+COPY src/agent/requirements.txt /tmp/agent-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/agent-requirements.txt
+
 WORKDIR /app
 
 COPY src/agent/ /app/
 
-RUN pip install --no-cache-dir -r /app/requirements.txt 2>/dev/null || true
-
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]
