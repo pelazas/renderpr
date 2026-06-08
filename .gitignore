@@ -31,5 +31,6 @@ Dockerfile.*
 cdk/out/
 cdk/cdk.out/
 cdk/node_modules/
+cdk/dist/
 cdk/cdk.context.json
 *.tsbuildinfo
