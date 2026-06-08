@@ -230,7 +230,7 @@ def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) ->
         "User-Agent": "RenderPR/1.0",
     }
 
-    with httpx.Client() as client:
+    with httpx.Client(timeout=30) as client:
         resp = client.post(url, headers=headers, json={"body": body})
 
     if resp.status_code != 201:
