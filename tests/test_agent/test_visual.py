@@ -2,13 +2,6 @@ from pathlib import Path
 
 import pytest
 
-VIEWPORT_CONFIG = [
-    {"width": 375, "height": 812},
-    {"width": 768, "height": 1024},
-    {"width": 1280, "height": 800},
-    {"width": 1920, "height": 1080},
-]
-
 
 @pytest.fixture(autouse=True)
 def mock_playwright(monkeypatch):
