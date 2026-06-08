@@ -140,7 +140,8 @@ When a bug is reported:
 | ApiGatewayUrl | `https://drdidhjxv8.execute-api.eu-west-1.amazonaws.com/` |
 | ClusterArn | `arn:aws:ecs:eu-west-1:303859149452:cluster/renderpr-cluster` |
 | GitHubParamName | `/renderpr/github-app` |
-| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:2` |
+| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:3` |
+| StackArn | `arn:aws:cloudformation:eu-west-1:303859149452:stack/RenderprStack/e0b45ae0-6347-11f1-86a8-0668387b3249` |
 
 ## Key Constraints
 

@@ -1,3 +1,5 @@
 httpx
 boto3
 structlog
+PyJWT
+cryptography
