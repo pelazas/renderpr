@@ -45,6 +45,43 @@ def mock_httpx_client(monkeypatch):
     return set_responses
 
 
+class TestBuildContent:
+    def test_contains_diff_text(self, tmp_path):
+        from src.agent.review import _build_content
+
+        result = _build_content("my diff content", [])
+        assert any("my diff content" in p["text"] for p in result if p["type"] == "text")
+
+    def test_includes_screenshots_when_provided(self, tmp_path):
+        from src.agent.review import _build_content
+
+        png = tmp_path / "test.png"
+        png.write_bytes(b"fake-png-data")
+
+        result = _build_content("diff", [png])
+        texts = [p for p in result if p["type"] == "text"]
+        images = [p for p in result if p["type"] == "image_url"]
+        assert any("## Screenshots" in p["text"] for p in texts)
+        assert len(images) == 1
+
+    def test_skip_screenshots_when_empty(self, tmp_path):
+        from src.agent.review import _build_content
+
+        result = _build_content("diff", [])
+        images = [p for p in result if p["type"] == "image_url"]
+        texts_joined = " ".join(p.get("text", "") for p in result if p["type"] == "text")
+        assert len(images) == 0
+        assert "## Screenshots" not in texts_joined
+
+    def test_skips_unreadable_file(self, tmp_path):
+        from src.agent.review import _build_content
+
+        missing = tmp_path / "missing.png"
+        result = _build_content("diff", [missing])
+        images = [p for p in result if p["type"] == "image_url"]
+        assert len(images) == 0
+
+
 class TestGuessViewportLabel:
     def test_desktop_xl_matched_before_desktop(self):
         from src.agent.review import _guess_viewport_label
