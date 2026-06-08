@@ -58,7 +58,9 @@ def handler(event: dict, context: object) -> dict:
         body.get("repository", {}).get("full_name", "owner/repo")
     )
     pr_number = str(
-        body.get("pull_request", {}).get("number", "0")
+        body.get("pull_request", {}).get("number")
+        or body.get("issue", {}).get("number")
+        or body.get("number", "0")
     )
 
     client = boto3.client("ecs")

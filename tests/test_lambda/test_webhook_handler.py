@@ -107,6 +107,44 @@ def test_missing_signature_header_returns_401():
     assert result["statusCode"] == 401
 
 
+def test_issue_comment_event_extracts_pr_number():
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "action": "created",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "issue": {"number": 77, "pull_request": {}},
+            "comment": {"body": "@renderpr review this"},
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+
+
+def test_pull_request_with_top_level_number():
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "number": 99,
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+
+
 def test_invalid_json_body_returns_400():
     from src.lambda_handler.webhook_handler import handler
 
