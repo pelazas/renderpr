@@ -43,8 +43,12 @@ def _build_content(diff: str, screenshot_paths: list[Path]) -> list[dict]:
         content.append({"type": "text", "text": "## Screenshots\n"})
         for path in screenshot_paths:
             label = _guess_viewport_label(path)
-            with open(path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("utf-8")
+            try:
+                with open(path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+            except OSError:
+                logger.warning("Cannot read screenshot %s, skipping", path)
+                continue
             content.append({
                 "type": "text",
                 "text": f"### {label}\n",

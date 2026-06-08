@@ -137,6 +137,26 @@ def test_run_review_4xx_exits(tmp_path, mock_httpx_client):
         )
 
 
+def test_run_review_screenshot_read_error(tmp_path, mock_httpx_client):
+    missing = tmp_path / "does-not-exist.png"
+
+    mock_httpx_client([
+        httpx.Response(200, json={
+            "choices": [{"message": {"content": "## Review\n\nNo images sent."}}],
+        }),
+    ])
+
+    from src.agent.review import run_review
+
+    result = run_review(
+        diff=SAMPLE_DIFF,
+        screenshot_paths=[missing],
+        openrouter_api_key="sk-or-fake",
+    )
+
+    assert "No images sent." in result
+
+
 def test_run_review_empty_screenshots(tmp_path, mock_httpx_client):
     mock_httpx_client([
         httpx.Response(200, json={
