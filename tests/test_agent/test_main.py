@@ -4,7 +4,7 @@ import logging
 import pytest
 from pytest import MonkeyPatch
 
-from src.agent.main import _clone_repo, _fetch_secrets, _get_installation_token, _start_dev_server, run
+from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _start_dev_server, run
 
 
 def _mock_all_deps(monkeypatch, caplog=None):
@@ -12,6 +12,8 @@ def _mock_all_deps(monkeypatch, caplog=None):
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
+    monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: [])
 
 
 def test_run_logs_env_vars(caplog, monkeypatch):
@@ -27,6 +29,8 @@ def test_run_logs_env_vars(caplog, monkeypatch):
     assert "Repository: test-owner/test-repo" in caplog.text
     assert "PR Number: 42" in caplog.text
     assert "Dev server ready. Proceeding to review..." in caplog.text
+    assert "Fetched diff for PR #42" in caplog.text
+    assert "Captured 0 screenshots" in caplog.text
 
 
 def test_run_defaults_when_missing_env(caplog, monkeypatch):
@@ -41,6 +45,8 @@ def test_run_defaults_when_missing_env(caplog, monkeypatch):
     assert "Installation ID: unknown" in caplog.text
     assert "Repository: unknown" in caplog.text
     assert "PR Number: unknown" in caplog.text
+    assert "Fetched diff for PR #unknown" in caplog.text
+    assert "Captured 0 screenshots" in caplog.text
 
 
 def _mock_client(response):
@@ -269,3 +275,114 @@ class TestFetchSecrets:
 
         with pytest.raises(SystemExit):
             _fetch_secrets()
+
+
+class _MockClient:
+    def __init__(self, get_func):
+        self._get = get_func
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        pass
+    def get(self, *a, **kw):
+        return self._get(*a, **kw)
+
+
+class TestFetchDiff:
+    def test_fetch_diff_success(self, monkeypatch: MonkeyPatch):
+        import httpx
+        mock_resp = httpx.Response(200, text="diff --git a/file.tsx b/file.tsx")
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        result = _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+        assert "diff --git" in result
+
+    def test_fetch_diff_4xx_exits(self, monkeypatch: MonkeyPatch):
+        import httpx
+        mock_resp = httpx.Response(404, text="Not found")
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        with pytest.raises(SystemExit):
+            _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+
+    def test_fetch_diff_5xx_retry_then_exit(self, monkeypatch: MonkeyPatch):
+        import httpx
+        call_count = [0]
+        responses = [
+            httpx.Response(500, text="Server error"),
+            httpx.Response(500, text="Server error"),
+            httpx.Response(500, text="Server error"),
+        ]
+
+        def mock_get(self, *a, **kw):
+            idx = call_count[0]
+            call_count[0] += 1
+            return responses[idx]
+
+        mock_client = _MockClient(mock_get)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: mock_client)
+
+        from src.agent.config import RETRY_MAX_ATTEMPTS
+        with pytest.raises(SystemExit):
+            _fetch_diff(token="t", repo_full_name="o/r", pr_number="1")
+        assert call_count[0] == RETRY_MAX_ATTEMPTS
+
+
+SAMPLE_DIFF = """diff --git a/src/page.tsx b/src/page.tsx
+index abc..def 100644
+--- a/src/page.tsx
++++ b/src/page.tsx
+@@ -1,5 +1,7 @@
+ function Page() {
+-  return <div>old</div>;
++  return <div>new</div>;
++  return <div>new2</div>;
+ }
+diff --git a/src/Header.tsx b/src/Header.tsx
+index 123..456 100644
+--- a/src/Header.tsx
++++ b/src/Header.tsx
+@@ -1,3 +1,5 @@
+ function Header() {
++  return <header>new</header>;
++  return <header>new2</header>;
+ }
+"""
+
+SAMPLE_DIFF_SINGLE_FILE = """diff --git a/src/page.tsx b/src/page.tsx
+index abc..def 100644
+--- a/src/page.tsx
++++ b/src/page.tsx
+@@ -1,5 +1,3 @@
+ function Page() {
+-  return <div>old</div>;
+-  return <div>old2</div>;
+ }
+"""
+
+
+class TestParseDiffSummary:
+    def test_parses_multiple_files(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary(SAMPLE_DIFF)
+        assert "src/page.tsx (+2/-1)" in result
+        assert "src/Header.tsx (+2/-0)" in result
+
+    def test_parses_single_file(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary(SAMPLE_DIFF_SINGLE_FILE)
+        assert "src/page.tsx (+0/-2)" in result
+
+    def test_empty_diff_returns_fallback(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary("")
+        assert result == "(no file changes detected)"
+
+    def test_no_file_changes_returns_fallback(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary("no diff content here")
+        assert result == "(no file changes detected)"
