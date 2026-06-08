@@ -3,7 +3,7 @@
 ## Overview
 GitHub bot that VISUALLY reviews frontend Pull Requests changes. It dynamically provisions ephemeral infrastructure, captures UI screenshots across different viewports, and uses a LLM to analyze frontend regressions alongside the code diff. It is deployed strictly into the user's own cloud environment (BYOC = zero trust).
 
-Following the initial review, the bot shifts into a conversational state. It remains active for a predefined idle window (e.g., 10 minutes), polling the PR thread for developer follow-up questions. Developers can request real-time modifications—such as rendering specific viewports, toggling dark mode, or testing accessibility contrast—allowing the bot to re-render the application and analyze the output on the fly. 
+Following the initial review, the bot shifts into a conversational state. It remains active for a predefined idle window (e.g., 15 minutes), polling the PR thread for developer follow-up questions. Developers can request real-time modifications—such as rendering specific viewports, toggling dark mode, or testing accessibility contrast—allowing the bot to re-render the application and analyze the output on the fly. 
 
 ---
 
@@ -32,6 +32,7 @@ Following the initial review, the bot shifts into a conversational state. It rem
 ### 1.6 Infrastructure-as-Code Configuration (The Installer)
 * **Technology:** AWS Cloud Development Kit (CDK v2 using TypeScript)
 * **Purpose:** Packages the entire cloud topology (IAM policies, VPC subnets, Lambda entry points, API Gateways, and ECS definitions) into a single, deployable codebase that users can securely stand up inside their own AWS cloud accounts via their local terminals.
+
 
 ---
 
@@ -94,7 +95,7 @@ Because RenderPR is built as a Bring-Your-Own-Cloud (BYOC) infrastructure model,
 | Component / Layer | State Type | Lifespan | Access Scope / Permissions |
 | :--- | :--- | :--- | :--- |
 | **Inbound Webhook (Lambda)** | Stateless | Ephemeral (Single Request) | Read-only access to verify GitHub HMAC signatures. Minimal IAM permissions. |
-| **Workspace Sandbox (Fargate)** | State-Isolated | Persistent for active session max 10 mins | Local filesystem container access. Read/Write to local node_modules and Git working directories. |
+| **Workspace Sandbox (Fargate)** | State-Isolated | Persistent for active session max 15 mins | Local filesystem container access. Read/Write to local node_modules and Git working directories. |
 | **Browser Context (Playwright)** | Ephemeral | Refreshed per command instruction | Isolated cookie jar and local storage per render target to prevent data cross-contamination. |
 | **LLM Orchestration Layer** | Stateless | In-Memory (Cleared on loop tick) | Pulls keys from Fargate Environment variables via secure runtime injection. |
 
@@ -114,4 +115,4 @@ Autonomous loops running inside containers are susceptible to hanging builds, AP
 
 ### 5.3 GitHub Thread Polling Expiry (The Zombie Kill-Switch)
 *   **Failure Scenario:** A developer invokes the bot, but walks away or drops the interaction loop without typing any closing instructions.
-*   **Mitigation Strategy:** The Conversation Polling Agent keeps a persistent internal Unix timestamp marker tracking the last observed user interaction. If `current_time - last_interaction_time > 600_seconds`, the Fargate script posts a closing summary notification and self-destructs the container environment immediately to eliminate lingering compute overhead.
+*   **Mitigation Strategy:** The Conversation Polling Agent keeps a persistent internal Unix timestamp marker tracking the last observed user interaction. If `current_time - last_interaction_time > 900_seconds`, the Fargate script posts a closing summary notification and self-destructs the container environment immediately to eliminate lingering compute overhead.
