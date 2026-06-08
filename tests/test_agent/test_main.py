@@ -277,6 +277,17 @@ class TestFetchSecrets:
             _fetch_secrets()
 
 
+class _MockClient:
+    def __init__(self, get_func):
+        self._get = get_func
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        pass
+    def get(self, *a, **kw):
+        return self._get(*a, **kw)
+
+
 class TestFetchDiff:
     def test_fetch_diff_success(self, monkeypatch: MonkeyPatch):
         import httpx
@@ -308,15 +319,7 @@ class TestFetchDiff:
             call_count[0] += 1
             return responses[idx]
 
-        mock_client = type(
-            "MockClient",
-            (),
-            {
-                "__enter__": lambda s: s,
-                "__exit__": lambda s, *a: None,
-                "get": mock_get,
-            },
-        )()
+        mock_client = _MockClient(mock_get)
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: mock_client)
 
         from src.agent.config import RETRY_MAX_ATTEMPTS
