@@ -80,6 +80,10 @@ def test_valid_hmac_returns_200():
     data = json.loads(result["body"])
     assert data["ok"] is True
 
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    tasks = ecs.list_tasks(cluster=CLUSTER_ARN)
+    assert len(tasks["taskArns"]) > 0
+
 
 def test_invalid_hmac_returns_401():
     from src.lambda_handler.webhook_handler import handler
