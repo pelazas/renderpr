@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+from pathlib import Path
 import shutil
 import subprocess
 import sys
@@ -85,10 +86,11 @@ def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:
 
 
 _dev_server_proc: subprocess.Popen | None = None
+_dev_server_url: str = ""
 
 
 def _start_dev_server() -> None:
-    global _dev_server_proc
+    global _dev_server_proc, _dev_server_url
 
     pkg_json = os.path.join(REPO_DIR, "package.json")
     if not os.path.exists(pkg_json):
@@ -110,7 +112,8 @@ def _start_dev_server() -> None:
 
     _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=REPO_DIR)
 
-    url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
+    _dev_server_url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
+    url = _dev_server_url
     deadline = time.time() + DEV_SERVER_START_TIMEOUT
     while time.time() < deadline:
         try:
@@ -160,6 +163,51 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
     sys.exit(1)
 
 
+def _fetch_diff(token: str, repo_full_name: str, pr_number: str) -> str:
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3.diff",
+        "User-Agent": "RenderPR/1.0",
+    }
+
+    resp = httpx.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _parse_diff_summary(diff: str) -> str:
+    lines = diff.splitlines()
+    current_file = ""
+    file_stats: list[str] = []
+    additions = 0
+    deletions = 0
+
+    for line in lines:
+        if line.startswith("+++ b/"):
+            if current_file:
+                file_stats.append(f"{current_file} (+{additions}/-{deletions})")
+            current_file = line[6:]
+            additions = 0
+            deletions = 0
+        elif line.startswith("+") and not line.startswith("+++"):
+            additions += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            deletions += 1
+
+    if current_file:
+        file_stats.append(f"{current_file} (+{additions}/-{deletions})")
+
+    return ", ".join(file_stats) if file_stats else "(no file changes detected)"
+
+
+def _capture_screenshots() -> list[Path]:
+    from src.agent.visual import capture_screenshots
+
+    screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
+    return capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -186,6 +234,21 @@ def run() -> None:
     _start_dev_server()
 
     logger.info("Dev server ready. Proceeding to review...")
+
+    diff = _fetch_diff(
+        token=token,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+    )
+    logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
+    logger.info("Changes: %s", _parse_diff_summary(diff))
+
+    screenshot_paths = _capture_screenshots()
+    logger.info(
+        "Captured %d screenshots: %s",
+        len(screenshot_paths),
+        ", ".join(p.name for p in screenshot_paths),
+    )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,8 @@ def _mock_all_deps(monkeypatch, caplog=None):
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
+    monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: [])
 
 
 def test_run_logs_env_vars(caplog, monkeypatch):
@@ -27,6 +29,8 @@ def test_run_logs_env_vars(caplog, monkeypatch):
     assert "Repository: test-owner/test-repo" in caplog.text
     assert "PR Number: 42" in caplog.text
     assert "Dev server ready. Proceeding to review..." in caplog.text
+    assert "Fetched diff for PR #42" in caplog.text
+    assert "Captured 0 screenshots" in caplog.text
 
 
 def test_run_defaults_when_missing_env(caplog, monkeypatch):
@@ -41,6 +45,8 @@ def test_run_defaults_when_missing_env(caplog, monkeypatch):
     assert "Installation ID: unknown" in caplog.text
     assert "Repository: unknown" in caplog.text
     assert "PR Number: unknown" in caplog.text
+    assert "Fetched diff for PR #unknown" in caplog.text
+    assert "Captured 0 screenshots" in caplog.text
 
 
 def _mock_client(response):
@@ -269,3 +275,63 @@ class TestFetchSecrets:
 
         with pytest.raises(SystemExit):
             _fetch_secrets()
+
+
+SAMPLE_DIFF = """diff --git a/src/page.tsx b/src/page.tsx
+index abc..def 100644
+--- a/src/page.tsx
++++ b/src/page.tsx
+@@ -1,5 +1,7 @@
+ function Page() {
+-  return <div>old</div>;
++  return <div>new</div>;
++  return <div>new2</div>;
+ }
+diff --git a/src/Header.tsx b/src/Header.tsx
+index 123..456 100644
+--- a/src/Header.tsx
++++ b/src/Header.tsx
+@@ -1,3 +1,5 @@
+ function Header() {
++  return <header>new</header>;
++  return <header>new2</header>;
+ }
+"""
+
+SAMPLE_DIFF_SINGLE_FILE = """diff --git a/src/page.tsx b/src/page.tsx
+index abc..def 100644
+--- a/src/page.tsx
++++ b/src/page.tsx
+@@ -1,5 +1,3 @@
+ function Page() {
+-  return <div>old</div>;
+-  return <div>old2</div>;
+ }
+"""
+
+
+class TestParseDiffSummary:
+    def test_parses_multiple_files(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary(SAMPLE_DIFF)
+        assert "src/page.tsx (+2/-1)" in result
+        assert "src/Header.tsx (+2/-0)" in result
+
+    def test_parses_single_file(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary(SAMPLE_DIFF_SINGLE_FILE)
+        assert "src/page.tsx (+0/-2)" in result
+
+    def test_empty_diff_returns_fallback(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary("")
+        assert result == "(no file changes detected)"
+
+    def test_no_file_changes_returns_fallback(self):
+        from src.agent.main import _parse_diff_summary
+
+        result = _parse_diff_summary("no diff content here")
+        assert result == "(no file changes detected)"
