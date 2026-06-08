@@ -1,0 +1,1 @@
+# boto3 is included in the Lambda runtime; no extra deps needed for this slice.
