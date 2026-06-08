@@ -228,6 +228,7 @@ def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) ->
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "RenderPR/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     with httpx.Client(timeout=30) as client:
