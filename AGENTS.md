@@ -148,3 +148,7 @@ When a bug is reported:
 - Fargate runs in **public subnets** with `assignPublicIp: true` and egress-only security groups. No NAT Gateway. Do not add private subnets without explicit approval.
 - GitHub auth uses **installation access tokens** (JWT-signed, 60min expiry). No PATs.
 - Secrets are stored in **AWS SSM Parameter Store** (SecureString) with post-deploy injection via `setup-secrets.sh`. Not in CDK context or env vars at deploy time.
+
+## Deployment Outputs
+
+After every `cdk deploy`, paste the `Outputs:` block here and say "store deploy info" — I'll update the table above.
