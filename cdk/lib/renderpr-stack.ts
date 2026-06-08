@@ -62,6 +62,13 @@ export class RenderprStack extends cdk.Stack {
       ],
     });
 
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [githubParamArn],
+      }),
+    );
+
     // IAM: Fargate execution role (pull image, write logs)
     const fargateExecutionRole = new iam.Role(this, "FargateExecutionRole", {
       assumedBy: new iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
@@ -86,7 +93,7 @@ export class RenderprStack extends cdk.Stack {
 
     // Lambda function (Python 3.12)
     const handler = new PythonFunction(this, "WebhookHandler", {
-      entry: path.join(__dirname, "../../src/lambda"),
+      entry: path.join(__dirname, "../../src/lambda_handler"),
       index: "webhook_handler.py",
       handler: "handler",
       runtime: lambda.Runtime.PYTHON_3_12,

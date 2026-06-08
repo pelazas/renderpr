@@ -1,5 +1,7 @@
 import json
 import os
+import hmac
+import hashlib
 import logging
 
 import boto3
@@ -13,12 +15,35 @@ SUBNET_IDS = os.environ["SUBNET_IDS"].split(",")
 SECURITY_GROUP_ID = os.environ["SECURITY_GROUP_ID"]
 GITHUB_PARAM_NAME = os.environ["GITHUB_PARAM_NAME"]
 
+_ssm = boto3.client("ssm")
+try:
+    param = _ssm.get_parameter(Name=GITHUB_PARAM_NAME, WithDecryption=True)
+    _secrets = json.loads(param["Parameter"]["Value"])
+    WEBHOOK_SECRET: bytes = _secrets["webhook_secret"].encode("utf-8")
+except Exception:
+    logger.exception("Failed to load webhook secret from SSM at cold start")
+    WEBHOOK_SECRET = b""
+
+
+def _verify_signature(body: bytes, signature_header: str) -> bool:
+    if not WEBHOOK_SECRET:
+        return False
+    expected = "sha256=" + hmac.new(WEBHOOK_SECRET, body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
+
 
 def handler(event: dict, context: object) -> dict:
     logger.info("Webhook received")
 
-    # TODO: Validate HMAC signature
-    # TODO: Parse installation.id, repo, PR number from event body
+    headers = event.get("headers", {}) or {}
+    signature = headers.get(
+        "x-hub-signature-256",
+        headers.get("X-Hub-Signature-256", ""),
+    )
+    if not signature or not _verify_signature(
+        (event.get("body") or "").encode("utf-8"), signature
+    ):
+        return {"statusCode": 401, "body": json.dumps({"error": "Invalid signature"})}
 
     try:
         body = json.loads(event.get("body", "{}"))

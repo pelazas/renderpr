@@ -14,7 +14,7 @@ renderpr/
 │   ├── bin/                      # CDK app entry point
 │   └── lib/                      # Stack definitions: VPC, Lambda, API Gateway, Fargate
 ├── src/
-│   ├── lambda/                   # Lambda handler (Python)
+│   ├── lambda_handler/           # Lambda handler (Python)
 │   │   ├── __init__.py
 │   │   └── webhook_handler.py    # HMAC validation, ECS RunTask trigger
 │   └── agent/                    # Fargate container entry point (Python)
@@ -132,6 +132,15 @@ When a bug is reported:
 - Every new feature must include a corresponding test
 - Playwright screenshots must be captured at all defined viewport widths
 - No hardcoded timeouts — use the configurable constants in `src/agent/config.py`
+
+## Deployment (eu-west-1)
+
+| Output | Value |
+|--------|-------|
+| ApiGatewayUrl | `https://drdidhjxv8.execute-api.eu-west-1.amazonaws.com/` |
+| ClusterArn | `arn:aws:ecs:eu-west-1:303859149452:cluster/renderpr-cluster` |
+| GitHubParamName | `/renderpr/github-app` |
+| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:2` |
 
 ## Key Constraints
 

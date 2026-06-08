@@ -35,7 +35,7 @@ renderpr/
 │   ├── bin/
 │   └── lib/                      # VPC, Lambda, API Gateway, Fargate
 ├── src/
-│   ├── lambda/                   # Lambda handler (lightweight, fast boot)
+│   ├── lambda_handler/           # Lambda handler (lightweight, fast boot)
 │   │   ├── __init__.py
 │   │   └── webhook_handler.py    # Validates HMAC, triggers Fargate
 │   └── agent/                    # Fargate entry point (stateful workspace)
