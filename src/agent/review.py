@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from src.agent.config import (
+    LLM_CLIENT_TIMEOUT,
     LLM_MODEL,
     LLM_RETRY_BASE_DELAY,
     LLM_RETRY_MAX_DELAY,
@@ -89,7 +90,7 @@ def run_review(
     }
 
     for attempt in range(RETRY_MAX_ATTEMPTS):
-        with httpx.Client(timeout=120) as client:
+        with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
             resp = client.post(url, headers=headers, json=body)
 
         if resp.status_code == 200:
