@@ -14,7 +14,7 @@ renderpr/
 │   ├── bin/                      # CDK app entry point
 │   └── lib/                      # Stack definitions: VPC, Lambda, API Gateway, Fargate
 ├── src/
-│   ├── lambda/                   # Lambda handler (Python)
+│   ├── lambda_handler/           # Lambda handler (Python)
 │   │   ├── __init__.py
 │   │   └── webhook_handler.py    # HMAC validation, ECS RunTask trigger
 │   └── agent/                    # Fargate container entry point (Python)
