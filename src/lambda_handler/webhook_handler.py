@@ -26,6 +26,8 @@ except Exception:
 
 
 def _verify_signature(body: bytes, signature_header: str) -> bool:
+    if not WEBHOOK_SECRET:
+        return False
     expected = "sha256=" + hmac.new(WEBHOOK_SECRET, body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature_header)
 
