@@ -45,6 +45,33 @@ def mock_httpx_client(monkeypatch):
     return set_responses
 
 
+class TestGuessViewportLabel:
+    def test_desktop_xl_matched_before_desktop(self):
+        from src.agent.review import _guess_viewport_label
+        path = type("Path", (), {"stem": "Desktop XL-20250101T120000"})()
+        assert _guess_viewport_label(path) == "Viewport: Desktop XL"
+
+    def test_regular_desktop_still_matches(self):
+        from src.agent.review import _guess_viewport_label
+        path = type("Path", (), {"stem": "Desktop-20250101T120000"})()
+        assert _guess_viewport_label(path) == "Viewport: Desktop"
+
+    def test_tablet_label(self):
+        from src.agent.review import _guess_viewport_label
+        path = type("Path", (), {"stem": "Tablet-20250101T120000"})()
+        assert _guess_viewport_label(path) == "Viewport: Tablet"
+
+    def test_mobile_xs_label(self):
+        from src.agent.review import _guess_viewport_label
+        path = type("Path", (), {"stem": "Mobile XS-20250101T120000"})()
+        assert _guess_viewport_label(path) == "Viewport: Mobile XS"
+
+    def test_no_match_returns_fallback(self):
+        from src.agent.review import _guess_viewport_label
+        path = type("Path", (), {"stem": "unknown-viewport"})()
+        assert "unknown-viewport" in _guess_viewport_label(path)
+
+
 SAMPLE_DIFF = "diff --git a/src/page.tsx b/src/page.tsx\n+ new code\n- old code"
 
 

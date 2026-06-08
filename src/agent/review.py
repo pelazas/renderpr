@@ -59,7 +59,7 @@ def _build_content(diff: str, screenshot_paths: list[Path]) -> list[dict]:
 
 def _guess_viewport_label(path: Path) -> str:
     name = path.stem
-    for label in ["Mobile XS", "Tablet", "Desktop", "Desktop XL"]:
+    for label in ["Desktop XL", "Desktop", "Tablet", "Mobile XS"]:
         if label in name:
             return f"Viewport: {label}"
     return f"Screenshot: {name}"
