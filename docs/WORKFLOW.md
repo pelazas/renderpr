@@ -37,8 +37,8 @@ This document describes the exact step-by-step workflow an agent follows when pr
 **Steps:**
 
 1. Docker container starts, runs `main.py`
-2. Agent authenticates with Secrets Manager:
-   a. `boto3.client("secretsmanager").get_secret_value(SecretId=SECRETS_ARN)`
+2. Agent authenticates with SSM Parameter Store:
+   a. `boto3.client("ssm").get_parameter(Name=GITHUB_PARAM_NAME, WithDecryption=True)`
    b. Parse JSON to extract `app_id` and `private_key`
 3. Agent generates GitHub installation access token:
    a. Create JWT with `iat` (now) and `exp` (now + 10 min) using RS256
@@ -58,7 +58,7 @@ This document describes the exact step-by-step workflow an agent follows when pr
 
 **Error handling:**
 
-- Secrets Manager access denied: log, exit with status 1
+- SSM Parameter Store access denied: log, exit with status 1
 - JWT generation failure: log, exit with status 1
 - Token exchange fails: log, exit with status 1
 - Git clone fails: retry once, then post error comment, exit with status 1

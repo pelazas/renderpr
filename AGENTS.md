@@ -59,7 +59,7 @@ Before writing any code, read the following documents **in order**. They are not
 | LLM Gateway | OpenRouter |
 | Infrastructure | AWS CDK v2 (TypeScript) |
 | GitHub Auth | Short-lived installation access tokens (JWT → API) |
-| Secret Storage | AWS Secrets Manager |
+| Secret Storage | AWS SSM Parameter Store (SecureString) |
 
 ## Coding Conventions
 
@@ -137,4 +137,4 @@ When a bug is reported:
 
 - Fargate runs in **public subnets** with `assignPublicIp: true` and egress-only security groups. No NAT Gateway. Do not add private subnets without explicit approval.
 - GitHub auth uses **installation access tokens** (JWT-signed, 60min expiry). No PATs.
-- Secrets are stored in **AWS Secrets Manager** with post-deploy injection via `setup-secrets.sh`. Not in CDK context or env vars at deploy time.
+- Secrets are stored in **AWS SSM Parameter Store** (SecureString) with post-deploy injection via `setup-secrets.sh`. Not in CDK context or env vars at deploy time.

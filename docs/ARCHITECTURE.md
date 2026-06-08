@@ -25,7 +25,7 @@ RenderPR is not a SaaS. Every user deploys the full stack into their own AWS acc
 
 - **GitHub** — webhook events, REST API for comments and cloning
 - **OpenRouter** — LLM inference
-- **AWS Services** — Secrets Manager, ECS, Lambda, API Gateway
+- **AWS Services** — SSM Parameter Store, ECS, Lambda, API Gateway
 
 ## Directory Structure
 
@@ -84,7 +84,7 @@ renderpr/
   - Orchestrates the full review lifecycle
   - Auto-terminates after 15 minutes idle
 - **Networking:** Public subnet with public IP, egress-only security group
-- **Secrets:** Reads GitHub App private key + App ID from Secrets Manager via IAM task role
+- **Secrets:** Reads GitHub App private key + App ID from SSM Parameter Store via IAM task role
 
 ### 3. Visual Automation Agent (Playwright)
 
@@ -127,7 +127,7 @@ renderpr/
   - Defines VPC with public subnets only
   - Creates ECS Fargate task definition + cluster
   - Provisions Lambda function + API Gateway route
-  - Creates Secrets Manager placeholder for GitHub App secrets
+  - Creates SSM Parameter Store SecureString parameters for secrets
   - Defines IAM roles and security groups
   - Packages and deploys everything via `cdk deploy`
 
@@ -142,7 +142,7 @@ renderpr/
 [4] Lambda calls ECS RunTask with env overrides
 [5] Lambda returns 200 OK to GitHub
 [6] Fargate container boots
-[7] Agent fetches private key + App ID from Secrets Manager
+[7] Agent fetches private key + App ID from SSM Parameter Store
 [8] Agent generates JWT, exchanges for installation access token
 [9] Agent clones PR branch (HTTPS with token)
 [10] Agent runs npm ci && npm run dev
@@ -174,10 +174,10 @@ renderpr/
 
 RenderPR generates GitHub tokens dynamically — no static PATs are used.
 
-1. CDK provisions empty AWS Secrets Manager secret
+1. CDK provisions SSM Parameter Store SecureString parameters
 2. User runs `setup-secrets.sh` to upload private key (.pem), App ID, and webhook secret
 3. Lambda reads webhook secret from environment (injected via CDK)
-4. Fargate reads private key + App ID from Secrets Manager using IAM task role
+4. Fargate reads private key + App ID from SSM Parameter Store using IAM task role
 5. Fargate agent signs a JWT using the private key, exchanges it for a 60-minute installation access token
 6. Token is used for git clone, comment posting, and thread polling
 7. Token expires automatically; no manual rotation needed
@@ -187,22 +187,24 @@ RenderPR generates GitHub tokens dynamically — no static PATs are used.
 | Variable | Injected Via | Accessed By | Purpose |
 |----------|-------------|-------------|---------|
 | Webhook secret | Lambda env var (CDK) | Lambda | HMAC validation |
-| App ID | Secrets Manager (Fargate role) | Fargate | JWT generation |
-| Private key (.pem) | Secrets Manager (Fargate role) | Fargate | JWT signing |
+| App ID | SSM Parameter Store (Fargate task role) | Fargate | JWT generation |
+| Private key (.pem) | SSM Parameter Store (Fargate task role) | Fargate | JWT signing |
 | Installation ID | ECS env override (Lambda) | Fargate | Token exchange |
-| OpenRouter API key | Fargate env var (CDK) | Fargate | LLM inference |
+| OpenRouter API key | SSM Parameter Store (Fargate exec role) | Fargate | LLM inference |
 
 ### Post-Deployment Secret Injection
 
 ```bash
 # setup-secrets.sh — run once after cdk deploy
-aws secretsmanager put-secret-value \
-  --secret-id renderpr/github-app \
-  --secret-string '{
+aws ssm put-parameter \
+  --name /renderpr/github-app \
+  --type SecureString \
+  --value '{
     "app_id": "123456",
     "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...",
     "webhook_secret": "your-webhook-secret"
-  }'
+  }' \
+  --overwrite
 ```
 
 ## State Boundaries & Security
@@ -230,5 +232,5 @@ aws secretsmanager put-secret-value \
 2. **Public subnets, no NAT Gateway** — The Fargate task only makes outbound calls (GitHub API, OpenRouter). Putting it in a public subnet with an egress-only security group avoids NAT Gateway costs (~$32/month).
 3. **OpenRouter as primary LLM gateway** — Provides access to multiple models through one API, simplifies provider abstraction for future expansion.
 4. **GitHub App tokens over PATs** — Short-lived (60 min), scoped per installation, generated at runtime. Aligns with BYOC zero-trust model.
-5. **Secrets Manager with post-deploy injection** — CDK creates the secret skeleton; the user fills it via a script. Avoids storing secrets in CloudFormation state.
+5. **SSM Parameter Store with post-deploy injection** — CDK creates SecureString parameters; the user fills them via `setup-secrets.sh`. Free tier, encrypted at rest, same IAM integration as Secrets Manager.
 6. **Playwright Router API for data mocking** — No backend needed. Fixtures live in the repo under `.renderpr/fixtures/`. Enables deterministic testing of loading, empty, error, and populated states.

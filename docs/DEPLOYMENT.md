@@ -46,7 +46,7 @@ Required IAM permissions for the deploying user:
 - ECS cluster + task definition creation
 - Lambda function creation
 - API Gateway creation
-- Secrets Manager write access
+- SSM Parameter Store write access
 - EC2 VPC + security group creation
 - ECR repository push
 
@@ -63,7 +63,7 @@ Create a GitHub App in your account or organization:
 5. Note the **App ID** (shown on the app's page)
 6. Install the app on your repository (or all repos)
 
-The webhook URL can be updated after deployment. The webhook secret and private key are injected into Secrets Manager after deploy.
+The webhook URL can be updated after deployment. The webhook secret and private key are injected into SSM Parameter Store after deploy.
 
 ### 3. Configure CDK Context
 
@@ -93,9 +93,20 @@ Edit `cdk/cdk.json` or pass context parameters at deploy time:
 | `idleTimeoutSeconds` | Max idle time before self-termination | `900` |
 | `pollIntervalSeconds` | GitHub comment poll interval | `10` |
 
-Note: `githubAppId` and `githubWebhookSecret` are not stored in CDK context. They are injected into Secrets Manager post-deploy.
+Note: `githubAppId` and `githubWebhookSecret` are not stored in CDK context. They are injected into SSM Parameter Store post-deploy.
 
-### 4. Deploy the CDK Stack
+### 4. Create SSM Parameters
+
+CloudFormation doesn't support `SecureString` parameters, so create them manually before deploying:
+
+```bash
+aws ssm put-parameter --name /renderpr/github-app --type SecureString --value '{}'
+aws ssm put-parameter --name /renderpr/openrouter --type SecureString --value "placeholder" --overwrite
+```
+
+These are placeholders. You'll fill in real values in step 5.
+
+### 5. Deploy the CDK Stack
 
 ```bash
 cd cdk
@@ -110,38 +121,33 @@ After deployment, the output shows:
 
 - **API Gateway URL** — use this as your GitHub App webhook URL
 - **ECS Cluster ARN**
-- **Secrets Manager Secret ARN**
+- **SSM Parameter Name** — `/renderpr/github-app` and `/renderpr/openrouter`
 
-### 5. Inject Secrets
+### 6. Inject Secrets
 
-Create `setup-secrets.sh` at the project root:
-
-```bash
-#!/bin/bash
-# Run once after cdk deploy
-aws secretsmanager put-secret-value \
-  --secret-id renderpr/github-app \
-  --secret-string '{
-    "app_id": "123456",
-    "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----",
-    "webhook_secret": "your-webhook-secret"
-  }'
-```
-
-Make it executable and run:
+Run the post-deploy script to fill the GitHub App credentials:
 
 ```bash
-chmod +x setup-secrets.sh
-./setup-secrets.sh
+./scripts/setup-secrets.sh
 ```
 
-This populates the placeholder secret created by CDK. The Fargate task role has read-only access to this secret.
+This uploads the GitHub App ID, private key, and webhook secret into the `/renderpr/github-app` parameter. The Fargate task role has read-only access.
 
-### 6. Update GitHub App Webhook URL
+For the OpenRouter API key, update its parameter:
+
+```bash
+aws ssm put-parameter \
+  --name /renderpr/openrouter \
+  --type SecureString \
+  --value "sk-or-v1-..." \
+  --overwrite
+```
+
+### 7. Update GitHub App Webhook URL
 
 Copy the API Gateway URL from the CDK output and set it as your GitHub App's Webhook URL in the GitHub App settings.
 
-### 7. Verify
+### 8. Verify
 
 1. Push a PR to a watched repository
 2. Comment `@renderpr review` on the PR
@@ -153,12 +159,12 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 
 | Variable | Source | Purpose |
 |----------|--------|---------|
-| `GITHUB_WEBHOOK_SECRET` | Secrets Manager | HMAC signature validation |
+| `GITHUB_WEBHOOK_SECRET` | SSM Parameter Store | HMAC signature validation |
 | `ECS_CLUSTER_ARN` | CDK (auto) | Target cluster for RunTask |
 | `ECS_TASK_DEFINITION_ARN` | CDK (auto) | Task definition for RunTask |
 | `SUBNET_IDS` | CDK (auto) | Target public subnets |
 | `SECURITY_GROUP_ID` | CDK (auto) | Security group for Fargate |
-| `SECRETS_ARN` | CDK (auto) | ARN of the Secrets Manager secret |
+| `GITHUB_PARAM_NAME` | CDK (auto) | SSM parameter name for GitHub App credentials |
 
 ### Fargate Container
 
@@ -167,8 +173,8 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 | `INSTALLATION_ID` | ECS env override (from Lambda) | GitHub installation ID |
 | `REPO_FULL_NAME` | ECS env override (from Lambda) | "owner/repo" |
 | `PR_NUMBER` | ECS env override (from Lambda) | PR to review |
-| `OPENROUTER_API_KEY` | CDK context (injected) | LLM inference |
-| `SECRETS_ARN` | CDK (auto) | Secrets Manager secret ARN |
+| `OPENROUTER_API_KEY` | SSM Parameter Store (via ECS secrets) | LLM inference |
+| `GITHUB_PARAM_NAME` | CDK (auto) | SSM parameter name for GitHub App credentials |
 | `AWS_REGION` | ECS task role | AWS region for SDK calls |
 | `IDLE_TIMEOUT` | CDK context | Seconds before auto-termination |
 | `POLL_INTERVAL` | CDK context | Seconds between poll cycles |
@@ -180,7 +186,7 @@ cd cdk
 npx cdk deploy
 ```
 
-CDK handles diffing and updating only changed resources. The Secrets Manager secret is preserved across updates.
+CDK handles diffing and updating only changed resources. SSM parameters are preserved across updates (set with `--overwrite`).
 
 ## Teardown
 
@@ -189,7 +195,7 @@ cd cdk
 npx cdk destroy
 ```
 
-This removes all AWS resources created by the stack. Secrets Manager secrets are deleted by default (enable deletion protection if needed).
+This removes all AWS resources created by the stack. SSM parameters are not deleted (they persist in the account).
 
 ## Troubleshooting
 
@@ -199,7 +205,7 @@ Increase the Lambda timeout in CDK context or verify the webhook payload format.
 ### Fargate task fails to start
 Check CloudWatch Logs for the task. Common causes:
 
-- Missing secrets in Secrets Manager (run `setup-secrets.sh`)
+- Missing SSM parameters (run `scripts/setup-secrets.sh`)
 - Invalid private key format (ensure newlines are `\n`)
 - ECR image not found (first deploy: wait for image push)
 
