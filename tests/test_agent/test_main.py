@@ -161,7 +161,8 @@ class TestCloneRepo:
                 token="ghs_fake-token",
             )
 
-        assert attempt[0] == 2
+        from src.agent.config import RETRY_MAX_ATTEMPTS
+        assert attempt[0] == RETRY_MAX_ATTEMPTS
 
 
 class TestStartDevServer:
@@ -196,9 +197,8 @@ class TestStartDevServer:
         _start_dev_server()
 
     def test_dev_server_timeout(self, monkeypatch: MonkeyPatch):
-        import src.agent.config as cfg
-        monkeypatch.setattr(cfg, "DEV_SERVER_START_TIMEOUT", 1)
-        monkeypatch.setattr(cfg, "DEV_SERVER_POLL_INTERVAL", 0.1)
+        monkeypatch.setattr("src.agent.main.DEV_SERVER_START_TIMEOUT", 1)
+        monkeypatch.setattr("src.agent.main.DEV_SERVER_POLL_INTERVAL", 0.1)
 
         monkeypatch.setattr("os.path.exists", lambda p: True)
         monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)

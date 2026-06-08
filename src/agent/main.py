@@ -1,12 +1,22 @@
 import json
 import os
 import logging
+import shutil
+import subprocess
 import sys
 import time
 
 import boto3
 import httpx
 import jwt
+
+from src.agent.config import (
+    DEV_SERVER_HOST,
+    DEV_SERVER_PORT,
+    DEV_SERVER_START_TIMEOUT,
+    DEV_SERVER_POLL_INTERVAL,
+    RETRY_MAX_ATTEMPTS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,32 +53,42 @@ REPO_DIR = "/app/repo"
 
 def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:
     clone_url = f"https://x-access-token:{token}@github.com/{repo_full_name}.git"
-    commands = [
-        ["git", "clone", clone_url, REPO_DIR],
-        ["git", "-C", REPO_DIR, "fetch", "origin", f"pull/{pr_number}/head:review-pr"],
-        ["git", "-C", REPO_DIR, "checkout", "review-pr"],
-    ]
 
-    import subprocess
+    shutil.rmtree(REPO_DIR, ignore_errors=True)
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            subprocess.run(
+                ["git", "clone", clone_url, REPO_DIR],
+                capture_output=True, text=True, check=True,
+            )
+            break
+        except Exception:
+            if attempt == RETRY_MAX_ATTEMPTS - 1:
+                logger.exception("git clone failed after %d attempts", RETRY_MAX_ATTEMPTS)
+                sys.exit(1)
+            shutil.rmtree(REPO_DIR, ignore_errors=True)
+            logger.warning("git clone failed (attempt %d/%d), retrying...", attempt + 1, RETRY_MAX_ATTEMPTS)
 
-    for cmd in commands:
-        for attempt in range(2):
+    for cmd_name, cmd in [
+        ("fetch", ["git", "-C", REPO_DIR, "fetch", "origin", f"pull/{pr_number}/head:review-pr"]),
+        ("checkout", ["git", "-C", REPO_DIR, "checkout", "review-pr"]),
+    ]:
+        for attempt in range(RETRY_MAX_ATTEMPTS):
             try:
                 subprocess.run(cmd, capture_output=True, text=True, check=True)
                 break
             except Exception:
-                if attempt == 1:
-                    logger.exception("Command failed after retry: %s", " ".join(cmd))
+                if attempt == RETRY_MAX_ATTEMPTS - 1:
+                    logger.exception("git %s failed after %d attempts", cmd_name, RETRY_MAX_ATTEMPTS)
                     sys.exit(1)
-                logger.warning("Command failed, retrying: %s", " ".join(cmd))
+                logger.warning("git %s failed (attempt %d/%d), retrying...", cmd_name, attempt + 1, RETRY_MAX_ATTEMPTS)
+
+
+_dev_server_proc: subprocess.Popen | None = None
 
 
 def _start_dev_server() -> None:
-    import os
-    import subprocess
-    import time
-
-    from src.agent.config import DEV_SERVER_START_TIMEOUT, DEV_SERVER_POLL_INTERVAL, DEV_SERVER_PORT, DEV_SERVER_HOST
+    global _dev_server_proc
 
     pkg_json = os.path.join(REPO_DIR, "package.json")
     if not os.path.exists(pkg_json):
@@ -88,7 +108,7 @@ def _start_dev_server() -> None:
         logger.exception("npm ci failed")
         sys.exit(1)
 
-    proc = subprocess.Popen(["npm", "run", "dev"], cwd=REPO_DIR)
+    _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=REPO_DIR)
 
     url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
     deadline = time.time() + DEV_SERVER_START_TIMEOUT
@@ -102,7 +122,8 @@ def _start_dev_server() -> None:
             time.sleep(DEV_SERVER_POLL_INTERVAL)
 
     logger.error("Dev server did not start within %ds", DEV_SERVER_START_TIMEOUT)
-    proc.kill()
+    if _dev_server_proc:
+        _dev_server_proc.kill()
     sys.exit(1)
 
 
@@ -118,7 +139,7 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
         "User-Agent": "RenderPR/1.0",
     }
 
-    for attempt in range(2):
+    for attempt in range(RETRY_MAX_ATTEMPTS):
         with httpx.Client() as client:
             resp = client.post(url, headers=headers)
 
@@ -126,14 +147,14 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
             return resp.json()["token"]
 
         logger.error(
-            "GitHub API error (attempt %d/2): %d %s",
-            attempt + 1, resp.status_code, resp.text,
+            "GitHub API error (attempt %d/%d): %d %s",
+            attempt + 1, RETRY_MAX_ATTEMPTS, resp.status_code, resp.text,
         )
 
         if 400 <= resp.status_code < 500:
             break
 
-        if attempt == 0:
+        if attempt < RETRY_MAX_ATTEMPTS - 1:
             time.sleep(3)
 
     sys.exit(1)
