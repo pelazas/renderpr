@@ -35,3 +35,5 @@ PLAYWRIGHT_TIMEOUT: int = 30000
 PLAYWRIGHT_NAVIGATION_TIMEOUT: int = 15000
 
 REPO_DIR: str = "/app/repo"
+LLM_MODEL: str = "google/gemini-2.5-flash"
+OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"

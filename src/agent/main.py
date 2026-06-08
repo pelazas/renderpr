@@ -222,6 +222,24 @@ def _capture_screenshots() -> list[Path]:
     return capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
 
 
+def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> None:
+    url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "RenderPR/1.0",
+    }
+
+    with httpx.Client() as client:
+        resp = client.post(url, headers=headers, json={"body": body})
+
+    if resp.status_code != 201:
+        logger.error("Failed to post comment: %d %s", resp.status_code, resp.text)
+        sys.exit(1)
+
+    logger.info("Review posted to PR #%s", pr_number)
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -263,6 +281,23 @@ def run() -> None:
         len(screenshot_paths),
         ", ".join(p.name for p in screenshot_paths),
     )
+
+    from src.agent.review import run_review
+
+    review_body = run_review(
+        diff=diff,
+        screenshot_paths=screenshot_paths,
+        openrouter_api_key=secrets["openrouter_api_key"],
+    )
+
+    _post_comment(
+        token=token,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+        body=review_body,
+    )
+
+    logger.info("RenderPR agent finished")
 
 
 if __name__ == "__main__":
