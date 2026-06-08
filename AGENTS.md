@@ -133,6 +133,15 @@ When a bug is reported:
 - Playwright screenshots must be captured at all defined viewport widths
 - No hardcoded timeouts — use the configurable constants in `src/agent/config.py`
 
+## Deployment (eu-west-1)
+
+| Output | Value |
+|--------|-------|
+| ApiGatewayUrl | `https://drdidhjxv8.execute-api.eu-west-1.amazonaws.com/` |
+| ClusterArn | `arn:aws:ecs:eu-west-1:303859149452:cluster/renderpr-cluster` |
+| GitHubParamName | `/renderpr/github-app` |
+| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:2` |
+
 ## Key Constraints
 
 - Fargate runs in **public subnets** with `assignPublicIp: true` and egress-only security groups. No NAT Gateway. Do not add private subnets without explicit approval.
