@@ -7,7 +7,7 @@ from pytest import MonkeyPatch
 from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _start_dev_server, run
 
 
-def _mock_all_deps(monkeypatch, caplog=None):
+def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
@@ -15,7 +15,10 @@ def _mock_all_deps(monkeypatch, caplog=None):
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: ([], []))
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
-    monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
+    if posted_body is not None:
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
+    else:
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
 
 
 def test_run_logs_env_vars(caplog, monkeypatch):
@@ -390,6 +393,47 @@ class TestParseDiffSummary:
 
         result = _parse_diff_summary("no diff content here")
         assert result == "(no file changes detected)"
+
+class TestPostComment:
+class TestBuildScreenshotGrid:
+    def test_empty_urls_returns_empty_string(self):
+        from src.agent.main import _build_screenshot_grid
+        assert _build_screenshot_grid([]) == ""
+
+    def test_returns_table_with_images(self):
+        from src.agent.main import _build_screenshot_grid
+        urls = [
+            "https://bucket.s3.amazonaws.com/mobile.png",
+            "https://bucket.s3.amazonaws.com/tablet.png",
+        ]
+        result = _build_screenshot_grid(urls)
+        assert "<table>" in result
+        assert "<img" in result
+        assert "mobile.png" in result
+        assert "tablet.png" in result
+
+    def test_run_includes_grid_when_urls_present(self, monkeypatch):
+        posted = []
+        _mock_all_deps(monkeypatch, posted_body=posted)
+        monkeypatch.setattr(
+            "src.agent.main._capture_screenshots",
+            lambda: ([], ["https://bucket.s3.amazonaws.com/mobile.png"]),
+        )
+
+        run()
+
+        assert len(posted) == 1
+        assert "<table>" in posted[0]
+        assert "bucket.s3.amazonaws.com" in posted[0]
+
+    def test_run_omits_grid_when_no_urls(self, monkeypatch):
+        posted = []
+        _mock_all_deps(monkeypatch, posted_body=posted)
+        run()
+
+        assert len(posted) == 1
+        assert "<table>" not in posted[0]
+
 
 class TestPostComment:
     def test_post_comment_success(self, monkeypatch):

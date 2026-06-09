@@ -231,6 +231,29 @@ def _capture_screenshots() -> tuple[list[Path], list[str]]:
     return paths, urls
 
 
+def _build_screenshot_grid(urls: list[str]) -> str:
+    if not urls:
+        return ""
+
+    labels = ["Mobile XS", "Tablet", "Desktop", "Desktop XL"]
+
+    rows: list[str] = []
+    for i in range(0, len(urls), 2):
+        cells = ""
+        for j in range(2):
+            idx = i + j
+            if idx < len(urls):
+                label = labels[idx] if idx < len(labels) else f"Viewport {idx + 1}"
+                cells += f'<td><img width="400" src="{urls[idx]}" alt="{label}"><br><em>{label}</em></td>'
+            else:
+                cells += "<td></td>"
+        rows.append(f"<tr>{cells}</tr>")
+
+    return f"""<table>{''.join(rows)}</table>
+
+---"""
+
+
 def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> None:
     url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
     headers = {
@@ -304,11 +327,14 @@ def run() -> None:
         logger.exception("Review failed")
         sys.exit(1)
 
+    grid = _build_screenshot_grid(_screenshot_urls)
+    comment_body = f"{grid}\n\n{review_body}" if grid else review_body
+
     _post_comment(
         token=token,
         repo_full_name=repo_full_name,
         pr_number=pr_number,
-        body=review_body,
+        body=comment_body,
     )
 
     logger.info("RenderPR agent finished")
