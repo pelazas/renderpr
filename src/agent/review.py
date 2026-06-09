@@ -35,10 +35,10 @@ When discussing a visual issue, reference the relevant screenshot by placing its
 "The button looks good on desktop [Desktop - /dashboard]"
 
 Rules for screenshot references:
-- Use `[Desktop - /route]` as your default screenshot. Only reference Mobile XS, Tablet, or Desktop XL if you have something specific to say about that viewport.
+- Show at least the Desktop screenshot for each changed route. Start each route's section with its screenshot.
+- Use `[Desktop - /route]` as your default. Only reference Mobile XS, Tablet, or Desktop XL if you have something specific to say about that viewport.
 - When you include an image reference, put a blank line before and after it. Each image reference should be on its own line.
-- Only reference screenshots that support your analysis. Don't list every screenshot.
-- If everything looks good, say so — don't fabricate issues.
+- If everything looks good, just say so with the screenshot — don't fabricate issues.
 
 Format your response as structured markdown with clear sections.
 Be concise but specific. Reference line numbers from the diff where relevant."""
@@ -47,16 +47,20 @@ Be concise but specific. Reference line numbers from the diff where relevant."""
 def _build_content(
     diff: str,
     screenshot_paths: list[Path],
+    screenshot_labels: list[str] | None = None,
 ) -> list[dict]:
     content: list[dict] = [
         {"type": "text", "text": f"## Code Diff\n\n```diff\n{diff}\n```"},
     ]
 
     if screenshot_paths:
-        label_list = ", ".join(_guess_viewport_label(p) for p in screenshot_paths)
-        content.append({"type": "text", "text": f"## Screenshots\n\nAvailable: {label_list}\n"})
-        for path in screenshot_paths:
-            label = _guess_viewport_label(path)
+        if screenshot_labels:
+            label_list = ", ".join(screenshot_labels)
+        else:
+            label_list = ", ".join(f"[{_guess_viewport_label(p)}]" for p in screenshot_paths)
+        content.append({"type": "text", "text": f"## Screenshots\n\nAvailable identifiers: {label_list}\n"})
+        for i, path in enumerate(screenshot_paths):
+            identifier = screenshot_labels[i] if screenshot_labels else _guess_viewport_label(path)
             try:
                 with open(path, "rb") as f:
                     b64 = base64.b64encode(f.read()).decode("utf-8")
@@ -65,7 +69,7 @@ def _build_content(
                 continue
             content.append({
                 "type": "text",
-                "text": f"### {label}\n",
+                "text": f"### {identifier}\n",
             })
             content.append({
                 "type": "image_url",
@@ -114,11 +118,13 @@ def run_review(
         "Content-Type": "application/json",
     }
 
+    screenshot_labels = [label for _, label in screenshot_urls] if screenshot_urls else None
+
     body = {
         "model": LLM_MODEL,
         "messages": [
             {"role": "system", "content": REVIEW_PROMPT},
-            {"role": "user", "content": _build_content(diff, screenshot_paths)},
+            {"role": "user", "content": _build_content(diff, screenshot_paths, screenshot_labels)},
         ],
     }
 
