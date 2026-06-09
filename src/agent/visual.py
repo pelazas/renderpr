@@ -3,11 +3,14 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Final
 
 import boto3
 from playwright.sync_api import sync_playwright
 
-from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, VIEWPORTS, VIEWPORT_LABELS
+
+VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +18,12 @@ logger = logging.getLogger(__name__)
 def capture_screenshots(
     dev_server_url: str,
     screenshot_dir: Path | None = None,
-) -> list[Path]:
+) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
 
     screenshot_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
+    results: list[tuple[Path, str]] = []
 
     try:
         with sync_playwright() as p:
@@ -45,7 +48,7 @@ def capture_screenshots(
                 try:
                     page.screenshot(path=str(filename), full_page=True)
                     logger.info("Screenshot saved: %s", filename)
-                    paths.append(filename)
+                    results.append((filename, label))
                 except Exception:
                     logger.warning("Screenshot failed for viewport %d", width, exc_info=True)
 
@@ -54,32 +57,38 @@ def capture_screenshots(
         logger.exception("Failed to initialize Playwright")
         sys.exit(1)
 
-    logger.info("Captured %d screenshots", len(paths))
-    return paths
+    logger.info("Captured %d screenshots", len(results))
+    return results
 
 
 def upload_screenshots(
     bucket: str,
     pr_number: str,
-    paths: list[Path],
-) -> list[str]:
+    pairs: list[tuple[Path, str]],
+) -> list[tuple[str, str]]:
     client = boto3.client("s3")
-    urls: list[str] = []
+    results: list[tuple[str, str]] = []
 
-    for path in paths:
+    for path, label in pairs:
         key = f"screenshots/{pr_number}/{uuid.uuid4().hex}.png"
-        try:
-            client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=path.read_bytes(),
-                ContentType="image/png",
-            )
-            url = f"https://{bucket}.s3.{client.meta.region_name}.amazonaws.com/{key}"
-            urls.append(url)
-            logger.info("Uploaded screenshot: %s", url)
-        except Exception:
-            logger.warning("Failed to upload screenshot %s", path, exc_info=True)
+        body = path.read_bytes()
+        for attempt in range(RETRY_MAX_ATTEMPTS):
+            try:
+                client.put_object(
+                    Bucket=bucket,
+                    Key=key,
+                    Body=body,
+                    ContentType="image/png",
+                )
+                url = f"https://{bucket}.s3.amazonaws.com/{key}"
+                results.append((url, label))
+                logger.info("Uploaded screenshot: %s (%s)", url, label)
+                break
+            except Exception:
+                if attempt == RETRY_MAX_ATTEMPTS - 1:
+                    logger.warning("Failed to upload screenshot %s after %d attempts", path, RETRY_MAX_ATTEMPTS, exc_info=True)
+                else:
+                    logger.warning("S3 upload attempt %d/%d failed for %s", attempt + 1, RETRY_MAX_ATTEMPTS, path)
 
-    logger.info("Uploaded %d/%d screenshots", len(urls), len(paths))
-    return urls
+    logger.info("Uploaded %d/%d screenshots", len(results), len(pairs))
+    return results

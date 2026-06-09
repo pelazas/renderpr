@@ -13,7 +13,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
-    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: ([], []))
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: ([], []))  # type: ignore[return-value]
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     if posted_body is not None:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
@@ -394,30 +394,43 @@ class TestParseDiffSummary:
         result = _parse_diff_summary("no diff content here")
         assert result == "(no file changes detected)"
 
-class TestPostComment:
 class TestBuildScreenshotGrid:
-    def test_empty_urls_returns_empty_string(self):
+    def test_empty_pairs_returns_empty_string(self):
         from src.agent.main import _build_screenshot_grid
         assert _build_screenshot_grid([]) == ""
 
     def test_returns_table_with_images(self):
         from src.agent.main import _build_screenshot_grid
-        urls = [
-            "https://bucket.s3.amazonaws.com/mobile.png",
-            "https://bucket.s3.amazonaws.com/tablet.png",
+        pairs = [
+            ("https://bucket.s3.amazonaws.com/mobile.png", "Mobile XS"),
+            ("https://bucket.s3.amazonaws.com/tablet.png", "Tablet"),
         ]
-        result = _build_screenshot_grid(urls)
+        result = _build_screenshot_grid(pairs)
         assert "<table>" in result
         assert "<img" in result
         assert "mobile.png" in result
         assert "tablet.png" in result
+        assert "Mobile XS" in result
+        assert "Tablet" in result
 
-    def test_run_includes_grid_when_urls_present(self, monkeypatch):
+    def test_4_urls_creates_2_rows(self):
+        from src.agent.main import _build_screenshot_grid
+        pairs = [
+            ("url1", "Mobile XS"),
+            ("url2", "Tablet"),
+            ("url3", "Desktop"),
+            ("url4", "Desktop XL"),
+        ]
+        result = _build_screenshot_grid(pairs)
+        assert result.count("<tr>") == 2
+        assert result.count("<td>") == 4
+
+    def test_run_includes_grid_when_pairs_present(self, monkeypatch):
         posted = []
         _mock_all_deps(monkeypatch, posted_body=posted)
         monkeypatch.setattr(
             "src.agent.main._capture_screenshots",
-            lambda: ([], ["https://bucket.s3.amazonaws.com/mobile.png"]),
+            lambda: ([], [("https://bucket.s3.amazonaws.com/mobile.png", "Mobile XS")]),
         )
 
         run()
@@ -426,7 +439,7 @@ class TestBuildScreenshotGrid:
         assert "<table>" in posted[0]
         assert "bucket.s3.amazonaws.com" in posted[0]
 
-    def test_run_omits_grid_when_no_urls(self, monkeypatch):
+    def test_run_omits_grid_when_no_pairs(self, monkeypatch):
         posted = []
         _mock_all_deps(monkeypatch, posted_body=posted)
         run()
