@@ -10,6 +10,7 @@ def mock_playwright(monkeypatch):
             self.viewport_size = None
             self.goto_url = None
             self.screenshot_path = None
+            self.actions_called: list[tuple] = []
 
         def set_viewport_size(self, size):
             self.viewport_size = size
@@ -20,6 +21,12 @@ def mock_playwright(monkeypatch):
         def screenshot(self, path, **kw):
             self.screenshot_path = path
             Path(path).touch()
+
+        def click(self, selector: str):
+            self.actions_called.append(("click", selector))
+
+        def wait_for_timeout(self, ms: int):
+            self.actions_called.append(("wait", ms))
 
     class MockContext:
         def new_page(self):
@@ -113,7 +120,7 @@ class TestCaptureScreenshots:
         labels = [label for _, label in result]
         assert all(" - /" in l or " - /dashboard" in l for l in labels)
 
-    def test_action_click_included_in_label(self, tmp_path):
+    def test_route_label_included(self, tmp_path):
         from src.agent.visual import capture_screenshots
 
         routes = [
@@ -128,6 +135,9 @@ class TestCaptureScreenshots:
 
         assert len(result) == 4
         assert all(" - /profile" in label for _, label in result)
+
+
+
 
 
 class TestUploadScreenshots:

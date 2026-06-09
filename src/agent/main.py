@@ -316,9 +316,9 @@ def run() -> None:
 
     screenshot_paths, screenshot_pairs = _capture_screenshots(diff, secrets)
     logger.info(
-        "Captured %d screenshots across %d file(s)",
+        "Captured %d screenshots: %s",
         len(screenshot_paths),
-        len(diff.splitlines()),
+        ", ".join(p.name for p in screenshot_paths),
     )
 
     from src.agent.review import ReviewError, run_review

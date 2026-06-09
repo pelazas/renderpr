@@ -82,7 +82,30 @@ def infer_routes(
         ],
     }
 
-    for attempt in range(RETRY_MAX_ATTEMPTS):
+def _validate_routes(routes: list[dict]) -> list[dict]:
+    valid: list[dict] = []
+    for r in routes:
+        if not isinstance(r.get("path"), str) or not r["path"].startswith("/"):
+            continue
+        actions = r.get("actions", [])
+        if not isinstance(actions, list):
+            actions = []
+        validated_actions: list[dict] = []
+        for a in actions:
+            if a.get("type") not in ("click", "wait"):
+                continue
+            if a["type"] == "click" and not isinstance(a.get("selector"), str):
+                continue
+            validated_actions.append(a)
+        valid.append({"path": r["path"], "reason": r.get("reason", ""), "actions": validated_actions})
+    return valid
+
+
+def infer_routes(
+    diff: str,
+    repo_tree: str,
+    openrouter_api_key: str,
+) -> list[dict]:
         with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
             resp = client.post(url, headers=headers, json=body)
 
@@ -91,11 +114,12 @@ def infer_routes(
             try:
                 raw = data["choices"][0]["message"]["content"]
                 parsed = json.loads(raw)
-                routes = parsed.get("routes", [])
+                raw_routes = parsed.get("routes", [])
+                routes = _validate_routes(raw_routes)
                 if routes:
                     logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])
                     return routes
-                logger.warning("LLM returned empty routes list, falling back to homepage")
+                logger.warning("LLM returned empty or invalid routes, falling back to homepage")
                 return _fallback_routes()
             except (KeyError, IndexError, json.JSONDecodeError, TypeError):
                 logger.warning("Failed to parse route inference response, falling back to homepage")

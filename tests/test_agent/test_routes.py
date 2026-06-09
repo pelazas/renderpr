@@ -111,6 +111,46 @@ class TestInferRoutes:
         assert result == [{"path": "/", "reason": "fallback", "actions": []}]
 
 
+class TestValidateRoutes:
+    def test_valid_routes_pass_through(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [
+            {"path": "/a", "reason": "r1", "actions": []},
+            {"path": "/b", "reason": "r2", "actions": [{"type": "click", "selector": "#x"}, {"type": "wait", "ms": 500}]},
+        ]
+
+        result = _validate_routes(routes)
+        assert len(result) == 2
+
+    def test_invalid_paths_are_filtered(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [
+            {"path": "", "reason": "empty"},
+            {"path": "not-a-path", "reason": "no-slash"},
+            {"path": 123, "reason": "not-string"},
+        ]
+
+        result = _validate_routes(routes)
+        assert result == []
+
+    def test_invalid_actions_are_filtered(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [
+            {"path": "/valid", "actions": [
+                {"type": "hover", "selector": "#x"},
+                {"type": "click"},
+                {"type": "wait"},
+            ]},
+        ]
+
+        result = _validate_routes(routes)
+        assert len(result) == 1
+        assert result[0]["actions"] == []
+
+
 class TestBuildRepoTree:
     def test_excludes_common_dirs(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Final
 
 import boto3
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, TimeoutError, sync_playwright
 
 from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, VIEWPORTS, VIEWPORT_LABELS
 
