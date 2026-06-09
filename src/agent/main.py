@@ -214,11 +214,21 @@ def _parse_diff_summary(diff: str) -> str:
     return ", ".join(file_stats) if file_stats else "(no file changes detected)"
 
 
-def _capture_screenshots() -> list[Path]:
-    from src.agent.visual import capture_screenshots
+def _capture_screenshots() -> tuple[list[Path], list[str]]:
+    from src.agent.visual import capture_screenshots, upload_screenshots
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    return capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
+    paths = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
+
+    bucket = os.environ.get("SCREENSHOT_BUCKET", "")
+    pr_number = os.environ.get("PR_NUMBER", "0")
+    if bucket:
+        urls = upload_screenshots(bucket, pr_number, paths)
+    else:
+        logger.warning("SCREENSHOT_BUCKET not set, skipping upload")
+        urls = []
+
+    return paths, urls
 
 
 def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> None:
@@ -275,7 +285,7 @@ def run() -> None:
     logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
     logger.info("Changes: %s", _parse_diff_summary(diff))
 
-    screenshot_paths = _capture_screenshots()
+    screenshot_paths, _screenshot_urls = _capture_screenshots()
     logger.info(
         "Captured %d screenshots: %s",
         len(screenshot_paths),
