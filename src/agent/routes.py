@@ -141,6 +141,19 @@ def _validate_routes(routes: list[dict]) -> list[dict]:
     return valid
 
 
+def _extract_json(text: str) -> dict | None:
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return None
+        return None
+
+
 def infer_routes(
     diff: str,
     repo_tree: str,
@@ -186,7 +199,11 @@ def infer_routes(
             data = resp.json()
             try:
                 raw = data["choices"][0]["message"]["content"]
-                parsed = json.loads(raw)
+                logger.info("Raw route inference response: %s", raw[:500])
+                parsed = _extract_json(raw)
+                if parsed is None:
+                    logger.warning("Could not extract JSON from route inference response, falling back to homepage")
+                    return _fallback_routes()
                 raw_routes = parsed.get("routes", [])
                 routes = _validate_routes(raw_routes)
                 if routes:
@@ -194,8 +211,8 @@ def infer_routes(
                     return routes
                 logger.warning("LLM returned empty or invalid routes, falling back to homepage")
                 return _fallback_routes()
-            except (KeyError, IndexError, json.JSONDecodeError, TypeError):
-                logger.warning("Failed to parse route inference response, falling back to homepage")
+            except (KeyError, IndexError, TypeError):
+                logger.warning("Unexpected OpenRouter response shape, falling back to homepage")
                 return _fallback_routes()
 
         logger.error(
