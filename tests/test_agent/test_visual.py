@@ -10,6 +10,7 @@ def mock_playwright(monkeypatch):
             self.viewport_size = None
             self.goto_url = None
             self.screenshot_path = None
+            self.actions_called: list[tuple] = []
 
         def set_viewport_size(self, size):
             self.viewport_size = size
@@ -20,6 +21,12 @@ def mock_playwright(monkeypatch):
         def screenshot(self, path, **kw):
             self.screenshot_path = path
             Path(path).touch()
+
+        def click(self, selector: str):
+            self.actions_called.append(("click", selector))
+
+        def wait_for_timeout(self, ms: int):
+            self.actions_called.append(("wait", ms))
 
     class MockContext:
         def new_page(self):
@@ -52,7 +59,7 @@ def mock_playwright(monkeypatch):
 
 
 class TestCaptureScreenshots:
-    def test_returns_list_of_path_label_pairs(self, tmp_path):
+    def test_returns_screenshots_for_default_route(self, tmp_path):
         from src.agent.visual import capture_screenshots
 
         result = capture_screenshots(
@@ -65,6 +72,7 @@ class TestCaptureScreenshots:
             assert isinstance(path, Path)
             assert isinstance(label, str)
             assert path.exists()
+            assert " - /" in label
 
     def test_screenshot_directory_created(self, tmp_path):
         from src.agent.visual import capture_screenshots
@@ -89,10 +97,47 @@ class TestCaptureScreenshots:
         )
 
         labels = [label for _, label in result]
-        assert "Mobile XS" in labels
-        assert "Tablet" in labels
-        assert "Desktop" in labels
-        assert "Desktop XL" in labels
+        assert any("Mobile XS" in l for l in labels)
+        assert any("Tablet" in l for l in labels)
+        assert any("Desktop" in l for l in labels)
+        assert any("Desktop XL" in l for l in labels)
+
+    def test_multiple_routes_captured(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        routes = [
+            {"path": "/", "actions": [], "reason": "home"},
+            {"path": "/dashboard", "actions": [{"type": "wait", "ms": 500}], "reason": "test"},
+        ]
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=routes,
+        )
+
+        assert len(result) == 8
+        labels = [label for _, label in result]
+        assert all(" - /" in l or " - /dashboard" in l for l in labels)
+
+    def test_route_label_included(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        routes = [
+            {"path": "/profile", "actions": [], "reason": "test"},
+        ]
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=routes,
+        )
+
+        assert len(result) == 4
+        assert all(" - /profile" in label for _, label in result)
+
+
+
 
 
 class TestUploadScreenshots:

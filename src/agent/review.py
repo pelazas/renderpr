@@ -30,18 +30,28 @@ Analyze:
 3. **Accessibility** — WCAG violations visible in screenshots?
 4. **Usability** — UX concerns?
 
+Available screenshots are listed with identifiers like `[viewport - /route]`.
+When discussing a visual issue, reference the relevant screenshot by placing its identifier inline, e.g.:
+"I noticed the button is misaligned on mobile [Mobile XS - /dashboard]"
+
+Only reference screenshots that support your analysis. Don't list every screenshot.
+If everything looks good, say so — don't fabricate issues.
+
 Format your response as structured markdown with clear sections.
-Be concise but specific. Reference line numbers from the diff where relevant.
-If everything looks good, say so — don't fabricate issues."""
+Be concise but specific. Reference line numbers from the diff where relevant."""
 
 
-def _build_content(diff: str, screenshot_paths: list[Path]) -> list[dict]:
+def _build_content(
+    diff: str,
+    screenshot_paths: list[Path],
+) -> list[dict]:
     content: list[dict] = [
         {"type": "text", "text": f"## Code Diff\n\n```diff\n{diff}\n```"},
     ]
 
     if screenshot_paths:
-        content.append({"type": "text", "text": "## Screenshots\n"})
+        label_list = ", ".join(_guess_viewport_label(p) for p in screenshot_paths)
+        content.append({"type": "text", "text": f"## Screenshots\n\nAvailable: {label_list}\n"})
         for path in screenshot_paths:
             label = _guess_viewport_label(path)
             try:
@@ -70,10 +80,30 @@ def _guess_viewport_label(path: Path) -> str:
     return f"Screenshot: {name}"
 
 
+def _inline_references(text: str, url_pairs: list[tuple[str, str]]) -> str:
+    import re
+
+    ref_to_url: dict[str, str] = {}
+    for url, label in url_pairs:
+        ref_to_url[f"[{label}]"] = url
+
+    pattern = r"\[[^\]]+\]"
+
+    def replace_ref(match: re.Match) -> str:
+        ref = match.group(0)
+        url = ref_to_url.get(ref)
+        if url:
+            return f'<img width="400" src="{url}" alt="{ref.strip("[]")}">'
+        return ref
+
+    return re.sub(pattern, replace_ref, text)
+
+
 def run_review(
     diff: str,
     screenshot_paths: list[Path],
     openrouter_api_key: str,
+    screenshot_urls: list[tuple[str, str]] | None = None,
 ) -> str:
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
     headers = {
@@ -96,7 +126,10 @@ def run_review(
         if resp.status_code == 200:
             data = resp.json()
             try:
-                return data["choices"][0]["message"]["content"]
+                text = data["choices"][0]["message"]["content"]
+                if screenshot_urls:
+                    text = _inline_references(text, screenshot_urls)
+                return text
             except (KeyError, IndexError, TypeError):
                 raise ReviewError(f"Unexpected OpenRouter response shape: {str(data)[:200]}")
 
