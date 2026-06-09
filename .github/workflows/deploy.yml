@@ -30,10 +30,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Log into ECR
-        run: |
-          aws ecr get-login-password --region eu-west-1 | \
-            docker login --username AWS --password-stdin \
-            303859149452.dkr.ecr.eu-west-1.amazonaws.com
+        uses: aws-actions/amazon-ecr-login@v1
 
       - name: Install dependencies
         run: npm ci
