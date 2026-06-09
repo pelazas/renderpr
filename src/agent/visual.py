@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Final
 
 import boto3
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Page, sync_playwright
 
 from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, VIEWPORTS, VIEWPORT_LABELS
 
@@ -15,9 +15,56 @@ VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 logger = logging.getLogger(__name__)
 
 
+def _screenshot_route(
+    page: "Page",
+    base_url: str,
+    route: dict,
+    screenshot_dir: Path,
+) -> list[tuple[Path, str]]:
+    results: list[tuple[Path, str]] = []
+    path = route["path"]
+    actions = route.get("actions", [])
+    url = f"{base_url.rstrip('/')}{path}"
+    route_slug = path.strip("/").replace("/", "-") or "home"
+
+    for vp in VIEWPORTS:
+        width = vp["width"]
+        page.set_viewport_size({"width": width, "height": vp["height"]})
+
+        try:
+            page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+        except TimeoutError:
+            logger.warning("Navigation timeout for %s at viewport %d, skipping", path, width)
+            continue
+
+        for action in actions:
+            try:
+                if action["type"] == "click":
+                    page.click(action["selector"])
+                elif action["type"] == "wait":
+                    page.wait_for_timeout(action.get("ms", 1000))
+            except Exception:
+                logger.warning("Action %s failed for %s", action.get("type"), path, exc_info=True)
+
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
+        label = f"{vp_label} - {path}"
+        filename = screenshot_dir / f"{vp_label}-{route_slug}-{timestamp}.png"
+
+        try:
+            page.screenshot(path=str(filename), full_page=True)
+            logger.info("Screenshot saved: %s", filename)
+            results.append((filename, label))
+        except Exception:
+            logger.warning("Screenshot failed for %s at viewport %d", path, width, exc_info=True)
+
+    return results
+
+
 def capture_screenshots(
     dev_server_url: str,
     screenshot_dir: Path | None = None,
+    routes: list[dict] | None = None,
 ) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -25,39 +72,25 @@ def capture_screenshots(
     screenshot_dir.mkdir(parents=True, exist_ok=True)
     results: list[tuple[Path, str]] = []
 
+    if not routes:
+        routes = [{"path": "/", "actions": [], "reason": "default"}]
+
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             context = browser.new_context()
             page = context.new_page()
 
-            for vp in VIEWPORTS:
-                width = vp["width"]
-                page.set_viewport_size({"width": width, "height": vp["height"]})
-
-                try:
-                    page.goto(dev_server_url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
-                except TimeoutError:
-                    logger.warning("Navigation timeout for viewport %d, skipping", width)
-                    continue
-
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-                label = VIEWPORT_LABELS.get(width, f"{width}w")
-                filename = screenshot_dir / f"{label}-{timestamp}.png"
-
-                try:
-                    page.screenshot(path=str(filename), full_page=True)
-                    logger.info("Screenshot saved: %s", filename)
-                    results.append((filename, label))
-                except Exception:
-                    logger.warning("Screenshot failed for viewport %d", width, exc_info=True)
+            for route in routes:
+                route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
+                results.extend(route_results)
 
             browser.close()
     except Exception:
         logger.exception("Failed to initialize Playwright")
         sys.exit(1)
 
-    logger.info("Captured %d screenshots", len(results))
+    logger.info("Captured %d screenshots across %d route(s)", len(results), len(routes))
     return results
 
 

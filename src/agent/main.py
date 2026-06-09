@@ -214,11 +214,19 @@ def _parse_diff_summary(diff: str) -> str:
     return ", ".join(file_stats) if file_stats else "(no file changes detected)"
 
 
-def _capture_screenshots() -> tuple[list[Path], list[tuple[str, str]]]:
+def _capture_screenshots(
+    diff: str,
+    secrets: dict,
+) -> tuple[list[Path], list[tuple[str, str]]]:
+    from src.agent.routes import build_repo_tree, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
+    repo_tree = build_repo_tree()
+    routes = infer_routes(diff, repo_tree, secrets["openrouter_api_key"])
+    logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
+
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
+    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes)
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     pr_number = os.environ.get("PR_NUMBER", "0")
@@ -306,11 +314,11 @@ def run() -> None:
     logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
     logger.info("Changes: %s", _parse_diff_summary(diff))
 
-    screenshot_paths, screenshot_pairs = _capture_screenshots()
+    screenshot_paths, screenshot_pairs = _capture_screenshots(diff, secrets)
     logger.info(
-        "Captured %d screenshots: %s",
+        "Captured %d screenshots across %d file(s)",
         len(screenshot_paths),
-        ", ".join(p.name for p in screenshot_paths),
+        len(diff.splitlines()),
     )
 
     from src.agent.review import ReviewError, run_review
