@@ -214,21 +214,42 @@ def _parse_diff_summary(diff: str) -> str:
     return ", ".join(file_stats) if file_stats else "(no file changes detected)"
 
 
-def _capture_screenshots() -> tuple[list[Path], list[str]]:
+def _capture_screenshots() -> tuple[list[Path], list[tuple[str, str]]]:
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    paths = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
+    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir)
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     pr_number = os.environ.get("PR_NUMBER", "0")
     if bucket:
-        urls = upload_screenshots(bucket, pr_number, paths)
+        pairs = upload_screenshots(bucket, pr_number, results)
     else:
         logger.warning("SCREENSHOT_BUCKET not set, skipping upload")
-        urls = []
+        pairs = []
 
-    return paths, urls
+    return [p for p, _ in results], pairs
+
+
+def _build_screenshot_grid(pairs: list[tuple[str, str]]) -> str:
+    if not pairs:
+        return ""
+
+    rows: list[str] = []
+    for i in range(0, len(pairs), 2):
+        cells = ""
+        for j in range(2):
+            idx = i + j
+            if idx < len(pairs):
+                url, label = pairs[idx]
+                cells += f'<td><img width="400" src="{url}" alt="{label}"><br><em>{label}</em></td>'
+            else:
+                cells += "<td></td>"
+        rows.append(f"<tr>{cells}</tr>")
+
+    return f"""<table>{''.join(rows)}</table>
+
+---"""
 
 
 def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> None:
@@ -285,7 +306,7 @@ def run() -> None:
     logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
     logger.info("Changes: %s", _parse_diff_summary(diff))
 
-    screenshot_paths, _screenshot_urls = _capture_screenshots()
+    screenshot_paths, screenshot_pairs = _capture_screenshots()
     logger.info(
         "Captured %d screenshots: %s",
         len(screenshot_paths),
@@ -304,11 +325,14 @@ def run() -> None:
         logger.exception("Review failed")
         sys.exit(1)
 
+    grid = _build_screenshot_grid(screenshot_pairs)
+    comment_body = f"{grid}\n\n{review_body}" if grid else review_body
+
     _post_comment(
         token=token,
         repo_full_name=repo_full_name,
         pr_number=pr_number,
-        body=review_body,
+        body=comment_body,
     )
 
     logger.info("RenderPR agent finished")
