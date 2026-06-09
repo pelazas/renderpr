@@ -1,7 +1,9 @@
 import json
 import logging
+import re
 import time
 from pathlib import Path
+from typing import Final
 
 import httpx
 
@@ -18,14 +20,15 @@ from src.agent.config import (
 
 logger = logging.getLogger(__name__)
 
-ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, and the project file tree,
+ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, their reverse dependencies (files that import the changed files), and the project file tree,
 identify which routes are affected by this change and what interactions are needed to surface the changes visually.
 
 Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- If interactions are needed (click to open modal/dropdown), use the full file content to find the right selector
+- If interactions are needed (click to open modal/dropdown), use the file contents and reverse dependencies to trace the full chain: trigger button -> state -> rendered component
+- Reverse dependencies are files that import the changed files — use them to find buttons, state hooks, and event handlers
 - For clicking buttons by their visible text, use Playwright's `:has-text()` pseudo-selector (e.g., `"button:has-text('Open Modal')"`)
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
@@ -41,6 +44,41 @@ If no interaction needed, actions should be an empty list."""
 
 class RouteInferenceError(Exception):
     pass
+
+
+EXCLUDED_DIRS: Final[set[str]] = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist", "build", ".cache"}
+SOURCE_EXTENSIONS: Final[tuple[str, ...]] = (".ts", ".tsx", ".js", ".jsx")
+
+_MAX_REVERSE_DEPS: Final[int] = 5
+
+
+def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
+    repo_path = Path(REPO_DIR)
+    if not repo_path.exists():
+        logger.warning("Repo directory %s does not exist for import scanning", REPO_DIR)
+        return []
+
+    patterns = [re.compile(rf"""["'][^"']*{re.escape(s)}["']""") for s in stems]
+
+    importers: list[str] = []
+    for f in repo_path.rglob("*"):
+        if any(part in EXCLUDED_DIRS for part in f.relative_to(repo_path).parts):
+            continue
+        if f.suffix not in SOURCE_EXTENSIONS:
+            continue
+        rel = str(f.relative_to(repo_path))
+        if rel in exclude_paths:
+            continue
+        try:
+            content = f.read_text(errors="replace")
+            for p in patterns:
+                if p.search(content):
+                    importers.append(rel)
+                    break
+        except OSError:
+            continue
+
+    return importers[:_MAX_REVERSE_DEPS]
 
 
 def _get_changed_files(diff: str) -> list[str]:
@@ -116,11 +154,21 @@ def infer_routes(
 
     changed_files = _get_changed_files(diff)
     file_contents = _read_full_files(changed_files)
-    files_section = "\n".join(
-        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
-    ) if file_contents else "(no file contents available)"
 
-    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{files_section}"
+    stems = [Path(fp).stem for fp in changed_files]
+    exclude_paths = set(changed_files)
+    reverse_dep_paths = _find_importers(stems, exclude_paths)
+    reverse_contents = _read_full_files(reverse_dep_paths)
+
+    changed_section = "\n".join(
+        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
+    ) if file_contents else "(none)"
+
+    reverse_section = "\n".join(
+        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in reverse_contents.items()
+    ) if reverse_contents else "(none detected)"
+
+    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{changed_section}\n\n## Reverse Dependencies (files that import changed files)\n\n{reverse_section}"
 
     body = {
         "model": LLM_MODEL,
