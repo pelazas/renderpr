@@ -32,10 +32,13 @@ Analyze:
 
 Available screenshots are listed with identifiers like `[viewport - /route]`.
 When discussing a visual issue, reference the relevant screenshot by placing its identifier inline, e.g.:
-"I noticed the button is misaligned on mobile [Mobile XS - /dashboard]"
+"The button looks good on desktop [Desktop - /dashboard]"
 
-Only reference screenshots that support your analysis. Don't list every screenshot.
-If everything looks good, say so — don't fabricate issues.
+Rules for screenshot references:
+- Use `[Desktop - /route]` as your default screenshot. Only reference Mobile XS, Tablet, or Desktop XL if you have something specific to say about that viewport.
+- When you include an image reference, put a blank line before and after it. Each image reference should be on its own line.
+- Only reference screenshots that support your analysis. Don't list every screenshot.
+- If everything looks good, say so — don't fabricate issues.
 
 Format your response as structured markdown with clear sections.
 Be concise but specific. Reference line numbers from the diff where relevant."""
@@ -93,7 +96,7 @@ def _inline_references(text: str, url_pairs: list[tuple[str, str]]) -> str:
         ref = match.group(0)
         url = ref_to_url.get(ref)
         if url:
-            return f'<img width="400" src="{url}" alt="{ref.strip("[]")}">'
+            return f'\n\n<img width="400" src="{url}" alt="{ref.strip("[]")}">\n\n'
         return ref
 
     return re.sub(pattern, replace_ref, text)
