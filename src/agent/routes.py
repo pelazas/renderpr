@@ -1,7 +1,9 @@
 import json
 import logging
+import re
 import time
 from pathlib import Path
+from typing import Final
 
 import httpx
 
@@ -18,14 +20,15 @@ from src.agent.config import (
 
 logger = logging.getLogger(__name__)
 
-ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, and the project file tree,
+ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, their reverse dependencies (files that import the changed files), and the project file tree,
 identify which routes are affected by this change and what interactions are needed to surface the changes visually.
 
 Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- If interactions are needed (click to open modal/dropdown), use the full file content to find the right selector
+- If interactions are needed (click to open modal/dropdown), use the file contents and reverse dependencies to trace the full chain: trigger button -> state -> rendered component
+- Reverse dependencies are files that import the changed files — use them to find buttons, state hooks, and event handlers
 - For clicking buttons by their visible text, use Playwright's `:has-text()` pseudo-selector (e.g., `"button:has-text('Open Modal')"`)
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
@@ -41,6 +44,32 @@ If no interaction needed, actions should be an empty list."""
 
 class RouteInferenceError(Exception):
     pass
+
+
+EXCLUDED_DIRS: Final[set[str]] = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist", "build", ".cache"}
+SOURCE_EXTENSIONS: Final[tuple[str, ...]] = (".ts", ".tsx", ".js", ".jsx")
+
+_MAX_REVERSE_DEPS: Final[int] = 5
+
+
+def _find_importers(file_path: str) -> list[str]:
+    stem = Path(file_path).stem
+    repo_path = Path(REPO_DIR)
+
+    importers: list[str] = []
+    for f in repo_path.rglob("*"):
+        if any(part in EXCLUDED_DIRS for part in f.relative_to(repo_path).parts):
+            continue
+        if f.suffix not in SOURCE_EXTENSIONS or str(f.relative_to(repo_path)) == file_path:
+            continue
+        try:
+            content = f.read_text(errors="replace")
+            if re.search(rf'(?:from|import)\s.*["\']\./.*{stem}|["\'].*{stem}["\']', content):
+                importers.append(str(f.relative_to(repo_path)))
+        except OSError:
+            continue
+
+    return importers[:_MAX_REVERSE_DEPS]
 
 
 def _get_changed_files(diff: str) -> list[str]:
@@ -116,11 +145,23 @@ def infer_routes(
 
     changed_files = _get_changed_files(diff)
     file_contents = _read_full_files(changed_files)
-    files_section = "\n".join(
-        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
-    ) if file_contents else "(no file contents available)"
 
-    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{files_section}"
+    reverse_dep_paths: list[str] = []
+    for fp in changed_files:
+        reverse_dep_paths.extend(_find_importers(fp))
+
+    reverse_dep_paths = list(dict.fromkeys(reverse_dep_paths))
+    reverse_contents = _read_full_files(reverse_dep_paths)
+
+    changed_section = "\n".join(
+        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
+    ) if file_contents else "(none)"
+
+    reverse_section = "\n".join(
+        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in reverse_contents.items()
+    ) if reverse_contents else "(none detected)"
+
+    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{changed_section}\n\n## Reverse Dependencies (files that import changed files)\n\n{reverse_section}"
 
     body = {
         "model": LLM_MODEL,

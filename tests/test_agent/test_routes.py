@@ -195,3 +195,42 @@ diff --git a/src/app/users/page.tsx b/src/app/users/page.tsx
     def test_empty_diff_returns_empty(self):
         from src.agent.routes import _get_changed_files
         assert _get_changed_files("") == []
+
+
+class TestFindImporters:
+    def test_finds_files_that_import_the_stem(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "components" / "Modal.tsx").parent.mkdir(parents=True)
+        (tmp_path / "components" / "Modal.tsx").write_text("export const Modal = () => <div />;")
+        (tmp_path / "app" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "page.tsx").write_text("import { Modal } from '../components/Modal';\n// page content")
+        (tmp_path / "app" / "other.tsx").write_text("no import here")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers("components/Modal.tsx")
+        assert "app/page.tsx" in result
+        assert "app/other.tsx" not in result
+
+    def test_excludes_self(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "Modal.tsx").write_text("export {}\n")
+        from src.agent.routes import _find_importers
+
+        result = _find_importers("Modal.tsx")
+        assert "Modal.tsx" not in result
+
+    def test_respects_max_limit(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.routes._MAX_REVERSE_DEPS", 2)
+
+        (tmp_path / "target.tsx").write_text("export const x = 1;")
+        for i in range(5):
+            (tmp_path / f"importer{i}.tsx").write_text(f"import x from './target';")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers("target.tsx")
+        assert len(result) <= 2
