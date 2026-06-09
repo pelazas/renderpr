@@ -190,7 +190,14 @@ export class RenderprStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["ecs:RunTask", "ecs:DescribeTasks"],
         resources: [
-          taskDef.taskDefinitionArn,
+          cdk.Arn.format(
+            {
+              service: "ecs",
+              resource: "task-definition",
+              resourceName: `${taskDef.family}/*`,
+            },
+            this,
+          ),
           cluster.clusterArn,
           cdk.Arn.format(
             {
