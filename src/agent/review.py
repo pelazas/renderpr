@@ -1,5 +1,6 @@
 import base64
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -40,7 +41,8 @@ Rules for screenshot references:
 - When you include an image reference, put a blank line before and after it. Each image reference should be on its own line.
 - If everything looks good, just say so with the screenshot — don't fabricate issues.
 
-Format your response as structured markdown with clear sections.
+Format your response as plain markdown with clear sections.
+Do NOT wrap your response in a code block or fence.
 Be concise but specific. Reference line numbers from the diff where relevant."""
 
 
@@ -85,6 +87,12 @@ def _guess_viewport_label(path: Path) -> str:
         if label in name:
             return f"Viewport: {label}"
     return f"Screenshot: {name}"
+
+
+def _strip_code_fence(text: str) -> str:
+    text = re.sub(r"^```\w*", "", text)
+    text = re.sub(r"```$", "", text)
+    return text.strip()
 
 
 def _inline_references(text: str, url_pairs: list[tuple[str, str]]) -> str:
@@ -136,6 +144,7 @@ def run_review(
             data = resp.json()
             try:
                 text = data["choices"][0]["message"]["content"]
+                text = _strip_code_fence(text)
                 if screenshot_urls:
                     text = _inline_references(text, screenshot_urls)
                 return text

@@ -255,3 +255,23 @@ class TestFindImporters:
 
         result = _find_importers(["Modal"], set())
         assert result == []
+
+
+class TestExtractJson:
+    def test_plain_json(self):
+        from src.agent.routes import _extract_json
+        assert _extract_json('{"routes": []}') == {"routes": []}
+
+    def test_extracts_from_markdown_fence(self):
+        from src.agent.routes import _extract_json
+        result = _extract_json("```json\n{\"routes\": []}\n```")
+        assert result == {"routes": []}
+
+    def test_extracts_from_surrounding_text(self):
+        from src.agent.routes import _extract_json
+        result = _extract_json("Here is the result: {\"routes\": [{\"path\": \"/\"}]}.")
+        assert result == {"routes": [{"path": "/"}]}
+
+    def test_returns_none_for_invalid(self):
+        from src.agent.routes import _extract_json
+        assert _extract_json("not json at all") is None
