@@ -108,7 +108,7 @@ def test_missing_signature_header_returns_401():
     assert result["statusCode"] == 401
 
 
-def test_issue_comment_ignored():
+def test_issue_comment_with_renderpr_triggers():
     from src.lambda_handler.webhook_handler import handler
 
     body = json.dumps(
@@ -117,7 +117,33 @@ def test_issue_comment_ignored():
             "installation": {"id": 456},
             "repository": {"full_name": "owner/repo"},
             "issue": {"number": 77, "pull_request": {}},
-            "comment": {"body": "@renderpr review this"},
+            "comment": {"body": "@renderpr review the changes"},
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+    data = json.loads(result["body"])
+    assert data["ok"] is True
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    tasks = ecs.list_tasks(cluster=CLUSTER_ARN)
+    assert len(tasks["taskArns"]) > 0
+
+
+def test_issue_comment_without_renderpr_ignored():
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "action": "created",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "issue": {"number": 77, "pull_request": {}},
+            "comment": {"body": "just a regular comment"},
         }
     )
     event = {

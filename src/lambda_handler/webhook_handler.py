@@ -52,7 +52,11 @@ def handler(event: dict, context: object) -> dict:
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON"})}
 
     action = body.get("action", "")
-    if action not in ("opened", "synchronize"):
+    comment_body = body.get("comment", {}).get("body", "")
+
+    if action == "created" and "@renderpr" in comment_body:
+        logger.info("Triggering on @renderpr comment")
+    elif action not in ("opened", "synchronize"):
         logger.info("Ignoring non-trigger action: %s", action)
         return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
 
