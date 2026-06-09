@@ -425,27 +425,13 @@ class TestBuildScreenshotGrid:
         assert result.count("<tr>") == 2
         assert result.count("<td>") == 4
 
-    def test_run_includes_grid_when_pairs_present(self, monkeypatch):
-        posted = []
-        _mock_all_deps(monkeypatch, posted_body=posted)
-        monkeypatch.setattr(
-            "src.agent.main._capture_screenshots",
-            lambda *a, **kw: ([], [("https://bucket.s3.amazonaws.com/mobile.png", "Mobile XS")]),
-        )
-
-        run()
-
-        assert len(posted) == 1
-        assert "<table>" in posted[0]
-        assert "bucket.s3.amazonaws.com" in posted[0]
-
-    def test_run_omits_grid_when_no_pairs(self, monkeypatch):
+    def test_run_posts_review_directly(self, monkeypatch):
         posted = []
         _mock_all_deps(monkeypatch, posted_body=posted)
         run()
 
         assert len(posted) == 1
-        assert "<table>" not in posted[0]
+        assert "## Review" in posted[0]
 
 
 class TestPostComment:

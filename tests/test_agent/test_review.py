@@ -217,3 +217,28 @@ def test_run_review_empty_screenshots(tmp_path, mock_httpx_client):
     )
 
     assert "No screenshots." in result
+
+
+class TestInlineReferences:
+    def test_replaces_known_reference(self):
+        from src.agent.review import _inline_references
+
+        text = "The button is broken [Mobile XS - /dashboard]"
+        urls = [("https://s3.url/img.png", "Mobile XS - /dashboard")]
+        result = _inline_references(text, urls)
+        assert '<img' in result
+        assert 's3.url/img.png' in result
+
+    def test_skips_unknown_reference(self):
+        from src.agent.review import _inline_references
+
+        text = "See [Desktop - /settings]"
+        result = _inline_references(text, [])
+        assert result == text
+
+    def test_no_references_unchanged(self):
+        from src.agent.review import _inline_references
+
+        text = "No screenshots needed here."
+        result = _inline_references(text, [("url", "Mobile XS - /")])
+        assert result == text

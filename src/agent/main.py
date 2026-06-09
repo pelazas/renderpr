@@ -314,7 +314,7 @@ def run() -> None:
     logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
     logger.info("Changes: %s", _parse_diff_summary(diff))
 
-    screenshot_paths, screenshot_pairs = _capture_screenshots(diff, secrets)
+    screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
     logger.info(
         "Captured %d screenshots: %s",
         len(screenshot_paths),
@@ -328,19 +328,17 @@ def run() -> None:
             diff=diff,
             screenshot_paths=screenshot_paths,
             openrouter_api_key=secrets["openrouter_api_key"],
+            screenshot_urls=screenshot_urls,
         )
     except ReviewError:
         logger.exception("Review failed")
         sys.exit(1)
 
-    grid = _build_screenshot_grid(screenshot_pairs)
-    comment_body = f"{grid}\n\n{review_body}" if grid else review_body
-
     _post_comment(
         token=token,
         repo_full_name=repo_full_name,
         pr_number=pr_number,
-        body=comment_body,
+        body=review_body,
     )
 
     logger.info("RenderPR agent finished")
