@@ -1,8 +1,10 @@
 import logging
 import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import boto3
 from playwright.sync_api import sync_playwright
 
 from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, VIEWPORTS, VIEWPORT_LABELS
@@ -54,3 +56,30 @@ def capture_screenshots(
 
     logger.info("Captured %d screenshots", len(paths))
     return paths
+
+
+def upload_screenshots(
+    bucket: str,
+    pr_number: str,
+    paths: list[Path],
+) -> list[str]:
+    client = boto3.client("s3")
+    urls: list[str] = []
+
+    for path in paths:
+        key = f"screenshots/{pr_number}/{uuid.uuid4().hex}.png"
+        try:
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=path.read_bytes(),
+                ContentType="image/png",
+            )
+            url = f"https://{bucket}.s3.{client.meta.region_name}.amazonaws.com/{key}"
+            urls.append(url)
+            logger.info("Uploaded screenshot: %s", url)
+        except Exception:
+            logger.warning("Failed to upload screenshot %s", path, exc_info=True)
+
+    logger.info("Uploaded %d/%d screenshots", len(urls), len(paths))
+    return urls

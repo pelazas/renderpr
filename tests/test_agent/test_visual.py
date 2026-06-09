@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import ANY
 
 import pytest
 
@@ -91,3 +92,54 @@ class TestCaptureScreenshots:
         assert any("Tablet" in n for n in filenames)
         assert any("Desktop" in n for n in filenames)
         assert any("Desktop XL" in n for n in filenames)
+
+
+class TestUploadScreenshots:
+    def test_uploads_all_paths(self, tmp_path, monkeypatch):
+        put_calls = []
+
+        class MockS3Client:
+            def put_object(self, **kw):
+                put_calls.append(kw)
+
+            @property
+            def meta(self):
+                return type("Meta", (), {"region_name": "eu-west-1"})()
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3Client())
+
+        from src.agent.visual import upload_screenshots
+
+        png1 = tmp_path / "a.png"
+        png1.write_bytes(b"png1-data")
+        png2 = tmp_path / "b.png"
+        png2.write_bytes(b"png2-data")
+
+        urls = upload_screenshots("my-bucket", "42", [png1, png2])
+
+        assert len(urls) == 2
+        assert len(put_calls) == 2
+        for call in put_calls:
+            assert call["Bucket"] == "my-bucket"
+            assert call["ContentType"] == "image/png"
+            assert call["Key"].startswith("screenshots/42/")
+            assert call["Key"].endswith(".png")
+
+    def test_upload_failure_skips(self, tmp_path, monkeypatch):
+        class FailingS3Client:
+            def put_object(self, **kw):
+                raise Exception("S3 error")
+
+            @property
+            def meta(self):
+                return type("Meta", (), {"region_name": "eu-west-1"})()
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: FailingS3Client())
+
+        from src.agent.visual import upload_screenshots
+
+        png = tmp_path / "a.png"
+        png.write_bytes(b"data")
+
+        urls = upload_screenshots("my-bucket", "42", [png])
+        assert urls == []

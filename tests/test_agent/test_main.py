@@ -13,7 +13,7 @@ def _mock_all_deps(monkeypatch, caplog=None):
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
-    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: [])
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda: ([], []))
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
 
