@@ -1,0 +1,138 @@
+import json
+
+import httpx
+import pytest
+
+from src.agent.config import REPO_DIR
+
+
+class _MockClient:
+    def __init__(self, responses):
+        self.responses = responses
+        self.call_count = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        pass
+
+    def post(self, *a, **kw):
+        resp = self.responses[self.call_count]
+        self.call_count += 1
+        return resp
+
+
+@pytest.fixture(autouse=True)
+def mock_httpx_client(monkeypatch):
+    client_ref = {"instance": None}
+
+    def make_client(*a, **kw):
+        return client_ref["instance"]
+
+    def helper(responses=None):
+        if responses is not None:
+            client_ref["instance"] = _MockClient(responses)
+        return client_ref["instance"]
+
+    monkeypatch.setattr(httpx, "Client", make_client)
+    return helper
+
+
+class TestInferRoutes:
+    def test_returns_parsed_routes(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({
+                    "routes": [
+                        {"path": "/dashboard", "reason": "file changed", "actions": []},
+                        {"path": "/profile", "reason": "component used", "actions": [
+                            {"type": "click", "selector": "#menu"},
+                            {"type": "wait", "ms": 500},
+                        ]},
+                    ],
+                })}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        result = infer_routes("diff content", "file tree", "sk-or-fake")
+
+        assert len(result) == 2
+        assert result[0]["path"] == "/dashboard"
+        assert result[1]["path"] == "/profile"
+        assert len(result[1]["actions"]) == 2
+
+    def test_empty_routes_falls_back(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({"routes": []})}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        result = infer_routes("diff", "tree", "sk-or-fake")
+        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+
+    def test_malformed_json_falls_back(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": "not json at all"}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        result = infer_routes("diff", "tree", "sk-or-fake")
+        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+
+    def test_api_4xx_falls_back(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(401, json={"error": "Unauthorized"}),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        result = infer_routes("diff", "tree", "sk-or-fake")
+        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+
+    def test_api_5xx_retry_then_fallback(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(500, json={"error": "Server error"}),
+            httpx.Response(500, json={"error": "Server error"}),
+            httpx.Response(500, json={"error": "Server error"}),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        result = infer_routes("diff", "tree", "sk-or-fake")
+        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+
+
+class TestBuildRepoTree:
+    def test_excludes_common_dirs(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "app" / "page.tsx").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "app" / "page.tsx").write_text("")
+        (tmp_path / "node_modules" / "pkg" / "index.js").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "node_modules" / "pkg" / "index.js").write_text("")
+        (tmp_path / ".next" / "build" / "output.js").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / ".next" / "build" / "output.js").write_text("")
+
+        from src.agent.routes import build_repo_tree
+
+        tree = build_repo_tree()
+        lines = tree.splitlines()
+        assert "app/page.tsx" in lines
+        assert "node_modules/pkg/index.js" not in lines
+        assert ".next/build/output.js" not in lines
+
+    def test_missing_dir_returns_empty(self, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", "/nonexistent/path")
+
+        from src.agent.routes import build_repo_tree
+
+        assert build_repo_tree() == ""
