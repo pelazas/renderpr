@@ -51,6 +51,11 @@ def handler(event: dict, context: object) -> dict:
         logger.error("Invalid JSON in webhook body")
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON"})}
 
+    action = body.get("action", "")
+    if action not in ("opened", "synchronize"):
+        logger.info("Ignoring non-trigger action: %s", action)
+        return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
+
     installation_id = str(
         body.get("installation", {}).get("id", "000000")
     )

@@ -66,6 +66,7 @@ def test_valid_hmac_returns_200():
 
     body = json.dumps(
         {
+            "action": "opened",
             "installation": {"id": 456},
             "repository": {"full_name": "owner/repo"},
             "pull_request": {"number": 42},
@@ -107,7 +108,7 @@ def test_missing_signature_header_returns_401():
     assert result["statusCode"] == 401
 
 
-def test_issue_comment_event_extracts_pr_number():
+def test_issue_comment_ignored():
     from src.lambda_handler.webhook_handler import handler
 
     body = json.dumps(
@@ -125,16 +126,19 @@ def test_issue_comment_event_extracts_pr_number():
     }
     result = handler(event, {})
     assert result["statusCode"] == 200
+    data = json.loads(result["body"])
+    assert data.get("ignored") is True
 
 
-def test_pull_request_with_top_level_number():
+def test_synchronize_action_triggers():
     from src.lambda_handler.webhook_handler import handler
 
     body = json.dumps(
         {
+            "action": "synchronize",
             "installation": {"id": 456},
             "repository": {"full_name": "owner/repo"},
-            "number": 99,
+            "pull_request": {"number": 99},
         }
     )
     event = {
@@ -143,6 +147,33 @@ def test_pull_request_with_top_level_number():
     }
     result = handler(event, {})
     assert result["statusCode"] == 200
+    data = json.loads(result["body"])
+    assert data["ok"] is True
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    tasks = ecs.list_tasks(cluster=CLUSTER_ARN)
+    assert len(tasks["taskArns"]) > 0
+
+
+def test_non_trigger_action_ignored():
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "action": "labeled",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "pull_request": {"number": 99},
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+    data = json.loads(result["body"])
+    assert data.get("ignored") is True
 
 
 def test_invalid_json_body_returns_400():
