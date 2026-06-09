@@ -2,6 +2,7 @@ import * as cdk from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as iam from "aws-cdk-lib/aws-iam";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2_integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
@@ -36,6 +37,21 @@ export class RenderprStack extends cdk.Stack {
       vpc,
       allowAllOutbound: true,
       description: "Allows outbound traffic only; no inbound. For RenderPR Fargate tasks.",
+    });
+
+    // S3 bucket for screenshot hosting
+    const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
+      bucketName: `${appName}-screenshots-${this.account}`,
+      publicReadAccess: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ACLS,
+      autoDeleteObjects: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      lifecycleRules: [
+        {
+          enabled: true,
+          expiration: cdk.Duration.days(7),
+        },
+      ],
     });
 
     // SSM parameter names (created manually via scripts/setup-secrets.sh)
@@ -91,6 +107,13 @@ export class RenderprStack extends cdk.Stack {
       }),
     );
 
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [screenshotBucket.arnForObjects("*")],
+      }),
+    );
+
     // Lambda function (Python 3.12)
     const handler = new PythonFunction(this, "WebhookHandler", {
       entry: path.join(__dirname, "../../src/lambda_handler"),
@@ -139,6 +162,7 @@ export class RenderprStack extends cdk.Stack {
       environment: {
         GITHUB_PARAM_NAME: githubParamName,
         OPENROUTER_PARAM_NAME: openrouterParamName,
+        SCREENSHOT_BUCKET: screenshotBucket.bucketName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
       },
@@ -199,6 +223,11 @@ export class RenderprStack extends cdk.Stack {
     new cdk.CfnOutput(this, "TaskDefinitionArn", {
       value: taskDef.taskDefinitionArn,
       description: "Fargate task definition ARN",
+    });
+
+    new cdk.CfnOutput(this, "ScreenshotBucketName", {
+      value: screenshotBucket.bucketName,
+      description: "S3 bucket for PR review screenshots",
     });
   }
 }
