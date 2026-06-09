@@ -176,3 +176,22 @@ class TestBuildRepoTree:
         from src.agent.routes import build_repo_tree
 
         assert build_repo_tree() == ""
+
+
+class TestGetChangedFiles:
+    def test_extracts_files_from_diff(self):
+        from src.agent.routes import _get_changed_files
+
+        diff = """diff --git a/src/app/page.tsx b/src/app/page.tsx
+--- a/src/app/page.tsx
++++ b/src/app/page.tsx
+diff --git a/src/app/users/page.tsx b/src/app/users/page.tsx
+--- a/src/app/users/page.tsx
++++ b/src/app/users/page.tsx"""
+        result = _get_changed_files(diff)
+        assert "src/app/page.tsx" in result
+        assert "src/app/users/page.tsx" in result
+
+    def test_empty_diff_returns_empty(self):
+        from src.agent.routes import _get_changed_files
+        assert _get_changed_files("") == []

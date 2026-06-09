@@ -18,13 +18,15 @@ from src.agent.config import (
 
 logger = logging.getLogger(__name__)
 
-ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff and the project file tree,
+ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, and the project file tree,
 identify which routes are affected by this change and what interactions are needed to surface the changes visually.
 
 Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
-- If interactions are needed (click to open modal/dropdown), specify the CSS selector
+- ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
+- If interactions are needed (click to open modal/dropdown), use the full file content to find the right selector
+- For clicking buttons by their visible text, use Playwright's `:has-text()` pseudo-selector (e.g., `"button:has-text('Open Modal')"`)
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
@@ -39,6 +41,27 @@ If no interaction needed, actions should be an empty list."""
 
 class RouteInferenceError(Exception):
     pass
+
+
+def _get_changed_files(diff: str) -> list[str]:
+    files: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+++ b/"):
+            files.append(line[6:])
+    return files
+
+
+def _read_full_files(file_paths: list[str]) -> dict[str, str]:
+    repo_path = Path(REPO_DIR)
+    contents: dict[str, str] = {}
+    for fp in file_paths:
+        full_path = repo_path / fp
+        if full_path.exists() and full_path.is_file():
+            try:
+                contents[fp] = full_path.read_text()
+            except OSError:
+                logger.warning("Could not read %s", fp)
+    return contents
 
 
 def build_repo_tree() -> str:
@@ -91,7 +114,13 @@ def infer_routes(
         "Content-Type": "application/json",
     }
 
-    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```"
+    changed_files = _get_changed_files(diff)
+    file_contents = _read_full_files(changed_files)
+    files_section = "\n".join(
+        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
+    ) if file_contents else "(no file contents available)"
+
+    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{files_section}"
 
     body = {
         "model": LLM_MODEL,
