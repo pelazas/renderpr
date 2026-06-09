@@ -41,12 +41,11 @@ def _fetch_secrets() -> dict:
         sys.exit(1)
 
     github_data = json.loads(github_resp["Parameter"]["Value"])
-    openrouter_data = json.loads(openrouter_resp["Parameter"]["Value"])
 
     return {
         "app_id": github_data["app_id"],
         "private_key": github_data["private_key"],
-        "openrouter_api_key": openrouter_data["openrouter_api_key"],
+        "openrouter_api_key": openrouter_resp["Parameter"]["Value"],
     }
 
 
@@ -115,11 +114,11 @@ def _start_dev_server() -> None:
     deadline = time.time() + DEV_SERVER_START_TIMEOUT
     while time.time() < deadline:
         try:
-            with httpx.Client(timeout=5) as client:
+            with httpx.Client(timeout=30) as client:
                 resp = client.get(url)
             logger.info("Dev server ready (status %d)", resp.status_code)
             return
-        except httpx.ConnectError:
+        except httpx.HTTPError:
             time.sleep(DEV_SERVER_POLL_INTERVAL)
 
     logger.error("Dev server did not start within %ds", DEV_SERVER_START_TIMEOUT)

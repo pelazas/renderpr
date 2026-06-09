@@ -19,7 +19,7 @@ if [ ! -f "$PEM_PATH" ]; then
   echo "Error: File not found: $PEM_PATH" >&2
   exit 1
 fi
-PRIVATE_KEY=$(jq -Rs '.' < "$PEM_PATH")
+PRIVATE_KEY=$(cat "$PEM_PATH")
 
 read -rsp "Webhook Secret: " WEBHOOK_SECRET
 echo ""

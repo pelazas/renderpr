@@ -246,7 +246,7 @@ class TestFetchSecrets:
             if name == "/renderpr/openrouter":
                 return {
                     "Parameter": {
-                        "Value": json.dumps({"openrouter_api_key": "sk-or-fake"}),
+                        "Value": "sk-or-fake",
                     }
                 }
             raise ValueError(f"Unexpected param: {name}")
