@@ -61,27 +61,6 @@ def build_repo_tree() -> str:
     return "\n".join(paths)
 
 
-def infer_routes(
-    diff: str,
-    repo_tree: str,
-    openrouter_api_key: str,
-) -> list[dict]:
-    url = f"{OPENROUTER_BASE_URL}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```"
-
-    body = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": ROUTE_INFERENCE_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    }
-
 def _validate_routes(routes: list[dict]) -> list[dict]:
     valid: list[dict] = []
     for r in routes:
@@ -106,6 +85,23 @@ def infer_routes(
     repo_tree: str,
     openrouter_api_key: str,
 ) -> list[dict]:
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```"
+
+    body = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": ROUTE_INFERENCE_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+    for attempt in range(RETRY_MAX_ATTEMPTS):
         with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
             resp = client.post(url, headers=headers, json=body)
 
