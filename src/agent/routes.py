@@ -52,20 +52,29 @@ SOURCE_EXTENSIONS: Final[tuple[str, ...]] = (".ts", ".tsx", ".js", ".jsx")
 _MAX_REVERSE_DEPS: Final[int] = 5
 
 
-def _find_importers(file_path: str) -> list[str]:
-    stem = Path(file_path).stem
+def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
     repo_path = Path(REPO_DIR)
+    if not repo_path.exists():
+        logger.warning("Repo directory %s does not exist for import scanning", REPO_DIR)
+        return []
+
+    patterns = [re.compile(rf"""["'][^"']*{re.escape(s)}["']""") for s in stems]
 
     importers: list[str] = []
     for f in repo_path.rglob("*"):
         if any(part in EXCLUDED_DIRS for part in f.relative_to(repo_path).parts):
             continue
-        if f.suffix not in SOURCE_EXTENSIONS or str(f.relative_to(repo_path)) == file_path:
+        if f.suffix not in SOURCE_EXTENSIONS:
+            continue
+        rel = str(f.relative_to(repo_path))
+        if rel in exclude_paths:
             continue
         try:
             content = f.read_text(errors="replace")
-            if re.search(rf'(?:from|import)\s.*["\']\./.*{stem}|["\'].*{stem}["\']', content):
-                importers.append(str(f.relative_to(repo_path)))
+            for p in patterns:
+                if p.search(content):
+                    importers.append(rel)
+                    break
         except OSError:
             continue
 
@@ -146,11 +155,9 @@ def infer_routes(
     changed_files = _get_changed_files(diff)
     file_contents = _read_full_files(changed_files)
 
-    reverse_dep_paths: list[str] = []
-    for fp in changed_files:
-        reverse_dep_paths.extend(_find_importers(fp))
-
-    reverse_dep_paths = list(dict.fromkeys(reverse_dep_paths))
+    stems = [Path(fp).stem for fp in changed_files]
+    exclude_paths = set(changed_files)
+    reverse_dep_paths = _find_importers(stems, exclude_paths)
     reverse_contents = _read_full_files(reverse_dep_paths)
 
     changed_section = "\n".join(

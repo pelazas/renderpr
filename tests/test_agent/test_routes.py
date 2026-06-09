@@ -209,7 +209,7 @@ class TestFindImporters:
 
         from src.agent.routes import _find_importers
 
-        result = _find_importers("components/Modal.tsx")
+        result = _find_importers(["Modal"], set())
         assert "app/page.tsx" in result
         assert "app/other.tsx" not in result
 
@@ -219,18 +219,39 @@ class TestFindImporters:
         (tmp_path / "Modal.tsx").write_text("export {}\n")
         from src.agent.routes import _find_importers
 
-        result = _find_importers("Modal.tsx")
+        result = _find_importers(["Modal"], {"Modal.tsx"})
         assert "Modal.tsx" not in result
+
+    def test_multiple_stems(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "a.tsx").write_text("import x from './targetA';")
+        (tmp_path / "b.tsx").write_text("import y from './targetB';")
+        (tmp_path / "c.tsx").write_text("import z from './other';")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers(["targetA", "targetB"], set())
+        assert "a.tsx" in result
+        assert "b.tsx" in result
+        assert "c.tsx" not in result
 
     def test_respects_max_limit(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
         monkeypatch.setattr("src.agent.routes._MAX_REVERSE_DEPS", 2)
 
-        (tmp_path / "target.tsx").write_text("export const x = 1;")
         for i in range(5):
             (tmp_path / f"importer{i}.tsx").write_text(f"import x from './target';")
 
         from src.agent.routes import _find_importers
 
-        result = _find_importers("target.tsx")
+        result = _find_importers(["target"], set())
         assert len(result) <= 2
+
+    def test_missing_repo_returns_empty(self, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", "/nonexistent")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers(["Modal"], set())
+        assert result == []
