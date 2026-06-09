@@ -25,7 +25,7 @@ renderpr/
 │       ├── review.py             # LLM review execution
 │       └── config.py             # System constants (timeouts, retries, viewports)
 ├── .renderpr/
-│   └── fixtures/                 # JSON mock data for Playwright route interception
+│                                 # (ephemeral screenshot output dir)
 ├── tests/                        # Mirrors src/ structure
 │   ├── test_lambda/
 │   └── test_agent/
@@ -140,7 +140,7 @@ When a bug is reported:
 | ApiGatewayUrl | `https://drdidhjxv8.execute-api.eu-west-1.amazonaws.com/` |
 | ClusterArn | `arn:aws:ecs:eu-west-1:303859149452:cluster/renderpr-cluster` |
 | GitHubParamName | `/renderpr/github-app` |
-| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:10` |
+| TaskDefinitionArn | `arn:aws:ecs:eu-west-1:303859149452:task-definition/renderpr-review:12` |
 | ScreenshotBucketName | `renderpr-screenshots-303859149452` |
 | StackArn | `arn:aws:cloudformation:eu-west-1:303859149452:stack/RenderprStack/e0b45ae0-6347-11f1-86a8-0668387b3249` |
 

@@ -45,8 +45,7 @@ renderpr/
 │       ├── visual.py             # Playwright browser driver
 │       ├── review.py             # LLM prompt execution
 │       └── config.py             # System constants
-├── .renderpr/
-│   └── fixtures/                 # JSON mock data for frontend interception
+├── .renderpr/                    # Screenshot output directory (ephemeral)
 ├── tests/
 ├── docs/
 │   ├── ARCHITECTURE.md
@@ -94,7 +93,6 @@ renderpr/
   - Navigates to `http://localhost:3000`
   - Resizes viewports and captures screenshots
   - Intercepts API requests via Playwright Router API or MSW
-  - Returns fixture data from `.renderpr/fixtures/`
   - Logs console errors and network failures
 - **Context:** Ephemeral — fresh browser context per command
 
@@ -233,4 +231,4 @@ aws ssm put-parameter \
 3. **OpenRouter as primary LLM gateway** — Provides access to multiple models through one API, simplifies provider abstraction for future expansion.
 4. **GitHub App tokens over PATs** — Short-lived (60 min), scoped per installation, generated at runtime. Aligns with BYOC zero-trust model.
 5. **SSM Parameter Store with post-deploy injection** — CDK creates SecureString parameters; the user fills them via `setup-secrets.sh`. Free tier, encrypted at rest, same IAM integration as Secrets Manager.
-6. **Playwright Router API for data mocking** — No backend needed. Fixtures live in the repo under `.renderpr/fixtures/`. Enables deterministic testing of loading, empty, error, and populated states.
+6. **Playwright Router API for data mocking** — No backend or fixture files needed. Mock data is generated at runtime by the LLM based on the code diff, then served via Playwright route interception.
