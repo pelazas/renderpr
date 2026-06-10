@@ -19,6 +19,7 @@ from src.agent.config import (
     REPO_DIR,
     RETRY_MAX_ATTEMPTS,
 )
+from src.agent.discovery import discover_frontend
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,16 @@ _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
 
 
-def _start_dev_server() -> None:
+def _start_dev_server(
+    package_dir: str | None = None,
+    install_dir: str | None = None,
+) -> None:
     global _dev_server_proc, _dev_server_url
 
-    pkg_json = os.path.join(REPO_DIR, "package.json")
+    dev_cwd = Path(package_dir).parent if package_dir else Path(REPO_DIR)
+    install_cwd = Path(install_dir).parent if install_dir else dev_cwd
+
+    pkg_json = os.path.join(dev_cwd, "package.json")
     if not os.path.exists(pkg_json):
         logger.error("No package.json found at %s", pkg_json)
         sys.exit(1)
@@ -97,7 +104,7 @@ def _start_dev_server() -> None:
     try:
         subprocess.run(
             ["npm", "ci"],
-            cwd=REPO_DIR,
+            cwd=str(install_cwd),
             capture_output=True,
             text=True,
             check=True,
@@ -107,7 +114,7 @@ def _start_dev_server() -> None:
         logger.exception("npm ci failed")
         sys.exit(1)
 
-    _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=REPO_DIR)
+    _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=str(dev_cwd))
 
     _dev_server_url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
     url = _dev_server_url
@@ -302,9 +309,6 @@ def run() -> None:
         pr_number=pr_number,
         token=token,
     )
-    _start_dev_server()
-
-    logger.info("Dev server ready. Proceeding to review...")
 
     diff = _fetch_diff(
         token=token,
@@ -313,6 +317,34 @@ def run() -> None:
     )
     logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
     logger.info("Changes: %s", _parse_diff_summary(diff))
+
+    discovery = discover_frontend(diff)
+    if not discovery["has_frontend"]:
+        _post_comment(
+            token=token,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            body=f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.",
+        )
+        logger.info("No frontend changes detected. Exiting gracefully.")
+        return
+
+    if discovery["package_json_path"] is None or discovery["dev_command"] is None:
+        _post_comment(
+            token=token,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            body=f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.",
+        )
+        logger.info("Cannot start dev server. Exiting gracefully.")
+        return
+
+    _start_dev_server(
+        package_dir=discovery["package_json_path"],
+        install_dir=discovery.get("workspace_root"),
+    )
+
+    logger.info("Dev server ready. Proceeding to review...")
 
     screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
     logger.info(
