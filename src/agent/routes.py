@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, their reverse dependencies (files that import the changed files), and the project file tree,
 identify which routes are affected by this change and what interactions are needed to surface the changes visually.
 
+You MUST also identify API calls in the changed files and generate mock JSON response data for them.
+
 Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
@@ -35,9 +37,17 @@ Rules:
 - Strip query parameters from routes — just return the path
 - Do NOT include routes that are API routes (route.ts, api/)
 
-Output ONLY valid JSON with this exact schema:
-{"routes": [{"path": "/...", "reason": "...", "actions": []}]}
+For mock data:
+- Scan the changed files for fetch(), axios, useQuery(), or other API call patterns
+- For each unique API endpoint found, generate realistic mock JSON response data
+- Use the full file contents to infer the shape of the data (field names, types, nesting)
+- Include the mock under the "mocks" key, keyed by domain and path
+- If no API calls are found, omit the "mocks" key entirely
 
+Output ONLY valid JSON with this exact schema:
+{"routes": [{"path": "/...", "reason": "...", "actions": []}], "mocks": {"api.example.com": {"/api/path": {"body": {...}, "status": 200}}}}
+
+The "status" field in mocks is optional (defaults to 200). The "body" field is required.
 Each action object: {"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}
 If no interaction needed, actions should be an empty list."""
 
@@ -141,6 +151,32 @@ def _validate_routes(routes: list[dict]) -> list[dict]:
     return valid
 
 
+def _validate_mocks(mocks: dict | None) -> dict:
+    if not isinstance(mocks, dict):
+        return {}
+
+    validated: dict = {}
+    for domain, endpoints in mocks.items():
+        if not isinstance(domain, str) or not isinstance(endpoints, dict):
+            continue
+        validated_endpoints: dict = {}
+        for path, mock_data in endpoints.items():
+            if not isinstance(path, str) or not path.startswith("/"):
+                continue
+            if not isinstance(mock_data, dict):
+                continue
+            body = mock_data.get("body")
+            if not isinstance(body, dict):
+                continue
+            validated_endpoints[path] = {
+                "body": body,
+                "status": mock_data.get("status", 200),
+            }
+        if validated_endpoints:
+            validated[domain] = validated_endpoints
+    return validated
+
+
 def _extract_json(text: str) -> dict | None:
     try:
         return json.loads(text)
@@ -158,7 +194,7 @@ def infer_routes(
     diff: str,
     repo_tree: str,
     openrouter_api_key: str,
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {openrouter_api_key}",
@@ -203,17 +239,21 @@ def infer_routes(
                 parsed = _extract_json(raw)
                 if parsed is None:
                     logger.warning("Could not extract JSON from route inference response, falling back to homepage")
-                    return _fallback_routes()
+                    return _fallback_routes(), {}
                 raw_routes = parsed.get("routes", [])
+                raw_mocks = parsed.get("mocks")
                 routes = _validate_routes(raw_routes)
+                mocks = _validate_mocks(raw_mocks)
                 if routes:
                     logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])
-                    return routes
+                    if mocks:
+                        logger.info("Generated mocks for %d domain(s)", len(mocks))
+                    return routes, mocks
                 logger.warning("LLM returned empty or invalid routes, falling back to homepage")
-                return _fallback_routes()
+                return _fallback_routes(), {}
             except (KeyError, IndexError, TypeError):
                 logger.warning("Unexpected OpenRouter response shape, falling back to homepage")
-                return _fallback_routes()
+                return _fallback_routes(), {}
 
         logger.error(
             "OpenRouter API error (attempt %d/%d): %d %s",
@@ -221,7 +261,7 @@ def infer_routes(
         )
 
         if 400 <= resp.status_code < 500 and resp.status_code != 429:
-            return _fallback_routes()
+            return _fallback_routes(), {}
 
         if attempt < RETRY_MAX_ATTEMPTS - 1:
             delay = min(LLM_RETRY_BASE_DELAY * (2 ** attempt), LLM_RETRY_MAX_DELAY)
@@ -229,7 +269,7 @@ def infer_routes(
             time.sleep(delay + jitter)
 
     logger.warning("Route inference failed after %d attempts, falling back to homepage", RETRY_MAX_ATTEMPTS)
-    return _fallback_routes()
+    return _fallback_routes(), {}
 
 
 def _fallback_routes() -> list[dict]:

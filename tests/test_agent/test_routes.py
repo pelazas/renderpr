@@ -57,12 +57,13 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        result = infer_routes("diff content", "file tree", "sk-or-fake")
+        routes, mocks = infer_routes("diff content", "file tree", "sk-or-fake")
 
-        assert len(result) == 2
-        assert result[0]["path"] == "/dashboard"
-        assert result[1]["path"] == "/profile"
-        assert len(result[1]["actions"]) == 2
+        assert len(routes) == 2
+        assert routes[0]["path"] == "/dashboard"
+        assert routes[1]["path"] == "/profile"
+        assert len(routes[1]["actions"]) == 2
+        assert mocks == {}
 
     def test_empty_routes_falls_back(self, mock_httpx_client):
         mock_httpx_client([
@@ -73,8 +74,9 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        result = infer_routes("diff", "tree", "sk-or-fake")
-        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        assert mocks == {}
 
     def test_malformed_json_falls_back(self, mock_httpx_client):
         mock_httpx_client([
@@ -85,8 +87,9 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        result = infer_routes("diff", "tree", "sk-or-fake")
-        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        assert mocks == {}
 
     def test_api_4xx_falls_back(self, mock_httpx_client):
         mock_httpx_client([
@@ -95,8 +98,9 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        result = infer_routes("diff", "tree", "sk-or-fake")
-        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        assert mocks == {}
 
     def test_api_5xx_retry_then_fallback(self, mock_httpx_client):
         mock_httpx_client([
@@ -107,8 +111,9 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        result = infer_routes("diff", "tree", "sk-or-fake")
-        assert result == [{"path": "/", "reason": "fallback", "actions": []}]
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        assert mocks == {}
 
 
 class TestValidateRoutes:
@@ -287,7 +292,9 @@ class TestValidateMocks:
             }
         }
         result = _validate_mocks(mocks)
-        assert result == mocks
+        assert result["api.example.com"]["/api/users"]["body"] == {"users": [{"id": 1}]}
+        assert result["api.example.com"]["/api/users"]["status"] == 200
+        assert result["api.example.com"]["/api/posts"]["body"] == {"posts": []}
 
     def test_invalid_domain_skipped(self):
         from src.agent.routes import _validate_mocks
