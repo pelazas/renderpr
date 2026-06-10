@@ -4,12 +4,8 @@ import hmac
 import hashlib
 import logging
 import urllib.request
-import sys
 
 import boto3
-
-# Make src importable when running in Lambda
-sys.path.insert(0, os.path.join(os.environ.get("LAMBDA_TASK_ROOT", ""), "src"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -125,12 +121,29 @@ def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
 
 
 def _parse_renderpr_command(comment_body: str) -> dict | None:
-    from src.agent.polling import parse_command
-
-    parsed = parse_command(comment_body)
-    if parsed is None:
+    if "@renderpr" not in comment_body:
         return None
-    return {"command": parsed["action"], "query": parsed.get("query")}
+
+    after = comment_body.split("@renderpr", 1)[1].strip()
+
+    if not after or after.startswith("review") or after.startswith("help"):
+        return {"command": "review"}
+
+    if after.startswith("code change"):
+        query = after.removeprefix("code change").lstrip(": ").strip()
+        if query:
+            return {"command": "change", "query": query}
+
+    if after.startswith("change "):
+        return {"command": "change", "query": after.removeprefix("change ").strip()}
+
+    if after == "apply":
+        return {"command": "apply"}
+
+    if after == "reject":
+        return {"command": "reject"}
+
+    return {"command": "review"}
 
 
 def handler(event: dict, context: object) -> dict:
