@@ -84,20 +84,24 @@ def capture_screenshots(
             page = context.new_page()
 
             if mocks:
+                mock_count = 0
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
-                        pattern = f"https://{domain}{path}**"
+                        pattern = f"**{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
-                        page.route(
-                            pattern,
-                            lambda route, b=body, s=status: route.fulfill(
-                                status=s,
-                                content_type="application/json",
-                                body=b,
-                            ),
-                        )
-                logger.info("Registered %d mock endpoint(s)", sum(len(e) for e in mocks.values()))
+                        def make_handler(p, bd, st):
+                            def handler(route):
+                                logger.info("Mock intercepted: %s -> %d", p, st)
+                                route.fulfill(
+                                    status=st,
+                                    content_type="application/json",
+                                    body=bd,
+                                )
+                            return handler
+                        page.route(pattern, make_handler(path, body, status))
+                        mock_count += 1
+                logger.info("Registered %d mock endpoint(s)", mock_count)
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
