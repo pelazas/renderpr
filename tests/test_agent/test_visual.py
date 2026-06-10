@@ -140,6 +140,49 @@ class TestCaptureScreenshots:
 
 
 
+class TestCaptureScreenshotsWithMocks:
+    def test_mocks_do_not_crash_capture(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        mocks = {
+            "api.example.com": {
+                "/api/users": {"body": {"users": []}, "status": 200},
+            }
+        }
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+            mocks=mocks,
+        )
+
+        assert len(result) == 4
+
+    def test_no_mocks_when_not_provided(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+        )
+
+        assert len(result) == 4
+
+    def test_empty_mocks(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+            mocks={},
+        )
+
+        assert len(result) == 4
+
+
 class TestUploadScreenshots:
     def test_uploads_all_pairs(self, tmp_path, monkeypatch):
         put_calls = []
