@@ -484,6 +484,11 @@ Live app: http://{public_ip}:3000
     )
     server.start()
 
+    from src.agent.network import get_public_ip
+    public_ip = get_public_ip()
+    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+    logger.info("Public IP: %s", public_ip)
+
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:
         logger.info("Received boot command: %s", boot_cmd)
