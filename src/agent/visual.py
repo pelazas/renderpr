@@ -94,35 +94,24 @@ def capture_screenshots(
             page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
 
             if mocks:
-                mock_entries = []
+                mock_count = 0
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
+                        pattern = f"**{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
-                        mock_entries.append((path, status, body))
-
-                script_lines = [
-                    "(function() {",
-                    "  const origFetch = window.fetch;",
-                    "  const mocks = " + json.dumps(mock_entries) + ";",
-                    "  window.fetch = function(url, options) {",
-                    "    const urlStr = typeof url === 'string' ? url : url.url;",
-                    "    for (const [path, status, body] of mocks) {",
-                    "      if (urlStr.includes(path)) {",
-                    '        console.log("[RenderPR Mock]", path, "->", status);',
-                    "        return Promise.resolve(new Response(body, {",
-                    "          status: status,",
-                    '          headers: {"Content-Type": "application/json"},',
-                    "        }));",
-                    "      }",
-                    "    }",
-                    "    return origFetch.call(this, url, options);",
-                    "  };",
-                    "  window.fetch.MOCK_COUNT = " + str(len(mock_entries)) + ";",
-                    "})();",
-                ]
-                page.add_init_script("\n".join(script_lines))
-                logger.info("Mock overrides injected for %d endpoint(s)", len(mock_entries))
+                        def make_handler(p, bd, st):
+                            def handler(route):
+                                logger.info("Mock intercepted: %s -> %d (url: %s)", p, st, route.request.url)
+                                route.fulfill(
+                                    status=st,
+                                    content_type="application/json",
+                                    body=bd,
+                                )
+                            return handler
+                        page.route(pattern, make_handler(path, body, status))
+                        mock_count += 1
+                logger.info("Registered %d mock endpoint(s)", mock_count)
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
