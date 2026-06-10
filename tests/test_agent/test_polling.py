@@ -91,3 +91,28 @@ class TestChangeSession:
         session.add_edit("src/page.tsx")
         session.clear()
         assert session.edited_files == []
+
+    def test_runtime_files_are_tracked_separately(self):
+        session = ChangeSession()
+        session.add_edit("src/page.tsx")
+        session.add_runtime_file("src/app/api/users/route.ts")
+
+        assert session.edited_files == ["src/page.tsx"]
+        assert session.runtime_generated_files == ["src/app/api/users/route.ts"]
+
+    def test_stageable_edits_excludes_runtime_files(self):
+        session = ChangeSession()
+        session.add_edit("src/page.tsx")
+        session.add_edit("src/app/api/users/route.ts")
+        session.add_runtime_file("src/app/api/users/route.ts")
+
+        assert session.stageable_edits() == ["src/page.tsx"]
+
+    def test_clear_keeps_runtime_files(self):
+        session = ChangeSession()
+        session.add_edit("src/page.tsx")
+        session.add_runtime_file("src/app/api/users/route.ts")
+        session.clear()
+
+        assert session.edited_files == []
+        assert session.runtime_generated_files == ["src/app/api/users/route.ts"]

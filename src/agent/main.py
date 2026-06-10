@@ -20,6 +20,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.mock_server import write_next_allowed_origin, write_server_mocks
 from src.agent.polling import ChangeSession, has_pending_edits
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,7 @@ def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:
 
 _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
+_runtime_generated_files: set[str] = set()
 
 
 def _start_dev_server(
@@ -278,6 +280,8 @@ def _capture_screenshots(
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
+        generated = write_server_mocks(Path(REPO_DIR), mocks)
+        _runtime_generated_files.update(generated)
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
@@ -393,6 +397,13 @@ def run() -> None:
         logger.info("Cannot start dev server. Exiting gracefully.")
         return
 
+    from src.agent.network import get_public_ip
+    public_ip = get_public_ip()
+    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+    logger.info("Public IP: %s", public_ip)
+
+    _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
+
     _start_dev_server(
         package_dir=discovery["package_json_path"],
         install_dir=discovery.get("workspace_root"),
@@ -420,10 +431,6 @@ def run() -> None:
         logger.exception("Review failed")
         sys.exit(1)
 
-    from src.agent.network import get_public_ip
-    public_ip = get_public_ip()
-    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
-    logger.info("Public IP: %s", public_ip)
     review_body = _append_live_preview_link(review_body, public_ip)
 
     _post_comment(
@@ -444,6 +451,8 @@ def run() -> None:
     is_fork = pr_meta["is_fork"]
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     change_session = ChangeSession()
+    for runtime_file in _runtime_generated_files:
+        change_session.add_runtime_file(runtime_file)
 
     from src.agent.command_server import CommandServer
     from src.agent.editor import execute_change
@@ -486,11 +495,12 @@ Live app: http://{public_ip}:3000
         return result
 
     def on_apply() -> dict:
-        if not change_session.edited_files:
+        stageable_files = change_session.stageable_edits()
+        if not stageable_files:
             return {"status": "error", "message": "No pending changes to apply."}
 
         try:
-            for file_path in change_session.edited_files:
+            for file_path in stageable_files:
                 subprocess.run(
                     ["git", "add", "--", file_path],
                     cwd=REPO_DIR,

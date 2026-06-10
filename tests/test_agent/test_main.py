@@ -27,6 +27,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
+    monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     if posted_body is not None:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
@@ -541,6 +542,42 @@ class TestCaptureScreenshotsMockWiring:
             "api.example.com": {"/api/users": {"body": {"ok": True}}},
         }
 
+    def test_server_mocks_written_before_capture(self, monkeypatch):
+        captured = {"generated": None, "capture_called": False}
+
+        def fake_infer_routes(diff, tree, key):
+            return (
+                [{"path": "/users", "reason": "test", "actions": []}],
+                {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+            )
+
+        def fake_write(repo_dir, mocks):
+            captured["generated"] = (str(repo_dir), mocks)
+            return ["src/app/api/users/route.ts"]
+
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+            captured["capture_called"] = True
+            return []
+
+        monkeypatch.setattr("src.agent.routes.infer_routes", fake_infer_routes)
+        monkeypatch.setattr("src.agent.main.write_server_mocks", fake_write)
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+        monkeypatch.setattr("src.agent.main.REPO_DIR", "/app/repo")
+
+        from src.agent.main import _capture_screenshots, _runtime_generated_files
+        _runtime_generated_files.clear()
+
+        _capture_screenshots("diff content", {"openrouter_api_key": "sk-or-fake"})
+
+        assert captured["generated"] == (
+            "/app/repo",
+            {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+        )
+        assert captured["capture_called"] is True
+        assert "src/app/api/users/route.ts" in _runtime_generated_files
+
 
 class TestPostComment:
     def test_append_live_preview_link(self):
@@ -638,6 +675,7 @@ class TestDiscoveryIntegration:
 
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
         monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
+        monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
