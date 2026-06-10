@@ -53,3 +53,13 @@ Ideas scoped out but not yet implemented. Ordered by priority.
 - Demo video showcasing the full workflow
 - Tweet / X thread
 - Product Hunt launch
+
+## 6. npm Cache
+
+It's not only possible — it's a well-known pattern. Here's how it would work:
+1. Before npm ci, compute a SHA256 hash of the repo's package-lock.json
+2. Check if s3://renderpr-cache-{account}/npm/{hash}.tar.gz exists
+3. If cache hit: download the tarball (~5s) and extract it into the repo's node_modules/ — skip npm ci entirely
+4. If cache miss: run npm ci, then tar up node_modules and upload to S3 in the background (future runs benefit)
+The cache is keyed by the lockfile hash, so it's safe — different dependency trees never collide. Across multiple PRs on the same repo, only the first one pays npm ci; the rest download in seconds.
+Implementation: around 20 lines in _start_dev_server + reuse the existing screenshots bucket (or a new one) + an S3 IAM permission.
