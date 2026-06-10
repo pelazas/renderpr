@@ -242,3 +242,57 @@ class TestInlineReferences:
         text = "No screenshots needed here."
         result = _inline_references(text, [("url", "Mobile XS - /")])
         assert result == text
+
+
+class TestInlineAllViews:
+    def test_replaces_all_views_token(self):
+        from src.agent.review import _inline_all_views
+
+        text = "Some text. [All views: /]"
+        urls = [
+            ("https://s3/desktop.png", "Desktop - /"),
+            ("https://s3/mobile.png", "Mobile XS - /"),
+            ("https://s3/tablet.png", "Tablet - /"),
+            ("https://s3/xl.png", "Desktop XL - /"),
+        ]
+        result = _inline_all_views(text, urls)
+        assert "[View on Desktop XL]" in result
+        assert "[View on Mobile XS]" in result
+        assert "[View on Tablet]" in result
+        assert "[View on Desktop]" not in result
+
+    def test_excludes_desktop_from_links(self):
+        from src.agent.review import _inline_all_views
+
+        text = "End section. [All views: /users]"
+        urls = [
+            ("https://s3/desktop.png", "Desktop - /users"),
+            ("https://s3/mobile.png", "Mobile XS - /users"),
+        ]
+        result = _inline_all_views(text, urls)
+        assert "[View on Desktop]" not in result
+        assert "[View on Mobile XS]" in result
+
+    def test_no_non_desktop_returns_empty(self):
+        from src.agent.review import _inline_all_views
+
+        text = "End section. [All views: /]"
+        urls = [("https://s3/desktop.png", "Desktop - /")]
+        result = _inline_all_views(text, urls)
+        assert "View on" not in result
+
+    def test_no_matching_route_returns_empty(self):
+        from src.agent.review import _inline_all_views
+
+        text = "End section. [All views: /unknown]"
+        urls = [("https://s3/desktop.png", "Desktop - /")]
+        result = _inline_all_views(text, urls)
+        assert "View on" not in result
+
+    def test_no_token_in_text_unchanged(self):
+        from src.agent.review import _inline_all_views
+
+        text = "Just a normal paragraph without tokens."
+        urls = [("https://s3/m.png", "Mobile XS - /")]
+        result = _inline_all_views(text, urls)
+        assert result == text

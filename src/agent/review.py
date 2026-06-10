@@ -25,25 +25,36 @@ class ReviewError(Exception):
 REVIEW_PROMPT = """You are a frontend review bot for a Pull Request.
 Review the code diff and screenshots below.
 
-Analyze:
-1. **Layout & Responsiveness** — Are there visual regressions at any viewport width?
-2. **Code Quality** — Any issues in the diff?
-3. **Accessibility** — WCAG violations visible in screenshots?
-4. **Usability** — UX concerns?
+Write your review using this exact structure:
 
-Available screenshots are listed with identifiers like `[viewport - /route]`.
-When discussing a visual issue, reference the relevant screenshot by placing its identifier inline, e.g.:
-"The button looks good on desktop [Desktop - /dashboard]"
+# RenderPR Overview
+
+---
+
+## RenderPR Summary
+
+Write 3-4 bullet points summarizing the overall changes. Do NOT organize by route/file — this should be a high-level summary of what the PR does as a whole.
+
+## UI Changes
+
+For each distinct change in the PR, create a subsection with a `### <change name>` heading. For each change:
+
+1. Write 1-2 sentences describing the change. If the change appears on a specific route, mention it.
+2. Reference the Desktop screenshot inline: [Desktop - /route]
+3. End the section with a new line containing: [All views: /route]
+
+Always include [All views: /route] at the end of every change section so readers can access other viewports without extra inline images. If a change applies to multiple routes, list them separately.
 
 Rules for screenshot references:
-- Show at least the Desktop screenshot for each changed route. Start each route's section with its screenshot.
-- Use `[Desktop - /route]` as your default. Only reference Mobile XS, Tablet, or Desktop XL if you have something specific to say about that viewport.
-- When you include an image reference, put a blank line before and after it. Each image reference should be on its own line.
-- If everything looks good, just say so with the screenshot — don't fabricate issues.
+- Always show the Desktop viewport as the main image. Do NOT include multiple inline images per change.
+- Only reference Mobile XS, Tablet, or Desktop XL inline if you have a specific, important reason (e.g., "the modal overflows the viewport on Mobile XS"). Always explain why you're showing a non-desktop viewport.
+- Use [Desktop - /route] format for the main image.
 
-Format your response as plain markdown with clear sections.
-Do NOT wrap your response in a code block or fence.
-Be concise but specific. Reference line numbers from the diff where relevant."""
+Additional rules:
+- If there are any major security vulnerabilities, point them out in their own subsection.
+- If everything looks good, just say so — don't fabricate issues.
+- Format as plain markdown. Do NOT wrap your response in a code block or fence.
+- Be concise but specific. Reference line numbers from the diff where relevant."""
 
 
 def _build_content(
@@ -114,6 +125,27 @@ def _inline_references(text: str, url_pairs: list[tuple[str, str]]) -> str:
     return re.sub(pattern, replace_ref, text)
 
 
+def _inline_all_views(text: str, screenshot_urls: list[tuple[str, str]]) -> str:
+    route_views: dict[str, list[tuple[str, str]]] = {}
+    for url, label in screenshot_urls:
+        parts = label.split(" - ", 1)
+        if len(parts) == 2:
+            viewport, route = parts
+            route_views.setdefault(route, []).append((viewport, url))
+
+    pattern = r"\[All views:\s*(/[^\]]*)\]"
+
+    def replace_all_views(match: re.Match) -> str:
+        route = match.group(1).strip()
+        views = route_views.get(route, [])
+        non_desktop = [(v, u) for v, u in views if v != "Desktop"]
+        if not non_desktop:
+            return ""
+        return " · ".join(f"[View on {v}]({u})" for v, u in sorted(non_desktop))
+
+    return re.sub(pattern, replace_all_views, text)
+
+
 def run_review(
     diff: str,
     screenshot_paths: list[Path],
@@ -147,6 +179,7 @@ def run_review(
                 text = _strip_code_fence(text)
                 if screenshot_urls:
                     text = _inline_references(text, screenshot_urls)
+                    text = _inline_all_views(text, screenshot_urls)
                 return text
             except (KeyError, IndexError, TypeError):
                 raise ReviewError(f"Unexpected OpenRouter response shape: {str(data)[:200]}")
