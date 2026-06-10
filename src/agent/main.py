@@ -16,7 +16,9 @@ import jwt
 
 from src.agent.config import (
     NPM_CACHE_ENABLED,
+    NPM_CACHE_HASH_ALGO,
     NPM_CACHE_PREFIX,
+    NPM_CI_TIMEOUT_SECONDS,
     DEV_SERVER_HOST,
     DEV_SERVER_PORT,
     DEV_SERVER_START_TIMEOUT,
@@ -96,7 +98,7 @@ def _npm_cache_key(install_cwd: Path) -> str | None:
         lockfile = install_cwd / "package-lock.json"
         if not lockfile.exists():
             return None
-        return hashlib.sha256(lockfile.read_bytes()).hexdigest()
+        return hashlib.new(NPM_CACHE_HASH_ALGO, lockfile.read_bytes()).hexdigest()
     except OSError:
         return None
 
@@ -106,18 +108,31 @@ def _try_npm_cache_restore(install_cwd: Path, cache_key: str, s3) -> bool:
     if not bucket:
         return False
     key = f"{NPM_CACHE_PREFIX}/{cache_key}.tar.gz"
+    tarball = Path("/tmp") / f"{cache_key}.tar.gz"
     try:
         s3.head_object(Bucket=bucket, Key=key)
         logger.info("npm cache HIT for %s, downloading...", cache_key[:12])
-        tarball = Path("/tmp") / f"{cache_key}.tar.gz"
         s3.download_file(bucket, key, str(tarball))
-        node_modules = install_cwd / "node_modules"
-        shutil.rmtree(node_modules, ignore_errors=True)
-        node_modules.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["tar", "xzf", str(tarball), "-C", str(install_cwd)], check=True)
-        tarball.unlink()
-        logger.info("npm cache restored (%d files)", len(list(node_modules.rglob("*"))))
-        return True
+        try:
+            extract_dir = Path("/tmp") / f"{cache_key}_extracted"
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["tar", "xzf", str(tarball), "-C", str(extract_dir)], check=True)
+            node_modules_dst = install_cwd / "node_modules"
+            shutil.rmtree(node_modules_dst, ignore_errors=True)
+            shutil.move(str(extract_dir / "node_modules"), str(node_modules_dst))
+            tarball.unlink()
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            logger.info("npm cache restored")
+            return True
+        except (subprocess.CalledProcessError, OSError):
+            logger.warning("Corrupted tarball, deleting and falling back")
+            try:
+                s3.delete_object(Bucket=bucket, Key=key)
+            except Exception:
+                pass
+            tarball.unlink(missing_ok=True)
+            return False
     except BotoClientError as e:
         if e.response["Error"]["Code"] == "NotFound":
             logger.info("npm cache MISS for %s", cache_key[:12])
@@ -190,14 +205,14 @@ def _start_dev_server(
                 out_lines.append(line)
                 if len(out_lines) % 50 == 0:
                     logger.info("npm ci progress: ... %s", line.rstrip()[:200])
-            proc.wait(timeout=300)
+            proc.wait(timeout=NPM_CI_TIMEOUT_SECONDS)
             if proc.returncode != 0:
                 logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
                 logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
                 sys.exit(1)
         except subprocess.TimeoutExpired:
             proc.kill()
-            logger.error("npm ci timed out after 300s in %s. Last 20 lines:\n%s", install_cwd, "\n".join(out_lines[-20:]))
+            logger.error("npm ci timed out after %ds in %s. Last 20 lines:\n%s", NPM_CI_TIMEOUT_SECONDS, install_cwd, "\n".join(out_lines[-20:]))
             sys.exit(1)
         except Exception:
             logger.exception("npm ci failed unexpectedly")

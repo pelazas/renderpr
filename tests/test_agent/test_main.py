@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+from pathlib import Path
 
 import pytest
 from pytest import MonkeyPatch
@@ -283,74 +284,256 @@ class TestStartDevServer:
         )
 
 
+class _PopenSpy:
+    def __init__(self, **attrs):
+        self.calls: list[dict] = []
+        self.returncode = 0
+        self.args: list = []
+        self.stdout = type("MockStream", (), {"readline": lambda self: ""})()
+
+    def __call__(self, cmd, **kw):
+        self.calls.append({"cmd": cmd, "kw": kw})
+        self.args = cmd
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, input=None, timeout=None):
+        return ("", "")
+
+    def kill(self):
+        pass
+
+    @property
+    def pid(self):
+        return 123
+
+
+def _set_up_dev_server_test(monkeypatch, tmp_path, package_json_exists=True, lockfile_exists=True):
+    pkg = tmp_path / "package.json"
+    if package_json_exists:
+        pkg.write_text('{"scripts": {"dev": "next dev"}}')
+    if lockfile_exists:
+        lock = tmp_path / "package-lock.json"
+        lock.write_text('{"lockfileVersion": 3}')
+
+    monkeypatch.setattr("os.path.exists", lambda p: True)
+    monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+    monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+    monkeypatch.setattr("src.agent.main.REPO_DIR", str(tmp_path))
+    return pkg
+
+
+def _make_npm_ci_tarball(tmp_path, dst_path):
+    import tarfile
+    src = tmp_path / "node_modules_src"
+    src.mkdir(exist_ok=True)
+    (src / "dummy.txt").write_text("ok")
+    with tarfile.open(str(dst_path), "w:gz") as tar:
+        tar.add(str(src), arcname="node_modules")
+
+
+class _MockS3Miss:
+    def __init__(self):
+        self.upload_called = False
+
+    def head_object(self, Bucket=None, Key=None):
+        from botocore.exceptions import ClientError
+        raise ClientError({"Error": {"Code": "NotFound", "Message": "Not Found"}}, "head_object")
+
+    def download_file(self, bucket, key, path):
+        pass
+
+    def upload_file(self, *a, **kw):
+        self.upload_called = True
+
+    def delete_object(self, Bucket=None, Key=None):
+        pass
+
+
+class _MockS3GenericError:
+    def __init__(self):
+        self.upload_called = False
+
+    def head_object(self, Bucket=None, Key=None):
+        from botocore.exceptions import ClientError
+        raise ClientError({"Error": {"Code": "InternalError", "Message": "Oops"}}, "head_object")
+
+    def download_file(self, bucket, key, path):
+        pass
+
+    def upload_file(self, *a, **kw):
+        self.upload_called = True
+
+    def delete_object(self, Bucket=None, Key=None):
+        pass
+
+
+def _setup_health_check(monkeypatch):
+    import httpx
+    monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(httpx.Response(200)))
+
+
 class TestNpmCache:
     def test_cache_hit_skips_npm_ci(self, monkeypatch, tmp_path):
-        lockfile = tmp_path / "package-lock.json"
-        lockfile.write_text('{"lockfileVersion": 3}')
+        _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
         monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
 
+        # Create a real, valid tarball that the mock will "download"
+        real_tarball = tmp_path / "real_tarball.tar.gz"
+        _make_npm_ci_tarball(tmp_path, real_tarball)
+
         class MockS3:
+            def __init__(self):
+                self.head_called = False
+                self.downloaded = False
+                self.upload_called = False
             def head_object(self, Bucket=None, Key=None):
+                self.head_called = True
                 return {"ResponseMetadata": {"HTTPStatusCode": 200}}
             def download_file(self, bucket, key, path):
-                from pathlib import Path
-                Path(path).touch()
-                import tarfile
-                node_mods = tmp_path / "node_modules"
-                node_mods.mkdir(exist_ok=True)
-                (node_mods / "dummy.txt").write_text("ok")
-                with tarfile.open(path, "w:gz") as tar:
-                    tar.add(str(node_mods), arcname="node_modules")
+                import shutil
+                shutil.copy(str(real_tarball), str(path))
+                self.downloaded = True
+            def upload_file(self, *a, **kw):
+                self.upload_called = True
+            def delete_object(self, Bucket=None, Key=None):
+                pass
 
-        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
-        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
-        monkeypatch.setattr("os.path.exists", lambda p: True)
-        import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
+        mock_s3 = MockS3()
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: mock_s3)
 
-        import httpx
-        mock_resp = httpx.Response(200)
-        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+        # Mock Popen: only intercept npm commands; let tar run for real
+        import subprocess as sp_module
+        original_popen = sp_module.Popen
+        npm_calls: list[dict] = []
+
+        class PopenPassthrough:
+            def __init__(self, cmd, **kw):
+                if isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == "npm":
+                    npm_calls.append({"cmd": cmd, "kw": kw})
+                    self.args = cmd
+                    self.stdout = type("MockStream", (), {"readline": lambda self: ""})()
+                    self.returncode = 0
+                    self._mocked = True
+                else:
+                    self._real = original_popen(cmd, **kw)
+                    self._mocked = False
+            def __enter__(self):
+                if not self._mocked:
+                    return self._real.__enter__()
+                return self
+            def __exit__(self, *a):
+                if not self._mocked:
+                    return self._real.__exit__(*a)
+                return False
+            def wait(self, timeout=None):
+                if not self._mocked:
+                    return self._real.wait(timeout=timeout)
+                return 0
+            def poll(self):
+                if not self._mocked:
+                    return self._real.poll()
+                return 0
+            def communicate(self, input=None, timeout=None):
+                if not self._mocked:
+                    return self._real.communicate(input, timeout=timeout)
+                return ("", "")
+            def kill(self):
+                if not self._mocked:
+                    return self._real.kill()
+            @property
+            def pid(self):
+                if not self._mocked:
+                    return self._real.pid
+                return 123
+
+        monkeypatch.setattr(sp_module, "Popen", PopenPassthrough)
+        _setup_health_check(monkeypatch)
 
         _start_dev_server()
+
+        npm_ci_calls = [c for c in npm_calls if c["cmd"][:2] == ["npm", "ci"]]
+        assert len(npm_ci_calls) == 0, f"npm ci should be skipped, got {npm_ci_calls}"
+        assert mock_s3.head_called
+        assert mock_s3.downloaded
 
     def test_cache_miss_runs_npm_ci(self, monkeypatch, tmp_path):
-        lockfile = tmp_path / "package-lock.json"
-        lockfile.write_text('{"lockfileVersion": 3}')
+        _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
         monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3Miss())
 
-        from botocore.exceptions import ClientError
-
-        class MockS3:
-            def head_object(self, Bucket=None, Key=None):
-                raise ClientError({"Error": {"Code": "NotFound", "Message": "Not Found"}}, "head_object")
-
-        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
-        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
-        monkeypatch.setattr("os.path.exists", lambda p: True)
+        spy = _PopenSpy()
         import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
-
-        import httpx
-        mock_resp = httpx.Response(200)
-        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        _setup_health_check(monkeypatch)
 
         _start_dev_server()
 
-    def test_cache_disabled_skips(self, monkeypatch):
+        npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
+        assert len(npm_ci_calls) == 1
+
+    def test_cache_generic_error_falls_back_to_npm_ci(self, monkeypatch, tmp_path):
+        _set_up_dev_server_test(monkeypatch, tmp_path)
+        monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3GenericError())
+
+        spy = _PopenSpy()
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        _setup_health_check(monkeypatch)
+
+        _start_dev_server()
+
+        npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
+        assert len(npm_ci_calls) == 1
+
+    def test_no_lockfile_no_s3_calls(self, monkeypatch, tmp_path):
+        _set_up_dev_server_test(monkeypatch, tmp_path, lockfile_exists=False)
+        monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
+        boto3_calls = []
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: boto3_calls.append(1) or _MockS3Miss())
+
+        spy = _PopenSpy()
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        _setup_health_check(monkeypatch)
+
+        _start_dev_server()
+
+        assert len(boto3_calls) == 0, "Should not call S3 without a lockfile"
+        npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
+        assert len(npm_ci_calls) == 1
+
+    def test_cache_disabled_runs_npm_ci(self, monkeypatch, tmp_path):
+        _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", False)
-        monkeypatch.setattr("os.path.exists", lambda p: True)
+        boto3_calls = []
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: boto3_calls.append(1) or _MockS3Miss())
 
+        spy = _PopenSpy()
         import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
-
-        import httpx
-        mock_resp = httpx.Response(200)
-        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+        monkeypatch.setattr(subprocess, "Popen", spy)
+        _setup_health_check(monkeypatch)
 
         _start_dev_server()
+
+        assert len(boto3_calls) == 0
+        npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
+        assert len(npm_ci_calls) == 1
 
 
 class TestNpmCacheKey:
@@ -366,6 +549,99 @@ class TestNpmCacheKey:
         from src.agent.main import _npm_cache_key
         result = _npm_cache_key(tmp_path)
         assert result is None
+
+
+class TestNpmCacheStore:
+    def test_stores_tarball_in_s3(self, monkeypatch, tmp_path):
+        from src.agent.main import _try_npm_cache_store
+        install_cwd = tmp_path / "proj"
+        install_cwd.mkdir()
+        (install_cwd / "node_modules").mkdir()
+        (install_cwd / "node_modules" / "pkg.json").write_text("{}")
+        cache_key = "abcd1234"
+
+        upload_calls = []
+
+        class MockS3:
+            def upload_file(self, file_path, bucket, key):
+                upload_calls.append({"file_path": str(file_path), "bucket": bucket, "key": key})
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "my-bucket")
+
+        _try_npm_cache_store(install_cwd, cache_key)
+
+        assert len(upload_calls) == 1
+        call = upload_calls[0]
+        assert call["bucket"] == "my-bucket"
+        assert call["key"] == "npm-cache/abcd1234.tar.gz"
+        assert "node_modules" not in Path(call["file_path"]).name
+        # Tarball should exist during the upload (may be cleaned up after)
+
+    def test_no_upload_without_cache_key(self, monkeypatch, tmp_path):
+        from src.agent.main import _try_npm_cache_store
+        install_cwd = tmp_path / "proj"
+        install_cwd.mkdir()
+
+        upload_calls = []
+
+        class MockS3:
+            def upload_file(self, *a, **kw):
+                upload_calls.append(1)
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "my-bucket")
+
+        _try_npm_cache_store(install_cwd, None)
+        assert len(upload_calls) == 0
+
+    def test_upload_failure_does_not_raise(self, monkeypatch, tmp_path):
+        from src.agent.main import _try_npm_cache_store
+        install_cwd = tmp_path / "proj"
+        install_cwd.mkdir()
+        (install_cwd / "node_modules").mkdir()
+
+        class FailingS3:
+            def upload_file(self, *a, **kw):
+                raise Exception("S3 down")
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: FailingS3())
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "my-bucket")
+
+        _try_npm_cache_store(install_cwd, "somekey")
+
+    def test_corrupted_tarball_triggers_delete_from_s3(self, monkeypatch, tmp_path):
+        from src.agent.main import _try_npm_cache_restore
+        install_cwd = tmp_path / "proj"
+        install_cwd.mkdir()
+        lockfile = install_cwd / "package-lock.json"
+        lockfile.write_text("dummy")
+
+        deletes = []
+
+        class MockS3:
+            def __init__(self):
+                self.tarball = tmp_path / "bad.tar.gz"
+                self.tarball.write_bytes(b"not a real tarball")
+
+            def head_object(self, Bucket=None, Key=None):
+                return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+
+            def download_file(self, bucket, key, path):
+                Path(path).write_bytes(b"not a real tarball")
+
+            def delete_object(self, Bucket=None, Key=None):
+                deletes.append({"Bucket": Bucket, "Key": Key})
+
+        s3 = MockS3()
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: s3)
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "my-bucket")
+
+        result = _try_npm_cache_restore(install_cwd, "abc123", s3)
+
+        assert result is False
+        assert len(deletes) == 1
+        assert deletes[0]["Key"] == "npm-cache/abc123.tar.gz"
 
 
 class TestFetchSecrets:

@@ -60,7 +60,15 @@ export class RenderprStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       lifecycleRules: [
         {
+          id: "ScreenshotRetention",
           enabled: true,
+          prefix: "screenshots/",
+          expiration: cdk.Duration.days(7),
+        },
+        {
+          id: "NpmCacheExpiration",
+          enabled: true,
+          prefix: "npm-cache/",
           expiration: cdk.Duration.days(7),
         },
       ],
