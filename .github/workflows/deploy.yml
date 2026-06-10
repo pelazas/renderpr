@@ -43,9 +43,8 @@ jobs:
           filters: |
             infra:
               - 'cdk/**'
-              - 'src/lambda_handler/**'
+              - 'src/**'
               - 'Dockerfile'
-              - 'src/agent/requirements.txt'
               - '.github/workflows/deploy.yml'
 
       - name: Skip deploy if no infra changes
