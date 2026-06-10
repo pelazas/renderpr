@@ -91,7 +91,6 @@ def capture_screenshots(
                 mock_count = 0
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
-                        pattern = f"**{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
                         def make_handler(p, bd, st):
@@ -103,7 +102,7 @@ def capture_screenshots(
                                     body=bd,
                                 )
                             return handler
-                        page.route(pattern, make_handler(path, body, status))
+                        page.route(lambda url, p=path: p in url, make_handler(path, body, status))
                         mock_count += 1
                 logger.info("Registered %d mock endpoint(s)", mock_count)
 
