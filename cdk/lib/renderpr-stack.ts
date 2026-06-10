@@ -128,6 +128,13 @@ export class RenderprStack extends cdk.Stack {
 
     fargateTaskRole.addToPolicy(
       new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        resources: [screenshotBucket.arnForObjects("npm-cache/*")],
+      }),
+    );
+
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
         actions: ["ec2:DescribeNetworkInterfaces"],
         resources: ["*"],
       }),

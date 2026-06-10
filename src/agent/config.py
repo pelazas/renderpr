@@ -36,6 +36,10 @@ FRONTEND_EXTENSIONS: Final[tuple[str, ...]] = (
 # Package.json discovery
 MAX_PACKAGE_SCAN_DEPTH: Final[int] = 5
 
+# S3 npm cache
+NPM_CACHE_ENABLED: bool = True
+NPM_CACHE_PREFIX: str = "npm-cache"
+
 LLM_RETRY_BASE_DELAY: int = 2
 LLM_RETRY_MAX_DELAY: int = 30
 LLM_RETRY_JITTER: float = 0.1

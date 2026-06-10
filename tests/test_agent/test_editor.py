@@ -1,6 +1,3 @@
-import os
-import subprocess
-import tempfile
 
 from src.agent.editor import apply_edit, wait_for_dev_server, revert_edit
 

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import logging
@@ -5,13 +6,17 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 import boto3
+from botocore.exceptions import ClientError as BotoClientError
 import httpx
 import jwt
 
 from src.agent.config import (
+    NPM_CACHE_ENABLED,
+    NPM_CACHE_PREFIX,
     DEV_SERVER_HOST,
     DEV_SERVER_PORT,
     DEV_SERVER_START_TIMEOUT,
@@ -20,7 +25,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
-from src.agent.polling import ChangeSession, has_pending_edits
+from src.agent.polling import ChangeSession
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +89,63 @@ def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:
                 logger.warning("git %s failed (attempt %d/%d), retrying...", cmd_name, attempt + 1, RETRY_MAX_ATTEMPTS)
 
 
+def _npm_cache_key(install_cwd: Path) -> str | None:
+    try:
+        if not install_cwd:
+            return None
+        lockfile = install_cwd / "package-lock.json"
+        if not lockfile.exists():
+            return None
+        return hashlib.sha256(lockfile.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _try_npm_cache_restore(install_cwd: Path, cache_key: str, s3) -> bool:
+    bucket = os.environ.get("SCREENSHOT_BUCKET", "")
+    if not bucket:
+        return False
+    key = f"{NPM_CACHE_PREFIX}/{cache_key}.tar.gz"
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        logger.info("npm cache HIT for %s, downloading...", cache_key[:12])
+        tarball = Path("/tmp") / f"{cache_key}.tar.gz"
+        s3.download_file(bucket, key, str(tarball))
+        node_modules = install_cwd / "node_modules"
+        shutil.rmtree(node_modules, ignore_errors=True)
+        node_modules.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["tar", "xzf", str(tarball), "-C", str(install_cwd)], check=True)
+        tarball.unlink()
+        logger.info("npm cache restored (%d files)", len(list(node_modules.rglob("*"))))
+        return True
+    except BotoClientError as e:
+        if e.response["Error"]["Code"] == "NotFound":
+            logger.info("npm cache MISS for %s", cache_key[:12])
+        else:
+            logger.warning("npm cache head_object error: %s", e)
+    except Exception:
+        logger.warning("npm cache restore failed unexpectedly", exc_info=True)
+    return False
+
+
+def _try_npm_cache_store(install_cwd: Path, cache_key: str | None) -> None:
+    if not cache_key:
+        return
+    bucket = os.environ.get("SCREENSHOT_BUCKET", "")
+    if not bucket:
+        return
+    key = f"{NPM_CACHE_PREFIX}/{cache_key}.tar.gz"
+    try:
+        tarball = Path("/tmp") / f"{cache_key}.tar.gz"
+        subprocess.run(["tar", "czf", str(tarball), "-C", str(install_cwd), "node_modules"], check=True)
+        s3 = boto3.client("s3")
+        s3.upload_file(str(tarball), bucket, key)
+        tarball.unlink()
+        logger.info("npm cache stored for %s", cache_key[:12])
+    except Exception:
+        logger.warning("npm cache upload failed", exc_info=True)
+
+
 _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
 
@@ -105,32 +167,43 @@ def _start_dev_server(
         logger.error("No package.json found at %s", pkg_json)
         sys.exit(1)
 
-    try:
-        proc = subprocess.Popen(
-            ["npm", "ci"],
-            cwd=str(install_cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
-        out_lines: list[str] = []
-        for line in iter(proc.stdout.readline, ""):
-            out_lines.append(line)
-            # Log periodically so we see progress in real time
-            if len(out_lines) % 50 == 0:
-                logger.info("npm ci progress: ... %s", line.rstrip()[:200])
-        proc.wait(timeout=300)
-        if proc.returncode != 0:
-            logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
-            logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
+    cache_restored = False
+    cache_key = _npm_cache_key(install_cwd) if NPM_CACHE_ENABLED else None
+    if cache_key is not None:
+        try:
+            s3 = boto3.client("s3")
+            cache_restored = _try_npm_cache_restore(install_cwd, cache_key, s3)
+        except Exception:
+            logger.warning("npm cache check failed", exc_info=True)
+
+    if not cache_restored:
+        try:
+            proc = subprocess.Popen(
+                ["npm", "ci"],
+                cwd=str(install_cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            out_lines: list[str] = []
+            for line in iter(proc.stdout.readline, ""):
+                out_lines.append(line)
+                if len(out_lines) % 50 == 0:
+                    logger.info("npm ci progress: ... %s", line.rstrip()[:200])
+            proc.wait(timeout=300)
+            if proc.returncode != 0:
+                logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
+                logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
+                sys.exit(1)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            logger.error("npm ci timed out after 300s in %s. Last 20 lines:\n%s", install_cwd, "\n".join(out_lines[-20:]))
             sys.exit(1)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        logger.error("npm ci timed out after 300s in %s. Last 20 lines:\n%s", install_cwd, "\n".join(out_lines[-20:]))
-        sys.exit(1)
-    except Exception:
-        logger.exception("npm ci failed unexpectedly")
-        sys.exit(1)
+        except Exception:
+            logger.exception("npm ci failed unexpectedly")
+            sys.exit(1)
+
+        threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
     _dev_server_env = {**os.environ, "HOST": "0.0.0.0"}
     _dev_server_proc = subprocess.Popen(

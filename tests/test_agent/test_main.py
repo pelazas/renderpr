@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 
@@ -18,19 +19,31 @@ def _successful_discovery(*a, **kw):
         "reason": None,
     }
 
+class _MockCommandServer:
+    def __init__(self, **kw):
+        pass
+    def start(self):
+        return
+    def wait_for_command(self):
+        return {"action": "shutdown"}
+
+
 def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
+    monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
+    monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
     if posted_body is not None:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
     else:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
+    monkeypatch.setenv("RENDERPR_PUBLIC_IP", "127.0.0.1")
 
 
 def test_run_logs_env_vars(caplog, monkeypatch):
@@ -48,7 +61,7 @@ def test_run_logs_env_vars(caplog, monkeypatch):
     assert "Dev server ready. Proceeding to review..." in caplog.text
     assert "Fetched diff for PR #42" in caplog.text
     assert "Captured 0 screenshots" in caplog.text
-    assert "RenderPR agent finished" in caplog.text
+    assert "RenderPR agent entering idle loop" in caplog.text
 
 
 def test_run_defaults_when_missing_env(caplog, monkeypatch):
@@ -65,7 +78,7 @@ def test_run_defaults_when_missing_env(caplog, monkeypatch):
     assert "PR Number: unknown" in caplog.text
     assert "Fetched diff for PR #unknown" in caplog.text
     assert "Captured 0 screenshots" in caplog.text
-    assert "RenderPR agent finished" in caplog.text
+    assert "RenderPR agent entering idle loop" in caplog.text
 
 
 def _mock_process(**attrs):
@@ -268,6 +281,91 @@ class TestStartDevServer:
             package_dir="/app/repo/packages/web/package.json",
             install_dir="/app/repo/package.json",
         )
+
+
+class TestNpmCache:
+    def test_cache_hit_skips_npm_ci(self, monkeypatch, tmp_path):
+        lockfile = tmp_path / "package-lock.json"
+        lockfile.write_text('{"lockfileVersion": 3}')
+        monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+
+        class MockS3:
+            def head_object(self, Bucket=None, Key=None):
+                return {"ResponseMetadata": {"HTTPStatusCode": 200}}
+            def download_file(self, bucket, key, path):
+                from pathlib import Path
+                Path(path).touch()
+                import tarfile
+                node_mods = tmp_path / "node_modules"
+                node_mods.mkdir(exist_ok=True)
+                (node_mods / "dummy.txt").write_text("ok")
+                with tarfile.open(path, "w:gz") as tar:
+                    tar.add(str(node_mods), arcname="node_modules")
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
+
+        import httpx
+        mock_resp = httpx.Response(200)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        _start_dev_server()
+
+    def test_cache_miss_runs_npm_ci(self, monkeypatch, tmp_path):
+        lockfile = tmp_path / "package-lock.json"
+        lockfile.write_text('{"lockfileVersion": 3}')
+        monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+
+        from botocore.exceptions import ClientError
+
+        class MockS3:
+            def head_object(self, Bucket=None, Key=None):
+                raise ClientError({"Error": {"Code": "NotFound", "Message": "Not Found"}}, "head_object")
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3())
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
+
+        import httpx
+        mock_resp = httpx.Response(200)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        _start_dev_server()
+
+    def test_cache_disabled_skips(self, monkeypatch):
+        monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", False)
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
+
+        import httpx
+        mock_resp = httpx.Response(200)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        _start_dev_server()
+
+
+class TestNpmCacheKey:
+    def test_returns_hash_of_lockfile(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        lockfile = tmp_path / "package-lock.json"
+        lockfile.write_text("test content")
+        result = _npm_cache_key(tmp_path)
+        expected = hashlib.sha256(b"test content").hexdigest()
+        assert result == expected
+
+    def test_returns_none_if_no_lockfile(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        result = _npm_cache_key(tmp_path)
+        assert result is None
 
 
 class TestFetchSecrets:
@@ -576,6 +674,9 @@ class TestDiscoveryIntegration:
         pkg.write_text('{"scripts": {"dev": "next dev"}}')
         monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
         monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
+        monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
+        monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
+        monkeypatch.setenv("RENDERPR_PUBLIC_IP", "127.0.0.1")
 
         started_with = {}
         def track_start(package_dir=None, install_dir=None, **kw):
