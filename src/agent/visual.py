@@ -49,10 +49,6 @@ def _screenshot_route(
                 logger.warning("Action %s failed for %s", action.get("type"), path, exc_info=True)
 
         page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
-        try:
-            page.wait_for_load_state("networkidle", timeout=5000)
-        except Exception:
-            pass
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
@@ -94,24 +90,37 @@ def capture_screenshots(
             page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
 
             if mocks:
-                mock_count = 0
+                mock_entries = []
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
-                        pattern = f"**{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
-                        def make_handler(p, bd, st):
-                            def handler(route):
-                                logger.info("Mock intercepted: %s -> %d (url: %s)", p, st, route.request.url)
-                                route.fulfill(
-                                    status=st,
-                                    content_type="application/json",
-                                    body=bd,
-                                )
-                            return handler
-                        page.route(pattern, make_handler(path, body, status))
-                        mock_count += 1
-                logger.info("Registered %d mock endpoint(s)", mock_count)
+                        mock_entries.append([path, status, body])
+
+                script = (
+                    "(function(){"
+                    "  const mocks = " + json.dumps(mock_entries) + ";"
+                    "  const origFetch = window.fetch ? window.fetch.bind(window) : null;"
+                    "  window.fetch = function(input, init){"
+                    "    const url = typeof input === 'string' ? input : (input && input.url) || '';"
+                    "    for (let i = 0; i < mocks.length; i++){"
+                    "      const path = mocks[i][0];"
+                    "      if (url.indexOf(path) !== -1){"
+                    "        const body = mocks[i][2];"
+                    "        const status = mocks[i][1];"
+                    "        console.log('[RenderPR Mock] ' + path + ' -> ' + status);"
+                    "        return Promise.resolve(new Response(body, {"
+                    "          status: status,"
+                    "          headers: {'Content-Type': 'application/json'}"
+                    "        }));"
+                    "      }"
+                    "    }"
+                    "    return origFetch ? origFetch(input, init) : Promise.reject(new Error('No fetch available'));"
+                    "  };"
+                    "})();"
+                )
+                page.add_init_script(script)
+                logger.info("Mock fetch overrides injected for %d endpoint(s)", len(mock_entries))
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
