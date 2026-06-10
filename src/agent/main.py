@@ -20,7 +20,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
-from src.agent.polling import ChangeSession
+from src.agent.polling import ChangeSession, has_pending_edits
 
 logger = logging.getLogger(__name__)
 
@@ -472,10 +472,62 @@ Live app: http://{public_ip}:3000
         return result
 
     def on_apply() -> dict:
-        return {"status": "error", "message": "Apply not yet implemented."}
+        if not has_pending_edits(REPO_DIR):
+            return {"status": "error", "message": "No pending changes to apply."}
+
+        try:
+            subprocess.run(["git", "add", "-A"], cwd=REPO_DIR, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "renderpr: apply suggested changes"],
+                cwd=REPO_DIR,
+                capture_output=True,
+                check=True,
+            )
+
+            if is_fork:
+                branch = f"renderpr/suggestion-{pr_number}"
+                subprocess.run(
+                    ["git", "push", "origin", f"HEAD:{branch}"],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                )
+                msg = f"Changes pushed to `{branch}` on the base repo."
+            else:
+                subprocess.run(
+                    ["git", "push", "origin", f"HEAD:{head_ref}"],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                )
+                msg = "Changes applied and pushed to the PR."
+
+            _post_comment(token, repo_full_name, pr_number, msg)
+            change_session.clear()
+            return {"status": "success", "message": msg}
+        except subprocess.CalledProcessError as e:
+            logger.exception("Apply failed: %s", e.stderr)
+            return {"status": "error", "message": "Failed to apply changes. Check git state."}
 
     def on_reject() -> dict:
-        return {"status": "error", "message": "Reject not yet implemented."}
+        if not change_session.edited_files:
+            return {"status": "error", "message": "No pending changes to reject."}
+
+        try:
+            for file_path in change_session.edited_files:
+                subprocess.run(
+                    ["git", "checkout", file_path],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                )
+            change_session.clear()
+            msg = "Changes reverted. The app is back to its original state."
+            _post_comment(token, repo_full_name, pr_number, msg)
+            return {"status": "success", "message": msg}
+        except subprocess.CalledProcessError as e:
+            logger.exception("Reject failed: %s", e.stderr)
+            return {"status": "error", "message": "Failed to revert changes."}
 
     server = CommandServer(
         handle_change_fn=on_change,
