@@ -87,15 +87,25 @@ def capture_screenshots(
             context = browser.new_context()
             page = context.new_page()
 
+            page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
+            page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
+
             if mocks:
                 mock_count = 0
+
+                def _log_unmatched(route):
+                    logger.warning("Unmatched API request: %s", route.request.url)
+                    route.continue_()
+
+                page.route(lambda url: "/api/" in url, _log_unmatched)
+
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
                         def make_handler(p, bd, st):
                             def handler(route):
-                                logger.info("Mock intercepted: %s -> %d", p, st)
+                                logger.info("Mock intercepted: %s -> %d (url: %s)", p, st, route.request.url)
                                 route.fulfill(
                                     status=st,
                                     content_type="application/json",
