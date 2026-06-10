@@ -472,16 +472,24 @@ Live app: http://{public_ip}:3000
         return result
 
     def on_apply() -> dict:
-        if not has_pending_edits(REPO_DIR):
+        if not change_session.edited_files:
             return {"status": "error", "message": "No pending changes to apply."}
 
         try:
-            subprocess.run(["git", "add", "-A"], cwd=REPO_DIR, capture_output=True, check=True)
+            for file_path in change_session.edited_files:
+                subprocess.run(
+                    ["git", "add", "--", file_path],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
             subprocess.run(
                 ["git", "commit", "-m", "renderpr: apply suggested changes"],
                 cwd=REPO_DIR,
                 capture_output=True,
                 check=True,
+                timeout=30,
             )
 
             if is_fork:
@@ -491,6 +499,7 @@ Live app: http://{public_ip}:3000
                     cwd=REPO_DIR,
                     capture_output=True,
                     check=True,
+                    timeout=60,
                 )
                 msg = f"Changes pushed to `{branch}` on the base repo."
             else:
@@ -499,6 +508,7 @@ Live app: http://{public_ip}:3000
                     cwd=REPO_DIR,
                     capture_output=True,
                     check=True,
+                    timeout=60,
                 )
                 msg = "Changes applied and pushed to the PR."
 
@@ -508,6 +518,9 @@ Live app: http://{public_ip}:3000
         except subprocess.CalledProcessError as e:
             logger.exception("Apply failed: %s", e.stderr)
             return {"status": "error", "message": "Failed to apply changes. Check git state."}
+        except subprocess.TimeoutExpired:
+            logger.exception("Apply timed out")
+            return {"status": "error", "message": "Apply timed out. Check git state."}
 
     def on_reject() -> dict:
         if not change_session.edited_files:
@@ -516,10 +529,11 @@ Live app: http://{public_ip}:3000
         try:
             for file_path in change_session.edited_files:
                 subprocess.run(
-                    ["git", "checkout", file_path],
+                    ["git", "checkout", "--", file_path],
                     cwd=REPO_DIR,
                     capture_output=True,
                     check=True,
+                    timeout=30,
                 )
             change_session.clear()
             msg = "Changes reverted. The app is back to its original state."
@@ -528,6 +542,9 @@ Live app: http://{public_ip}:3000
         except subprocess.CalledProcessError as e:
             logger.exception("Reject failed: %s", e.stderr)
             return {"status": "error", "message": "Failed to revert changes."}
+        except subprocess.TimeoutExpired:
+            logger.exception("Reject timed out")
+            return {"status": "error", "message": "Reject timed out."}
 
     server = CommandServer(
         handle_change_fn=on_change,

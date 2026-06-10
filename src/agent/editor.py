@@ -11,14 +11,42 @@ from src.agent.config import (
 logger = logging.getLogger(__name__)
 
 
+def _find_occurrence(content: str, old_string: str, line_hint: int | None) -> int | None:
+    """Find the index in content where old_string occurs, preferring the occurrence
+    closest to the given line_hint. Returns the byte offset or None if not found.
+    """
+    occurrences: list[int] = []
+    start = 0
+    while True:
+        idx = content.find(old_string, start)
+        if idx == -1:
+            break
+        occurrences.append(idx)
+        start = idx + 1
+    if not occurrences:
+        return None
+    if len(occurrences) == 1 or line_hint is None:
+        return occurrences[0]
+
+    line_offsets: list[int] = [0]
+    for i, ch in enumerate(content):
+        if ch == "\n":
+            line_offsets.append(i + 1)
+    target_offset = line_offsets[line_hint - 1] if 0 < line_hint <= len(line_offsets) else 0
+
+    return min(occurrences, key=lambda o: abs(o - target_offset))
+
+
 def apply_edit(edit: dict) -> bool:
     filepath = Path(REPO_DIR) / edit["file"]
     if not filepath.exists():
         return False
     content = filepath.read_text()
-    if edit["oldString"] not in content:
+    line_hint = edit.get("line")
+    pos = _find_occurrence(content, edit["oldString"], line_hint)
+    if pos is None:
         return False
-    new_content = content.replace(edit["oldString"], edit["newString"], 1)
+    new_content = content[:pos] + edit["newString"] + content[pos + len(edit["oldString"]):]
     filepath.write_text(new_content)
     return True
 
@@ -33,11 +61,28 @@ def wait_for_dev_server(url: str, timeout: int | None = None, interval: float | 
         try:
             resp = httpx.get(url, timeout=5)
             if resp.status_code == 200:
+                body = resp.text
+                if _has_dev_error_overlay(body):
+                    logger.warning("Dev server returned 200 but contains error overlay")
+                    time.sleep(interval)
+                    continue
                 return True
         except (httpx.HTTPError, ConnectionError):
             pass
         time.sleep(interval)
     return False
+
+
+def _has_dev_error_overlay(body: str) -> bool:
+    markers = (
+        "nextjs__container_errors",
+        "__next_error__",
+        "Application error",
+        "Build Error",
+        "Failed to compile",
+        "__nextjs_original-stack-frame",
+    )
+    return any(m in body for m in markers)
 
 
 def revert_edit(edit: dict) -> None:
@@ -47,6 +92,7 @@ def revert_edit(edit: dict) -> None:
         cwd=REPO_DIR,
         capture_output=True,
         check=True,
+        timeout=30,
     )
 
 

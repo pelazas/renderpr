@@ -184,6 +184,7 @@ export class RenderprStack extends cdk.Stack {
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
+        RENDERPR_COMMAND_TOKEN: this.node.tryGetContext("commandToken") ?? "",
       },
     });
 
@@ -199,15 +200,19 @@ export class RenderprStack extends cdk.Stack {
     );
     handler.addEnvironment("SECURITY_GROUP_ID", fargateSg.securityGroupId);
     handler.addEnvironment("GITHUB_PARAM_NAME", githubParamName);
+    handler.addEnvironment(
+      "RENDERPR_COMMAND_TOKEN",
+      this.node.tryGetContext("commandToken") ?? "",
+    );
 
     // Allow Lambda to pass the Fargate roles to ECS (required by RunTask)
     fargateExecutionRole.grantPassRole(lambdaRole);
     fargateTaskRole.grantPassRole(lambdaRole);
 
-    // Grant Lambda permission to run, describe, and list tasks
+    // Grant Lambda permission to run, describe, list, and tag tasks
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks"],
+        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource"],
         resources: [
           `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDef.family}*`,
           cluster.clusterArn,

@@ -3,10 +3,13 @@ import os
 import hmac
 import hashlib
 import logging
-import re
 import urllib.request
+import sys
 
 import boto3
+
+# Make src importable when running in Lambda
+sys.path.insert(0, os.path.join(os.environ.get("LAMBDA_TASK_ROOT", ""), "src"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -34,8 +37,9 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(expected, signature_header)
 
 
-def _run_fargate_task(overrides: list[dict]) -> None:
+def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
     client = boto3.client("ecs")
+    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
     client.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
@@ -55,24 +59,36 @@ def _run_fargate_task(overrides: list[dict]) -> None:
                 }
             ]
         },
+        tags=[{"key": "Project", "value": "renderpr"}, {"key": "PRNumber", "value": pr_number}],
     )
 
 
-def _get_running_task_eni() -> str | None:
+def _get_running_task_eni(pr_number: str) -> str | None:
     ecs = boto3.client("ecs")
-    tasks = ecs.list_tasks(
+    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
+
+    task_arns: list[str] = []
+    paginator = ecs.get_paginator("list_tasks")
+    for page in paginator.paginate(
         cluster=ECS_CLUSTER,
-        family=ECS_TASK_DEF.split("/")[-1].split(":")[0],
-    )
-    task_arns = tasks.get("taskArns", [])
+        family=family,
+        desiredStatus="RUNNING",
+    ):
+        task_arns.extend(page.get("taskArns", []))
+
     if not task_arns:
         return None
 
-    desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=[task_arns[0]])
-    for attachment in desc["tasks"][0].get("attachments", []):
-        for detail in attachment.get("details", []):
-            if detail["name"] == "networkInterfaceId":
-                return detail["value"]
+    for i in range(0, len(task_arns), 100):
+        batch = task_arns[i : i + 100]
+        desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=batch)
+        for task in desc.get("tasks", []):
+            for tag in task.get("tags", []):
+                if tag["key"] == "PRNumber" and tag["value"] == pr_number:
+                    for attachment in task.get("attachments", []):
+                        for detail in attachment.get("details", []):
+                            if detail["name"] == "networkInterfaceId":
+                                return detail["value"]
     return None
 
 
@@ -90,14 +106,18 @@ def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
     if query:
         body["query"] = query
     data = json.dumps(body).encode()
+    token = os.environ.get("RENDERPR_COMMAND_TOKEN", "")
+    request_headers = {"Content-Type": "application/json"}
+    if token:
+        request_headers["X-RenderPR-Token"] = token
     try:
         req = urllib.request.Request(
             f"http://{public_ip}:3001/__renderpr/command",
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers=request_headers,
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=10)
+        urllib.request.urlopen(req, timeout=5)
         return True
     except Exception:
         logger.exception("Failed to dispatch command to task at %s", public_ip)
@@ -105,25 +125,12 @@ def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
 
 
 def _parse_renderpr_command(comment_body: str) -> dict | None:
-    if "@renderpr" not in comment_body:
+    from src.agent.polling import parse_command
+
+    parsed = parse_command(comment_body)
+    if parsed is None:
         return None
-
-    idx = comment_body.find("@renderpr")
-    after = comment_body[idx + len("@renderpr"):].strip()
-
-    if not after or after.startswith("review") or after.startswith("help"):
-        return {"command": "review"}
-
-    match = re.match(r"code change\s*:?\s*(.+)", after)
-    if match:
-        return {"command": "change", "query": match.group(1).strip()}
-
-    if after == "apply":
-        return {"command": "apply"}
-    if after == "reject":
-        return {"command": "reject"}
-
-    return {"command": "review"}
+    return {"command": parsed["action"], "query": parsed.get("query")}
 
 
 def handler(event: dict, context: object) -> dict:
@@ -171,7 +178,7 @@ def handler(event: dict, context: object) -> dict:
         logger.info("Parsed command: %s", cmd)
 
         if cmd and cmd["command"] in ("change", "apply", "reject"):
-            eni_id = _get_running_task_eni()
+            eni_id = _get_running_task_eni(pr_number)
             if eni_id:
                 public_ip = _get_public_ip(eni_id)
                 if public_ip:
@@ -186,16 +193,16 @@ def handler(event: dict, context: object) -> dict:
             if cmd["command"] == "change" and cmd.get("query"):
                 command_str = f"code_change::{cmd['query']}"
 
-            _run_fargate_task(base_env + [{"name": "COMMAND", "value": command_str}])
+            _run_fargate_task(base_env + [{"name": "COMMAND", "value": command_str}], pr_number)
             return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
         # Default: full review
-        _run_fargate_task(base_env)
+        _run_fargate_task(base_env, pr_number)
         return {"statusCode": 200, "body": json.dumps({"ok": True})}
 
     elif action not in ("opened", "synchronize"):
         logger.info("Ignoring non-trigger action: %s", action)
         return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
 
-    _run_fargate_task(base_env)
+    _run_fargate_task(base_env, pr_number)
     return {"statusCode": 200, "body": json.dumps({"ok": True})}

@@ -135,6 +135,18 @@ def validate_edit(edit: dict) -> bool:
     return edit["oldString"] in content
 
 
+def find_occurrence_in_file(file_path: str, old_string: str, line_hint: int | None) -> int | None:
+    """Return the byte offset of old_string in the file, preferring the occurrence
+    closest to the given line hint. Returns None if not found.
+    """
+    from src.agent.editor import _find_occurrence
+    full_path = Path(REPO_DIR) / file_path
+    if not full_path.exists():
+        return None
+    content = full_path.read_text()
+    return _find_occurrence(content, old_string, line_hint)
+
+
 def request_edit(
     query: str,
     api_key: str,

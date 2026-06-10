@@ -23,18 +23,26 @@ class TestApplyEdit:
         edit = {"file": str(file), "line": 1, "oldString": "nonexistent", "newString": "whatever"}
         assert not apply_edit(edit)
 
-    def test_only_first_occurrence_replaced(self, tmp_path):
+    def test_disambiguates_by_line(self, tmp_path):
         file = tmp_path / "test.tsx"
-        file.write_text("a a a")
-        edit = {"file": str(file), "line": 1, "oldString": "a", "newString": "b"}
+        file.write_text("a\na\na\n")
+        edit = {"file": str(file), "line": 3, "oldString": "a", "newString": "b"}
         assert apply_edit(edit)
-        assert file.read_text() == "b a a"
+        assert file.read_text() == "a\na\nb\n"
+
+    def test_disambiguates_to_nearest_line(self, tmp_path):
+        file = tmp_path / "test.tsx"
+        file.write_text("a\na\na\n")
+        edit = {"file": str(file), "line": 2, "oldString": "a", "newString": "b"}
+        assert apply_edit(edit)
+        assert file.read_text() == "a\nb\na\n"
 
 
 class TestWaitForDevServer:
     def test_returns_true_on_200(self, monkeypatch):
         class MockResponse:
             status_code = 200
+            text = "<html>ok</html>"
 
         def mock_get(*a, **kw):
             return MockResponse()
@@ -48,6 +56,19 @@ class TestWaitForDevServer:
 
         monkeypatch.setattr("httpx.get", mock_get)
         assert not wait_for_dev_server("http://localhost:3000", timeout=0.5, interval=0.1)
+
+    def test_returns_false_on_error_overlay(self, monkeypatch):
+        responses = iter([
+            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
+            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
+            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
+        ])
+
+        def mock_get(*a, **kw):
+            return next(responses)
+
+        monkeypatch.setattr("httpx.get", mock_get)
+        assert not wait_for_dev_server("http://localhost:3000", timeout=0.3, interval=0.05)
 
 
 class TestRevertEdit:
