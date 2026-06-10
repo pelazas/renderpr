@@ -2,7 +2,7 @@
 
 Ideas scoped out but not yet implemented. Ordered by priority.
 
-## 1. Intelligent Route Navigation
+## 1. Intelligent Route Navigation - done
 
 **Problem:** Currently screenshots only capture the homepage (`localhost:3000`). Real PRs change specific pages.
 

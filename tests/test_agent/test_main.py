@@ -464,7 +464,6 @@ class TestBuildScreenshotGrid:
 
 class TestCaptureScreenshotsMockWiring:
     def test_mocks_passed_to_capture_screenshots(self, monkeypatch):
-        from src.agent.visual import capture_screenshots, upload_screenshots
 
         captured_kwargs = {}
         def fake_infer_routes(diff, tree, key):

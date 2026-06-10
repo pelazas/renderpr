@@ -3,7 +3,6 @@ import json
 import httpx
 import pytest
 
-from src.agent.config import REPO_DIR
 
 
 class _MockClient:
@@ -246,7 +245,7 @@ class TestFindImporters:
         monkeypatch.setattr("src.agent.routes._MAX_REVERSE_DEPS", 2)
 
         for i in range(5):
-            (tmp_path / f"importer{i}.tsx").write_text(f"import x from './target';")
+            (tmp_path / f"importer{i}.tsx").write_text("import x from './target';")
 
         from src.agent.routes import _find_importers
 
