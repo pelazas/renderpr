@@ -8,6 +8,7 @@ from typing import Final
 import httpx
 
 from src.agent.config import (
+    FRONTEND_EXTENSIONS,
     LLM_CLIENT_TIMEOUT,
     LLM_MODEL,
     LLM_RETRY_BASE_DELAY,
@@ -203,11 +204,15 @@ def infer_routes(
 
     changed_files = _get_changed_files(diff)
     file_contents = _read_full_files(changed_files)
+    file_contents = {fp: c for fp, c in file_contents.items() if Path(fp).suffix in FRONTEND_EXTENSIONS}
+    if file_contents:
+        logger.info("Sending full contents for %d frontend file(s): %s", len(file_contents), list(file_contents.keys()))
 
     stems = [Path(fp).stem for fp in changed_files]
     exclude_paths = set(changed_files)
     reverse_dep_paths = _find_importers(stems, exclude_paths)
     reverse_contents = _read_full_files(reverse_dep_paths)
+    reverse_contents = {fp: c for fp, c in reverse_contents.items() if Path(fp).suffix in FRONTEND_EXTENSIONS}
 
     changed_section = "\n".join(
         f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
