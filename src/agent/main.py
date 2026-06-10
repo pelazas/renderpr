@@ -111,8 +111,11 @@ def _start_dev_server(
             capture_output=True,
             text=True,
             check=True,
-            timeout=120,
+            timeout=300,
         )
+    except subprocess.TimeoutExpired:
+        logger.error("npm ci timed out after 300s in %s", install_cwd)
+        sys.exit(1)
     except subprocess.CalledProcessError as e:
         logger.error("npm ci failed (exit %d) in %s", e.returncode, install_cwd)
         logger.error("stdout: %s", e.stdout[:2000] if e.stdout else "(empty)")
