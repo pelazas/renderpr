@@ -75,4 +75,7 @@ jobs:
 
       - name: Deploy
         if: steps.filter.outputs.infra == 'true'
+        env:
+          AWS_NODEJS_CONNECTION_TIMEOUT: '30000'
+          AWS_NODEJS_REQUEST_TIMEOUT: '30000'
         run: npx cdk deploy --require-approval never
