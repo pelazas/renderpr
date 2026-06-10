@@ -20,6 +20,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.polling import ChangeSession
 
 logger = logging.getLogger(__name__)
 
@@ -418,7 +419,84 @@ def run() -> None:
         body=review_body,
     )
 
-    logger.info("RenderPR agent finished")
+    logger.info("Initial review posted. Starting command server...")
+
+    pr_meta = _fetch_pr_meta(
+        token=token,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+    )
+    head_ref = pr_meta["head_ref"]
+    is_fork = pr_meta["is_fork"]
+    bucket = os.environ.get("SCREENSHOT_BUCKET", "")
+    change_session = ChangeSession()
+
+    from src.agent.command_server import CommandServer
+    from src.agent.editor import execute_change
+
+    def on_change(query: str) -> dict:
+        frontend_root = discovery.get("package_json_path")
+        if frontend_root:
+            frontend_root = str(Path(frontend_root).parent)
+
+        result = execute_change(
+            query=query,
+            openrouter_api_key=secrets["openrouter_api_key"],
+            dev_server_url=_dev_server_url,
+            diff=diff,
+            bucket=bucket,
+            pr_number=pr_number,
+            frontend_root=frontend_root,
+        )
+
+        if result["status"] == "success":
+            edit = result.get("edit", {})
+            change_session.add_edit(edit.get("file", ""))
+            screenshot_url = result["screenshot_urls"][0][0] if result.get("screenshot_urls") else ""
+            public_ip = os.environ.get("RENDERPR_PUBLIC_IP", "localhost")
+
+            body = f"""Here's the updated app with the change applied:
+
+<img width="400" src="{screenshot_url}" alt="After change">
+
+Live app: http://{public_ip}:3000
+
+*Type @renderpr apply to accept, or @renderpr reject to reject the change.*"""
+            _post_comment(
+                token=token,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                body=body,
+            )
+
+        return result
+
+    def on_apply() -> dict:
+        return {"status": "error", "message": "Apply not yet implemented."}
+
+    def on_reject() -> dict:
+        return {"status": "error", "message": "Reject not yet implemented."}
+
+    server = CommandServer(
+        handle_change_fn=on_change,
+        handle_apply_fn=on_apply,
+        handle_reject_fn=on_reject,
+    )
+    server.start()
+
+    boot_cmd = os.environ.get("COMMAND", "")
+    if boot_cmd:
+        logger.info("Received boot command: %s", boot_cmd)
+        if boot_cmd.startswith("code_change::"):
+            query = boot_cmd.removeprefix("code_change::")
+            on_change(query)
+        elif boot_cmd == "apply":
+            on_apply()
+        elif boot_cmd == "reject":
+            on_reject()
+
+    logger.info("RenderPR agent entering idle loop")
+    server.wait_for_command()
 
 
 if __name__ == "__main__":
