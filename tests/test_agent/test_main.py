@@ -234,6 +234,44 @@ class TestStartDevServer:
 
         _start_dev_server()
 
+    def test_dev_server_binds_all_interfaces_but_polls_localhost(self, monkeypatch: MonkeyPatch):
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        popen_calls = []
+
+        def mock_popen(*a, **kw):
+            popen_calls.append((a, kw))
+            return _mock_process()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+        requested_urls = []
+
+        import httpx
+
+        class MockClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def get(self, url):
+                requested_urls.append(url)
+                return httpx.Response(200)
+
+        monkeypatch.setattr(httpx, "Client", MockClient)
+
+        _start_dev_server()
+
+        dev_server_call = popen_calls[1][1]
+        assert dev_server_call["env"]["HOST"] == "0.0.0.0"
+        assert requested_urls == ["http://localhost:3000/"]
+
     def test_dev_server_timeout(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("src.agent.main.DEV_SERVER_START_TIMEOUT", 1)
         monkeypatch.setattr("src.agent.main.DEV_SERVER_POLL_INTERVAL", 0.1)
