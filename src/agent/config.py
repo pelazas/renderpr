@@ -27,6 +27,15 @@ DEV_SERVER_HOST: str = "localhost"
 DEV_SERVER_START_TIMEOUT: int = 60
 DEV_SERVER_POLL_INTERVAL: int = 2
 
+# Diff-based frontend detection
+FRONTEND_EXTENSIONS: Final[tuple[str, ...]] = (
+    ".tsx", ".jsx", ".vue", ".svelte", ".astro",
+    ".css", ".scss", ".less", ".html",
+)
+
+# Package.json discovery
+MAX_PACKAGE_SCAN_DEPTH: Final[int] = 5
+
 LLM_RETRY_BASE_DELAY: int = 2
 LLM_RETRY_MAX_DELAY: int = 30
 LLM_RETRY_JITTER: float = 0.1
