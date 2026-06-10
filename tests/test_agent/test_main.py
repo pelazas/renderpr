@@ -26,6 +26,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+    monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     if posted_body is not None:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
@@ -542,6 +543,20 @@ class TestCaptureScreenshotsMockWiring:
 
 
 class TestPostComment:
+    def test_append_live_preview_link(self):
+        from src.agent.main import _append_live_preview_link
+
+        body = _append_live_preview_link("## Review\n\nLooks good.", "54.1.2.3")
+
+        assert body == "## Review\n\nLooks good.\n\n---\n\nLive app: http://54.1.2.3:3000"
+
+    def test_append_live_preview_link_skips_missing_ip(self):
+        from src.agent.main import _append_live_preview_link
+
+        body = _append_live_preview_link("## Review\n\nLooks good.", "")
+
+        assert body == "## Review\n\nLooks good."
+
     def test_post_comment_success(self, monkeypatch):
         import httpx
         mock_resp = httpx.Response(201, json={"id": 1})
@@ -622,6 +637,7 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._start_dev_server", track_start)
 
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))

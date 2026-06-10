@@ -333,6 +333,12 @@ def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) ->
     logger.info("Review posted to PR #%s", pr_number)
 
 
+def _append_live_preview_link(body: str, public_ip: str) -> str:
+    if not public_ip:
+        return body
+    return f"{body}\n\n---\n\nLive app: http://{public_ip}:{DEV_SERVER_PORT}"
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -413,6 +419,12 @@ def run() -> None:
     except ReviewError:
         logger.exception("Review failed")
         sys.exit(1)
+
+    from src.agent.network import get_public_ip
+    public_ip = get_public_ip()
+    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+    logger.info("Public IP: %s", public_ip)
+    review_body = _append_live_preview_link(review_body, public_ip)
 
     _post_comment(
         token=token,
@@ -554,11 +566,6 @@ Live app: http://{public_ip}:3000
         handle_reject_fn=on_reject,
     )
     server.start()
-
-    from src.agent.network import get_public_ip
-    public_ip = get_public_ip()
-    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
-    logger.info("Public IP: %s", public_ip)
 
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:
