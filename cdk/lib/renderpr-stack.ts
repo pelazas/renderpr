@@ -36,8 +36,14 @@ export class RenderprStack extends cdk.Stack {
     const fargateSg = new ec2.SecurityGroup(this, "FargateSecurityGroup", {
       vpc,
       allowAllOutbound: true,
-      description: "Allows outbound traffic only; no inbound. For RenderPR Fargate tasks.",
+      description: "Allows outbound traffic and dev server preview on port 3000. For RenderPR Fargate tasks.",
     });
+
+    fargateSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(3000),
+      "Allow live preview access to dev server",
+    );
 
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
@@ -111,6 +117,13 @@ export class RenderprStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["s3:PutObject"],
         resources: [screenshotBucket.arnForObjects("*")],
+      }),
+    );
+
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeNetworkInterfaces"],
+        resources: ["*"],
       }),
     );
 

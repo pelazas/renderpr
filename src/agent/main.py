@@ -131,7 +131,10 @@ def _start_dev_server(
         logger.exception("npm ci failed unexpectedly")
         sys.exit(1)
 
-    _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=str(dev_cwd))
+    _dev_server_proc = subprocess.Popen(
+        ["npm", "run", "dev", "--", "--host", "0.0.0.0"],
+        cwd=str(dev_cwd),
+    )
 
     _dev_server_url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
     url = _dev_server_url
