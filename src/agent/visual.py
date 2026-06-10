@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlparse
 
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
@@ -14,6 +15,26 @@ from src.agent.config import PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIM
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
 logger = logging.getLogger(__name__)
+
+
+def _flatten_mocks(mocks: dict | None) -> dict[str, dict]:
+    if not mocks:
+        return {}
+
+    flattened: dict[str, dict] = {}
+    for endpoints in mocks.values():
+        if not isinstance(endpoints, dict):
+            continue
+        for path, mock_data in endpoints.items():
+            if not isinstance(path, str) or not path.startswith("/"):
+                continue
+            if not isinstance(mock_data, dict) or "body" not in mock_data:
+                continue
+            flattened[path] = {
+                "body": mock_data["body"],
+                "status": mock_data.get("status", 200),
+            }
+    return flattened
 
 
 def _screenshot_route(
@@ -90,54 +111,32 @@ def capture_screenshots(
         with sync_playwright() as p:
             browser = p.chromium.launch()
             context = browser.new_context()
+
+            mock_entries = _flatten_mocks(mocks)
+            if mock_entries:
+                def handle_mock_route(route):
+                    request = route.request
+                    parsed = urlparse(request.url)
+                    mock = mock_entries.get(parsed.path)
+
+                    if mock is None:
+                        return route.continue_()
+
+                    logger.info("Mock matched %s %s -> %d", request.method, parsed.path, mock["status"])
+                    return route.fulfill(
+                        status=mock["status"],
+                        content_type="application/json",
+                        body=json.dumps(mock["body"]),
+                    )
+
+                context.route("**/*", handle_mock_route)
+                logger.info("Mock routes registered for %d endpoint(s): %s", len(mock_entries), list(mock_entries.keys()))
+
             page = context.new_page()
 
             page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
             page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
             page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
-
-            if mocks:
-                mock_entries = []
-                for domain, endpoints in mocks.items():
-                    for path, mock_data in endpoints.items():
-                        body = json.dumps(mock_data["body"])
-                        status = mock_data.get("status", 200)
-                        mock_entries.append([path, status, body])
-
-                script = (
-                    "console.log('[RenderPR init] mock script loaded, " + str(len(mock_entries)) + " mock(s) configured');"
-                    "(function(){"
-                    "  const mocks = " + json.dumps(mock_entries) + ";"
-                    "  const origFetch = window.fetch ? window.fetch.bind(window) : null;"
-                    "  function mockedFetch(input, init){"
-                    "    const url = typeof input === 'string' ? input : (input && input.url) || '';"
-                    "    for (let i = 0; i < mocks.length; i++){"
-                    "      const path = mocks[i][0];"
-                    "      if (url.indexOf(path) !== -1){"
-                    "        const body = mocks[i][2];"
-                    "        const status = mocks[i][1];"
-                    "        console.log('[RenderPR Mock] ' + path + ' -> ' + status);"
-                    "        return Promise.resolve(new Response(body, {"
-                    "          status: status,"
-                    "          headers: {'Content-Type': 'application/json'}"
-                    "        }));"
-                    "      }"
-                    "    }"
-                    "    return origFetch ? origFetch(input, init) : Promise.reject(new Error('No fetch available'));"
-                    "  }"
-                    "  Object.defineProperty(window, 'fetch', {"
-                    "    value: mockedFetch,"
-                    "    writable: false,"
-                    "    configurable: false"
-                    "  });"
-                    "  console.log('[RenderPR init] window.fetch is now mocked');"
-                    "  setTimeout(function(){"
-                    "    console.log('[RenderPR check] window.fetch is now: ' + (window.fetch === mockedFetch ? 'STILL MOCKED' : 'CHANGED to: ' + window.fetch.toString().substring(0, 100)));"
-                    "  }, 2000);"
-                    "})();"
-                )
-                page.add_init_script(script)
-                logger.info("Mock fetch overrides injected for %d endpoint(s)", len(mock_entries))
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
