@@ -45,6 +45,12 @@ export class RenderprStack extends cdk.Stack {
       "Allow live preview access to dev server",
     );
 
+    fargateSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(3001),
+      "Allow Lambda to dispatch commands to command server",
+    );
+
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
       bucketName: `${appName}-screenshots-${this.account}`,
@@ -134,7 +140,7 @@ export class RenderprStack extends cdk.Stack {
       handler: "handler",
       runtime: lambda.Runtime.PYTHON_3_12,
       role: lambdaRole,
-      timeout: cdk.Duration.seconds(10),
+      timeout: cdk.Duration.seconds(30),
       memorySize: 128,
     });
 
@@ -198,10 +204,10 @@ export class RenderprStack extends cdk.Stack {
     fargateExecutionRole.grantPassRole(lambdaRole);
     fargateTaskRole.grantPassRole(lambdaRole);
 
-    // Grant Lambda permission to run and describe tasks
+    // Grant Lambda permission to run, describe, and list tasks
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:RunTask", "ecs:DescribeTasks"],
+        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks"],
         resources: [
           `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDef.family}*`,
           cluster.clusterArn,
@@ -214,6 +220,13 @@ export class RenderprStack extends cdk.Stack {
             this,
           ),
         ],
+      }),
+    );
+
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeNetworkInterfaces"],
+        resources: ["*"],
       }),
     );
 
