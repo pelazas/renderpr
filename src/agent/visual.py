@@ -98,6 +98,8 @@ def capture_screenshots(
                         mock_entries.append([path, status, body])
 
                 script = (
+                    "console.log('[RenderPR init] mock script loaded, ' + "
+                    + str(len(mock_entries)) + " mock(s) configured');"
                     "(function(){"
                     "  const mocks = " + json.dumps(mock_entries) + ";"
                     "  const origFetch = window.fetch ? window.fetch.bind(window) : null;"
@@ -122,6 +124,10 @@ def capture_screenshots(
                     "    writable: false,"
                     "    configurable: false"
                     "  });"
+                    "  console.log('[RenderPR init] window.fetch is now mocked');"
+                    "  setTimeout(function(){"
+                    "    console.log('[RenderPR check] window.fetch is now: ' + (window.fetch === mockedFetch ? 'STILL MOCKED' : 'CHANGED to: ' + window.fetch.toString().substring(0, 100)));"
+                    "  }, 2000);"
                     "})();"
                 )
                 page.add_init_script(script)
