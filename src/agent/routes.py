@@ -151,9 +151,11 @@ def _validate_routes(routes: list[dict]) -> list[dict]:
     return valid
 
 
-def _validate_mocks(mocks: dict | None) -> dict:
+def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = None) -> dict:
     if not isinstance(mocks, dict):
         return {}
+
+    combined_code = " ".join(file_contents.values()) if file_contents else ""
 
     validated: dict = {}
     for domain, endpoints in mocks.items():
@@ -167,6 +169,10 @@ def _validate_mocks(mocks: dict | None) -> dict:
                 continue
             body = mock_data.get("body")
             if not isinstance(body, (dict, list)):
+                continue
+            # Skip mocks for endpoints that don't appear in any file
+            if file_contents and path not in combined_code:
+                logger.info("Discarding mock for %s: not found in source code", path)
                 continue
             validated_endpoints[path] = {
                 "body": body,
@@ -259,7 +265,8 @@ def infer_routes(
                 raw_routes = parsed.get("routes", [])
                 raw_mocks = parsed.get("mocks")
                 routes = _validate_routes(raw_routes)
-                mocks = _validate_mocks(raw_mocks)
+                all_contents = {**file_contents, **reverse_contents}
+                mocks = _validate_mocks(raw_mocks, all_contents)
                 if routes:
                     logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])
                     if mocks:
