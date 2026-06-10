@@ -166,7 +166,7 @@ def _validate_mocks(mocks: dict | None) -> dict:
             if not isinstance(mock_data, dict):
                 continue
             body = mock_data.get("body")
-            if not isinstance(body, dict):
+            if not isinstance(body, (dict, list)):
                 continue
             validated_endpoints[path] = {
                 "body": body,

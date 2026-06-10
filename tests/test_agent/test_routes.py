@@ -329,16 +329,18 @@ class TestValidateMocks:
         assert "/api/valid" in result["api.example.com"]
         assert "/api/invalid" not in result["api.example.com"]
 
-    def test_body_not_dict_skipped(self):
+    def test_body_not_dict_or_list_skipped(self):
         from src.agent.routes import _validate_mocks
         mocks = {
             "api.example.com": {
-                "/api/valid": {"body": {"ok": True}},
-                "/api/invalid": {"body": "string instead of dict"},
+                "/api/dict": {"body": {"ok": True}},
+                "/api/array": {"body": [{"id": 1}]},
+                "/api/invalid": {"body": "string instead of dict or list"},
             }
         }
         result = _validate_mocks(mocks)
-        assert "/api/valid" in result["api.example.com"]
+        assert "/api/dict" in result["api.example.com"]
+        assert "/api/array" in result["api.example.com"]
         assert "/api/invalid" not in result["api.example.com"]
 
     def test_non_dict_mocks_value(self):
