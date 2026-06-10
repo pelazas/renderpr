@@ -11,6 +11,10 @@ def mock_playwright(monkeypatch):
             self.goto_url = None
             self.screenshot_path = None
             self.actions_called: list[tuple] = []
+            self.event_handlers: dict[str, list] = {}
+            self.init_scripts: list[str] = []
+            self.evaluate_calls: list[tuple] = []
+            self.ready_state: str = "complete"
 
         def set_viewport_size(self, size):
             self.viewport_size = size
@@ -30,6 +34,17 @@ def mock_playwright(monkeypatch):
 
         def wait_for_timeout(self, ms: int):
             self.actions_called.append(("wait", ms))
+
+        def on(self, event, handler):
+            self.event_handlers.setdefault(event, []).append(handler)
+
+        def add_init_script(self, script: str):
+            self.init_scripts.append(script)
+
+        def evaluate(self, expression: str):
+            self.evaluate_calls.append(expression)
+            if "readyState" in expression:
+                return self.ready_state
 
     class MockContext:
         def new_page(self):
@@ -184,6 +199,64 @@ class TestCaptureScreenshotsWithMocks:
         )
 
         assert len(result) == 4
+
+    def test_hydration_diagnostics_registered(self, tmp_path):
+        """capture_screenshots must register a pageerror handler and
+        call page.evaluate to inspect document.readyState after navigation,
+        so we can diagnose silent React hydration failures."""
+        import unittest.mock as um
+        from src.agent import visual as visual_mod
+
+        seen = {"on_calls": [], "evaluate_calls": []}
+
+        class MockPg:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def screenshot(self, path, **kw):
+                Path(path).touch()
+            def route(self, p, h): pass
+            def click(self, s): pass
+            def wait_for_timeout(self, ms): pass
+            def on(self, event, handler):
+                seen["on_calls"].append(event)
+            def add_init_script(self, script): pass
+            def evaluate(self, expr):
+                seen["evaluate_calls"].append(expr)
+                return "complete"
+
+        class P:
+            class chromium:
+                @staticmethod
+                def launch():
+                    class B:
+                        @staticmethod
+                        def new_context():
+                            class Ctx:
+                                @staticmethod
+                                def new_page():
+                                    return MockPg()
+                            return Ctx()
+                        def close(self): pass
+                    return B()
+
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with um.patch("src.agent.visual.sync_playwright", lambda: P()):
+            visual_mod.capture_screenshots(
+                "http://localhost:3000",
+                screenshot_dir=tmp_path,
+                routes=[{"path": "/", "actions": [], "reason": "home"}],
+            )
+
+        assert "pageerror" in seen["on_calls"], (
+            f"Expected page.on('pageerror', ...) to be registered for hydration "
+            f"diagnostics, but only registered: {seen['on_calls']}"
+        )
+        assert any("readyState" in e for e in seen["evaluate_calls"]), (
+            f"Expected page.evaluate(...) to check document.readyState for "
+            f"hydration diagnostics, but evaluate calls were: {seen['evaluate_calls']}"
+        )
 
 
 class TestUploadScreenshots:

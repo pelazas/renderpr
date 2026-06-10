@@ -39,6 +39,12 @@ def _screenshot_route(
             logger.warning("Navigation timeout for %s at viewport %d, skipping", path, width)
             continue
 
+        try:
+            ready_state = page.evaluate("document.readyState")
+            logger.info("PAGE STATE [%s] readyState=%s", path, ready_state)
+        except Exception:
+            logger.warning("Failed to read document.readyState for %s", path, exc_info=True)
+
         for action in actions:
             try:
                 if action["type"] == "click":
@@ -87,6 +93,7 @@ def capture_screenshots(
             page = context.new_page()
 
             page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
+            page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
             page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
 
             if mocks:
