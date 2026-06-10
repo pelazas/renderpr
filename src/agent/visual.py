@@ -9,7 +9,7 @@ from typing import Final
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
@@ -34,6 +34,7 @@ def _screenshot_route(
 
         try:
             page.goto(url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+            page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
         except TimeoutError:
             logger.warning("Navigation timeout for %s at viewport %d, skipping", path, width)
             continue
