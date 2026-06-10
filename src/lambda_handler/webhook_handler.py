@@ -3,8 +3,13 @@ import os
 import hmac
 import hashlib
 import logging
+import urllib.request
+import sys
 
 import boto3
+
+# Make src importable when running in Lambda
+sys.path.insert(0, os.path.join(os.environ.get("LAMBDA_TASK_ROOT", ""), "src"))
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -32,6 +37,102 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(expected, signature_header)
 
 
+def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
+    client = boto3.client("ecs")
+    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
+    client.run_task(
+        cluster=ECS_CLUSTER,
+        taskDefinition=ECS_TASK_DEF,
+        launchType="FARGATE",
+        networkConfiguration={
+            "awsvpcConfiguration": {
+                "subnets": SUBNET_IDS,
+                "securityGroups": [SECURITY_GROUP_ID],
+                "assignPublicIp": "ENABLED",
+            }
+        },
+        overrides={
+            "containerOverrides": [
+                {
+                    "name": "ReviewContainer",
+                    "environment": overrides,
+                }
+            ]
+        },
+        tags=[{"key": "Project", "value": "renderpr"}, {"key": "PRNumber", "value": pr_number}],
+    )
+
+
+def _get_running_task_eni(pr_number: str) -> str | None:
+    ecs = boto3.client("ecs")
+    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
+
+    task_arns: list[str] = []
+    paginator = ecs.get_paginator("list_tasks")
+    for page in paginator.paginate(
+        cluster=ECS_CLUSTER,
+        family=family,
+        desiredStatus="RUNNING",
+    ):
+        task_arns.extend(page.get("taskArns", []))
+
+    if not task_arns:
+        return None
+
+    for i in range(0, len(task_arns), 100):
+        batch = task_arns[i : i + 100]
+        desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=batch)
+        for task in desc.get("tasks", []):
+            for tag in task.get("tags", []):
+                if tag["key"] == "PRNumber" and tag["value"] == pr_number:
+                    for attachment in task.get("attachments", []):
+                        for detail in attachment.get("details", []):
+                            if detail["name"] == "networkInterfaceId":
+                                return detail["value"]
+    return None
+
+
+def _get_public_ip(eni_id: str) -> str | None:
+    ec2 = boto3.client("ec2")
+    resp = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
+    interfaces = resp.get("NetworkInterfaces", [])
+    if interfaces:
+        return interfaces[0].get("Association", {}).get("PublicIp")
+    return None
+
+
+def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
+    body = {"command": command}
+    if query:
+        body["query"] = query
+    data = json.dumps(body).encode()
+    token = os.environ.get("RENDERPR_COMMAND_TOKEN", "")
+    request_headers = {"Content-Type": "application/json"}
+    if token:
+        request_headers["X-RenderPR-Token"] = token
+    try:
+        req = urllib.request.Request(
+            f"http://{public_ip}:3001/__renderpr/command",
+            data=data,
+            headers=request_headers,
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        return True
+    except Exception:
+        logger.exception("Failed to dispatch command to task at %s", public_ip)
+        return False
+
+
+def _parse_renderpr_command(comment_body: str) -> dict | None:
+    from src.agent.polling import parse_command
+
+    parsed = parse_command(comment_body)
+    if parsed is None:
+        return None
+    return {"command": parsed["action"], "query": parsed.get("query")}
+
+
 def handler(event: dict, context: object) -> dict:
     logger.info("Webhook received")
 
@@ -51,15 +152,6 @@ def handler(event: dict, context: object) -> dict:
         logger.error("Invalid JSON in webhook body")
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON"})}
 
-    action = body.get("action", "")
-    comment_body = body.get("comment", {}).get("body", "")
-
-    if action == "created" and "@renderpr" in comment_body:
-        logger.info("Triggering on @renderpr comment")
-    elif action not in ("opened", "synchronize"):
-        logger.info("Ignoring non-trigger action: %s", action)
-        return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
-
     installation_id = str(
         body.get("installation", {}).get("id", "000000")
     )
@@ -72,35 +164,45 @@ def handler(event: dict, context: object) -> dict:
         or body.get("number", "0")
     )
 
-    client = boto3.client("ecs")
+    base_env = [
+        {"name": "INSTALLATION_ID", "value": installation_id},
+        {"name": "REPO_FULL_NAME", "value": repo_full_name},
+        {"name": "PR_NUMBER", "value": pr_number},
+    ]
 
-    try:
-        client.run_task(
-            cluster=ECS_CLUSTER,
-            taskDefinition=ECS_TASK_DEF,
-            launchType="FARGATE",
-            networkConfiguration={
-                "awsvpcConfiguration": {
-                    "subnets": SUBNET_IDS,
-                    "securityGroups": [SECURITY_GROUP_ID],
-                    "assignPublicIp": "ENABLED",
-                }
-            },
-            overrides={
-                "containerOverrides": [
-                    {
-                        "name": "ReviewContainer",
-                        "environment": [
-                            {"name": "INSTALLATION_ID", "value": installation_id},
-                            {"name": "REPO_FULL_NAME", "value": repo_full_name},
-                            {"name": "PR_NUMBER", "value": pr_number},
-                        ],
-                    }
-                ]
-            },
-        )
-    except Exception:
-        logger.exception("Failed to start Fargate task")
-        return {"statusCode": 500, "body": json.dumps({"error": "Failed to start review"})}
+    action = body.get("action", "")
+    comment_body = body.get("comment", {}).get("body", "")
 
+    if action == "created" and "@renderpr" in comment_body:
+        cmd = _parse_renderpr_command(comment_body)
+        logger.info("Parsed command: %s", cmd)
+
+        if cmd and cmd["command"] in ("change", "apply", "reject"):
+            eni_id = _get_running_task_eni(pr_number)
+            if eni_id:
+                public_ip = _get_public_ip(eni_id)
+                if public_ip:
+                    success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
+                    if success:
+                        return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
+                    logger.warning("Dispatch failed, spawning new task")
+                else:
+                    logger.warning("Could not get public IP for running task, spawning new")
+
+            command_str = cmd["command"]
+            if cmd["command"] == "change" and cmd.get("query"):
+                command_str = f"code_change::{cmd['query']}"
+
+            _run_fargate_task(base_env + [{"name": "COMMAND", "value": command_str}], pr_number)
+            return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
+
+        # Default: full review
+        _run_fargate_task(base_env, pr_number)
+        return {"statusCode": 200, "body": json.dumps({"ok": True})}
+
+    elif action not in ("opened", "synchronize"):
+        logger.info("Ignoring non-trigger action: %s", action)
+        return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
+
+    _run_fargate_task(base_env, pr_number)
     return {"statusCode": 200, "body": json.dumps({"ok": True})}

@@ -20,6 +20,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.polling import ChangeSession, has_pending_edits
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,10 @@ def _start_dev_server(
         logger.exception("npm ci failed unexpectedly")
         sys.exit(1)
 
-    _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=str(dev_cwd))
+    _dev_server_proc = subprocess.Popen(
+        ["npm", "run", "dev", "--", "--host", "0.0.0.0"],
+        cwd=str(dev_cwd),
+    )
 
     _dev_server_url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
     url = _dev_server_url
@@ -211,6 +215,28 @@ def _fetch_diff(token: str, repo_full_name: str, pr_number: str) -> str:
             time.sleep(3)
 
     sys.exit(1)
+
+
+def _fetch_pr_meta(token: str, repo_full_name: str, pr_number: str) -> dict:
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "RenderPR/1.0",
+    }
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.get(url, headers=headers)
+
+    if resp.status_code != 200:
+        logger.error("Failed to fetch PR meta: %d %s", resp.status_code, resp.text)
+        sys.exit(1)
+
+    data = resp.json()
+    return {
+        "head_ref": data["head"]["ref"],
+        "is_fork": data["head"]["repo"]["fork"],
+    }
 
 
 def _parse_diff_summary(diff: str) -> str:
@@ -393,7 +419,158 @@ def run() -> None:
         body=review_body,
     )
 
-    logger.info("RenderPR agent finished")
+    logger.info("Initial review posted. Starting command server...")
+
+    pr_meta = _fetch_pr_meta(
+        token=token,
+        repo_full_name=repo_full_name,
+        pr_number=pr_number,
+    )
+    head_ref = pr_meta["head_ref"]
+    is_fork = pr_meta["is_fork"]
+    bucket = os.environ.get("SCREENSHOT_BUCKET", "")
+    change_session = ChangeSession()
+
+    from src.agent.command_server import CommandServer
+    from src.agent.editor import execute_change
+
+    def on_change(query: str) -> dict:
+        frontend_root = discovery.get("package_json_path")
+        if frontend_root:
+            frontend_root = str(Path(frontend_root).parent)
+
+        result = execute_change(
+            query=query,
+            openrouter_api_key=secrets["openrouter_api_key"],
+            dev_server_url=_dev_server_url,
+            diff=diff,
+            bucket=bucket,
+            pr_number=pr_number,
+            frontend_root=frontend_root,
+        )
+
+        if result["status"] == "success":
+            edit = result.get("edit", {})
+            change_session.add_edit(edit.get("file", ""))
+            screenshot_url = result["screenshot_urls"][0][0] if result.get("screenshot_urls") else ""
+            public_ip = os.environ.get("RENDERPR_PUBLIC_IP", "localhost")
+
+            body = f"""Here's the updated app with the change applied:
+
+<img width="400" src="{screenshot_url}" alt="After change">
+
+Live app: http://{public_ip}:3000
+
+*Type @renderpr apply to accept, or @renderpr reject to reject the change.*"""
+            _post_comment(
+                token=token,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                body=body,
+            )
+
+        return result
+
+    def on_apply() -> dict:
+        if not change_session.edited_files:
+            return {"status": "error", "message": "No pending changes to apply."}
+
+        try:
+            for file_path in change_session.edited_files:
+                subprocess.run(
+                    ["git", "add", "--", file_path],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+            subprocess.run(
+                ["git", "commit", "-m", "renderpr: apply suggested changes"],
+                cwd=REPO_DIR,
+                capture_output=True,
+                check=True,
+                timeout=30,
+            )
+
+            if is_fork:
+                branch = f"renderpr/suggestion-{pr_number}"
+                subprocess.run(
+                    ["git", "push", "origin", f"HEAD:{branch}"],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                )
+                msg = f"Changes pushed to `{branch}` on the base repo."
+            else:
+                subprocess.run(
+                    ["git", "push", "origin", f"HEAD:{head_ref}"],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                )
+                msg = "Changes applied and pushed to the PR."
+
+            _post_comment(token, repo_full_name, pr_number, msg)
+            change_session.clear()
+            return {"status": "success", "message": msg}
+        except subprocess.CalledProcessError as e:
+            logger.exception("Apply failed: %s", e.stderr)
+            return {"status": "error", "message": "Failed to apply changes. Check git state."}
+        except subprocess.TimeoutExpired:
+            logger.exception("Apply timed out")
+            return {"status": "error", "message": "Apply timed out. Check git state."}
+
+    def on_reject() -> dict:
+        if not change_session.edited_files:
+            return {"status": "error", "message": "No pending changes to reject."}
+
+        try:
+            for file_path in change_session.edited_files:
+                subprocess.run(
+                    ["git", "checkout", "--", file_path],
+                    cwd=REPO_DIR,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                )
+            change_session.clear()
+            msg = "Changes reverted. The app is back to its original state."
+            _post_comment(token, repo_full_name, pr_number, msg)
+            return {"status": "success", "message": msg}
+        except subprocess.CalledProcessError as e:
+            logger.exception("Reject failed: %s", e.stderr)
+            return {"status": "error", "message": "Failed to revert changes."}
+        except subprocess.TimeoutExpired:
+            logger.exception("Reject timed out")
+            return {"status": "error", "message": "Reject timed out."}
+
+    server = CommandServer(
+        handle_change_fn=on_change,
+        handle_apply_fn=on_apply,
+        handle_reject_fn=on_reject,
+    )
+    server.start()
+
+    from src.agent.network import get_public_ip
+    public_ip = get_public_ip()
+    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+    logger.info("Public IP: %s", public_ip)
+
+    boot_cmd = os.environ.get("COMMAND", "")
+    if boot_cmd:
+        logger.info("Received boot command: %s", boot_cmd)
+        if boot_cmd.startswith("code_change::"):
+            query = boot_cmd.removeprefix("code_change::")
+            on_change(query)
+        elif boot_cmd == "apply":
+            on_apply()
+        elif boot_cmd == "reject":
+            on_reject()
+
+    logger.info("RenderPR agent entering idle loop")
+    server.wait_for_command()
 
 
 if __name__ == "__main__":

@@ -36,8 +36,20 @@ export class RenderprStack extends cdk.Stack {
     const fargateSg = new ec2.SecurityGroup(this, "FargateSecurityGroup", {
       vpc,
       allowAllOutbound: true,
-      description: "Allows outbound traffic only; no inbound. For RenderPR Fargate tasks.",
+      description: "Allows outbound traffic and dev server preview on port 3000. For RenderPR Fargate tasks.",
     });
+
+    fargateSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(3000),
+      "Allow live preview access to dev server",
+    );
+
+    fargateSg.addIngressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(3001),
+      "Allow Lambda to dispatch commands to command server",
+    );
 
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
@@ -114,6 +126,13 @@ export class RenderprStack extends cdk.Stack {
       }),
     );
 
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeNetworkInterfaces"],
+        resources: ["*"],
+      }),
+    );
+
     // Lambda function (Python 3.12)
     const handler = new PythonFunction(this, "WebhookHandler", {
       entry: path.join(__dirname, "../../src/lambda_handler"),
@@ -121,7 +140,7 @@ export class RenderprStack extends cdk.Stack {
       handler: "handler",
       runtime: lambda.Runtime.PYTHON_3_12,
       role: lambdaRole,
-      timeout: cdk.Duration.seconds(10),
+      timeout: cdk.Duration.seconds(30),
       memorySize: 128,
     });
 
@@ -165,6 +184,7 @@ export class RenderprStack extends cdk.Stack {
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
+        RENDERPR_COMMAND_TOKEN: this.node.tryGetContext("commandToken") ?? "",
       },
     });
 
@@ -180,15 +200,19 @@ export class RenderprStack extends cdk.Stack {
     );
     handler.addEnvironment("SECURITY_GROUP_ID", fargateSg.securityGroupId);
     handler.addEnvironment("GITHUB_PARAM_NAME", githubParamName);
+    handler.addEnvironment(
+      "RENDERPR_COMMAND_TOKEN",
+      this.node.tryGetContext("commandToken") ?? "",
+    );
 
     // Allow Lambda to pass the Fargate roles to ECS (required by RunTask)
     fargateExecutionRole.grantPassRole(lambdaRole);
     fargateTaskRole.grantPassRole(lambdaRole);
 
-    // Grant Lambda permission to run and describe tasks
+    // Grant Lambda permission to run, describe, list, and tag tasks
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:RunTask", "ecs:DescribeTasks"],
+        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource"],
         resources: [
           `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDef.family}*`,
           cluster.clusterArn,
@@ -201,6 +225,13 @@ export class RenderprStack extends cdk.Stack {
             this,
           ),
         ],
+      }),
+    );
+
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:DescribeNetworkInterfaces"],
+        resources: ["*"],
       }),
     );
 
