@@ -93,14 +93,9 @@ def capture_screenshots(
             if mocks:
                 mock_count = 0
 
-                def _log_unmatched(route):
-                    logger.warning("Unmatched API request: %s", route.request.url)
-                    route.continue_()
-
-                page.route(lambda url: "/api/" in url, _log_unmatched)
-
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
+                        pattern = f"**{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
                         def make_handler(p, bd, st):
@@ -112,7 +107,7 @@ def capture_screenshots(
                                     body=bd,
                                 )
                             return handler
-                        page.route(lambda url, p=path: p in url, make_handler(path, body, status))
+                        page.route(pattern, make_handler(path, body, status))
                         mock_count += 1
                 logger.info("Registered %d mock endpoint(s)", mock_count)
 
