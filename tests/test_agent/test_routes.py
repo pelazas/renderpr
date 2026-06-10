@@ -275,3 +275,143 @@ class TestExtractJson:
     def test_returns_none_for_invalid(self):
         from src.agent.routes import _extract_json
         assert _extract_json("not json at all") is None
+
+
+class TestValidateMocks:
+    def test_valid_mocks_pass_through(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {
+                "/api/users": {"body": {"users": [{"id": 1}]}},
+                "/api/posts": {"body": {"posts": []}, "status": 200},
+            }
+        }
+        result = _validate_mocks(mocks)
+        assert result == mocks
+
+    def test_invalid_domain_skipped(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {"/api/users": {"body": {"ok": True}}},
+            123: {"/api/bad": {"body": {}}},
+        }
+        result = _validate_mocks(mocks)
+        assert "api.example.com" in result
+        assert 123 not in result
+
+    def test_invalid_path_skipped(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {
+                "/api/users": {"body": {"ok": True}},
+                123: {"body": {}},
+            }
+        }
+        result = _validate_mocks(mocks)
+        assert "/api/users" in result["api.example.com"]
+        assert 123 not in result["api.example.com"]
+
+    def test_missing_body_skipped(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {
+                "/api/valid": {"body": {"ok": True}},
+                "/api/invalid": {"status": 200},
+            }
+        }
+        result = _validate_mocks(mocks)
+        assert "/api/valid" in result["api.example.com"]
+        assert "/api/invalid" not in result["api.example.com"]
+
+    def test_body_not_dict_skipped(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {
+                "/api/valid": {"body": {"ok": True}},
+                "/api/invalid": {"body": "string instead of dict"},
+            }
+        }
+        result = _validate_mocks(mocks)
+        assert "/api/valid" in result["api.example.com"]
+        assert "/api/invalid" not in result["api.example.com"]
+
+    def test_non_dict_mocks_value(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {"api.example.com": "not a dict"}
+        result = _validate_mocks(mocks)
+        assert result == {}
+
+    def test_empty_mocks(self):
+        from src.agent.routes import _validate_mocks
+        result = _validate_mocks({})
+        assert result == {}
+
+    def test_status_defaults_to_200(self):
+        from src.agent.routes import _validate_mocks
+        mocks = {
+            "api.example.com": {
+                "/api/users": {"body": {"ok": True}},
+            }
+        }
+        result = _validate_mocks(mocks)
+        assert result["api.example.com"]["/api/users"]["status"] == 200
+
+    def test_none_mocks(self):
+        from src.agent.routes import _validate_mocks
+        result = _validate_mocks(None)
+        assert result == {}
+
+
+class TestMockOutput:
+    def test_route_inference_includes_mocks(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({
+                    "routes": [{"path": "/", "reason": "test", "actions": []}],
+                    "mocks": {
+                        "api.example.com": {
+                            "/api/users": {
+                                "body": {"users": [{"id": 1, "name": "Alice"}]},
+                            },
+                        },
+                    },
+                })}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert "/api/users" in mocks.get("api.example.com", {})
+
+    def test_no_mocks_in_response(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({
+                    "routes": [{"path": "/", "reason": "test", "actions": []}],
+                })}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert mocks == {}
+
+    def test_empty_routes_with_mocks_still_proceeds(self, mock_httpx_client):
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({
+                    "routes": [{"path": "/", "reason": "fallback", "actions": []}],
+                    "mocks": {"api.example.com": {"/api/ping": {"body": {"ok": True}}}},
+                })}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert "api.example.com" in mocks
