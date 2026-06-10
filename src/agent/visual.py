@@ -48,7 +48,8 @@ def _screenshot_route(
             except Exception:
                 logger.warning("Action %s failed for %s", action.get("type"), path, exc_info=True)
 
-        page.wait_for_timeout(SETTLE_AFTER_ACTIONS_MS)
+        if actions:
+            page.wait_for_timeout(SETTLE_AFTER_ACTIONS_MS)
 
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
         vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
