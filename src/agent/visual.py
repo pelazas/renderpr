@@ -98,8 +98,7 @@ def capture_screenshots(
                         mock_entries.append([path, status, body])
 
                 script = (
-                    "console.log('[RenderPR init] mock script loaded, ' + "
-                    + str(len(mock_entries)) + " mock(s) configured');"
+                    "console.log('[RenderPR init] mock script loaded, " + str(len(mock_entries)) + " mock(s) configured');"
                     "(function(){"
                     "  const mocks = " + json.dumps(mock_entries) + ";"
                     "  const origFetch = window.fetch ? window.fetch.bind(window) : null;"
