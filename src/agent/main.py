@@ -96,6 +96,9 @@ def _start_dev_server(
     dev_cwd = Path(package_dir).parent if package_dir else Path(REPO_DIR)
     install_cwd = Path(install_dir).parent if install_dir else dev_cwd
 
+    logger.info("Dev server cwd: %s (package_dir=%s)", dev_cwd, package_dir)
+    logger.info("Install cwd: %s (install_dir=%s)", install_cwd, install_dir)
+
     pkg_json = os.path.join(dev_cwd, "package.json")
     if not os.path.exists(pkg_json):
         logger.error("No package.json found at %s", pkg_json)
@@ -110,8 +113,13 @@ def _start_dev_server(
             check=True,
             timeout=120,
         )
+    except subprocess.CalledProcessError as e:
+        logger.error("npm ci failed (exit %d) in %s", e.returncode, install_cwd)
+        logger.error("stdout: %s", e.stdout[:2000] if e.stdout else "(empty)")
+        logger.error("stderr: %s", e.stderr[:2000] if e.stderr else "(empty)")
+        sys.exit(1)
     except Exception:
-        logger.exception("npm ci failed")
+        logger.exception("npm ci failed unexpectedly")
         sys.exit(1)
 
     _dev_server_proc = subprocess.Popen(["npm", "run", "dev"], cwd=str(dev_cwd))
@@ -321,6 +329,7 @@ def run() -> None:
     logger.info("Changes: %s", _parse_diff_summary(diff))
 
     discovery = discover_frontend(diff)
+    logger.info("Frontend discovery result: %s", {k: v for k, v in discovery.items() if k != "reason" or v is not None})
     if not discovery["has_frontend"]:
         _post_comment(
             token=token,
