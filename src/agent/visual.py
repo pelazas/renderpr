@@ -86,7 +86,7 @@ def capture_screenshots(
             if mocks:
                 for domain, endpoints in mocks.items():
                     for path, mock_data in endpoints.items():
-                        pattern = f"https://{domain}{path}"
+                        pattern = f"https://{domain}{path}**"
                         body = json.dumps(mock_data["body"])
                         status = mock_data.get("status", 200)
                         page.route(

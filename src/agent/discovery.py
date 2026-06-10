@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from src.agent.config import FRONTEND_EXTENSIONS, MAX_PACKAGE_SCAN_DEPTH, REPO_DIR
+from src.agent.routes import _get_changed_files
 
 logger = logging.getLogger(__name__)
 
@@ -15,14 +16,6 @@ def detect_frontend_changes(diff: str) -> bool:
             if ext in FRONTEND_EXTENSIONS:
                 return True
     return False
-
-
-def _get_changed_files(diff: str) -> list[str]:
-    files: list[str] = []
-    for line in diff.splitlines():
-        if line.startswith("+++ b/"):
-            files.append(line[6:])
-    return files
 
 
 def find_nearest_package_json(changed_files: list[str]) -> str | None:

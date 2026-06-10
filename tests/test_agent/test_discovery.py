@@ -228,7 +228,7 @@ class TestVerifyDevScript:
 
 class TestGetChangedFiles:
     def test_extracts_from_diff(self):
-        from src.agent.discovery import _get_changed_files
+        from src.agent.routes import _get_changed_files
 
         diff = """diff --git a/src/page.tsx b/src/page.tsx
 --- a/src/page.tsx
@@ -241,7 +241,7 @@ diff --git a/src/Header.tsx b/src/Header.tsx
         assert "src/Header.tsx" in result
 
     def test_empty_diff_returns_empty(self):
-        from src.agent.discovery import _get_changed_files
+        from src.agent.routes import _get_changed_files
         assert _get_changed_files("") == []
 
 
