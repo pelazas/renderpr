@@ -101,7 +101,7 @@ def capture_screenshots(
                     "(function(){"
                     "  const mocks = " + json.dumps(mock_entries) + ";"
                     "  const origFetch = window.fetch ? window.fetch.bind(window) : null;"
-                    "  window.fetch = function(input, init){"
+                    "  function mockedFetch(input, init){"
                     "    const url = typeof input === 'string' ? input : (input && input.url) || '';"
                     "    for (let i = 0; i < mocks.length; i++){"
                     "      const path = mocks[i][0];"
@@ -116,7 +116,12 @@ def capture_screenshots(
                     "      }"
                     "    }"
                     "    return origFetch ? origFetch(input, init) : Promise.reject(new Error('No fetch available'));"
-                    "  };"
+                    "  }"
+                    "  Object.defineProperty(window, 'fetch', {"
+                    "    value: mockedFetch,"
+                    "    writable: false,"
+                    "    configurable: false"
+                    "  });"
                     "})();"
                 )
                 page.add_init_script(script)
