@@ -9,7 +9,7 @@ from typing import Final
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
@@ -42,7 +42,7 @@ def _screenshot_route(
         for action in actions:
             try:
                 if action["type"] == "click":
-                    page.click(action["selector"])
+                    page.click(action["selector"], timeout=PLAYWRIGHT_CLICK_TIMEOUT)
                 elif action["type"] == "wait":
                     page.wait_for_timeout(action.get("ms", 1000))
             except Exception:

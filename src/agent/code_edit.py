@@ -42,6 +42,10 @@ OUTPUT FORMAT:
   "newString": "<replacement string>"
 }
 
+Optionally, if the change is inside a modal, overlay, dropdown, or toggle that requires a click to reveal,
+include an "actions" array with click selectors derived from the exact button text in the source code:
+  "actions": [{"type": "click", "selector": "text=Open modal"}]
+
 The oldString must match the file exactly. Be precise with whitespace."""
 
 

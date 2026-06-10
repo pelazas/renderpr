@@ -131,6 +131,12 @@ def execute_change(
         routes = [{"path": "/", "actions": [], "reason": "fallback"}]
         mocks = {}
 
+    edit_actions = edit.get("actions", [])
+    if edit_actions:
+        for route in routes:
+            route["actions"] = edit_actions
+        logger.info("Using edit-provided actions for all routes: %s", edit_actions)
+
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(
         dev_server_url,

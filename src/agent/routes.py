@@ -30,9 +30,8 @@ Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- If interactions are needed (click to open modal/dropdown), use the file contents and reverse dependencies to trace the full chain: trigger button -> state -> rendered component
-- Reverse dependencies are files that import the changed files — use them to find buttons, state hooks, and event handlers
-- For clicking buttons by their visible text, use Playwright's `:has-text()` pseudo-selector (e.g., `"button:has-text('Open Modal')"`)
+- ONLY include actions if the change is inside a modal, dropdown, overlay, or toggle that is hidden by default and requires a click to reveal. Do NOT guess or assume — look at the source code for useState toggles or conditional rendering tied to a button.
+- If you include an action, derive the selector from the exact button text in the source code. For a button with text "Open", use "text=Open".
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
