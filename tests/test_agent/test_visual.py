@@ -22,6 +22,9 @@ def mock_playwright(monkeypatch):
             self.screenshot_path = path
             Path(path).touch()
 
+        def route(self, pattern, handler):
+            pass
+
         def click(self, selector: str):
             self.actions_called.append(("click", selector))
 
@@ -53,7 +56,7 @@ def mock_playwright(monkeypatch):
             pass
 
     monkeypatch.setattr(
-        "playwright.sync_api.sync_playwright",
+        "src.agent.visual.sync_playwright",
         lambda: MockSyncPlaywright(),
     )
 
@@ -97,10 +100,10 @@ class TestCaptureScreenshots:
         )
 
         labels = [label for _, label in result]
-        assert any("Mobile XS" in l for l in labels)
-        assert any("Tablet" in l for l in labels)
-        assert any("Desktop" in l for l in labels)
-        assert any("Desktop XL" in l for l in labels)
+        assert any("Mobile XS" in label_text for label_text in labels)
+        assert any("Tablet" in label_text for label_text in labels)
+        assert any("Desktop" in label_text for label_text in labels)
+        assert any("Desktop XL" in label_text for label_text in labels)
 
     def test_multiple_routes_captured(self, tmp_path):
         from src.agent.visual import capture_screenshots
@@ -118,7 +121,7 @@ class TestCaptureScreenshots:
 
         assert len(result) == 8
         labels = [label for _, label in result]
-        assert all(" - /" in l or " - /dashboard" in l for l in labels)
+        assert all(" - /" in label_text or " - /dashboard" in label_text for label_text in labels)
 
     def test_route_label_included(self, tmp_path):
         from src.agent.visual import capture_screenshots
@@ -138,6 +141,49 @@ class TestCaptureScreenshots:
 
 
 
+
+
+class TestCaptureScreenshotsWithMocks:
+    def test_mocks_do_not_crash_capture(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        mocks = {
+            "api.example.com": {
+                "/api/users": {"body": {"users": []}, "status": 200},
+            }
+        }
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+            mocks=mocks,
+        )
+
+        assert len(result) == 4
+
+    def test_no_mocks_when_not_provided(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+        )
+
+        assert len(result) == 4
+
+    def test_empty_mocks(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+            mocks={},
+        )
+
+        assert len(result) == 4
 
 
 class TestUploadScreenshots:

@@ -7,12 +7,24 @@ from pytest import MonkeyPatch
 from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _start_dev_server, run
 
 
+_FRONTEND_DIFF = "diff --git a/src/page.tsx b/src/page.tsx\n--- a/src/page.tsx\n+++ b/src/page.tsx\n@@ -1 +1 @@\n-old\n+new"
+
+def _successful_discovery(*a, **kw):
+    return {
+        "has_frontend": True,
+        "package_json_path": "/app/repo/package.json",
+        "workspace_root": None,
+        "dev_command": "npm run dev",
+        "reason": None,
+    }
+
 def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
-    monkeypatch.setattr("src.agent.main._start_dev_server", lambda: None)
-    monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: "")
+    monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
+    monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
+    monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     if posted_body is not None:
@@ -229,6 +241,22 @@ class TestStartDevServer:
         with pytest.raises(SystemExit):
             _start_dev_server()
 
+    def test_start_dev_server_with_package_dir(self, monkeypatch):
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("Proc", (), {"kill": lambda self: None, "pid": 123})())
+
+        import httpx
+        mock_resp = httpx.Response(200)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        _start_dev_server(
+            package_dir="/app/repo/packages/web/package.json",
+            install_dir="/app/repo/package.json",
+        )
+
 
 class TestFetchSecrets:
     def test_fetch_secrets_success(self, monkeypatch: MonkeyPatch):
@@ -434,6 +462,35 @@ class TestBuildScreenshotGrid:
         assert "## Review" in posted[0]
 
 
+class TestCaptureScreenshotsMockWiring:
+    def test_mocks_passed_to_capture_screenshots(self, monkeypatch):
+
+        captured_kwargs = {}
+        def fake_infer_routes(diff, tree, key):
+            return (
+                [{"path": "/", "reason": "test", "actions": []}],
+                {"api.example.com": {"/api/users": {"body": {"ok": True}}}},
+            )
+
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+            captured_kwargs["mocks"] = mocks
+            return [("/tmp/test.png", "Desktop - /")]
+
+        monkeypatch.setattr("src.agent.routes.infer_routes", fake_infer_routes)
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+        monkeypatch.setattr("src.agent.main.REPO_DIR", "/tmp")
+
+        from src.agent.main import _capture_screenshots
+
+        _capture_screenshots("diff content", {"openrouter_api_key": "sk-or-fake"})
+
+        assert captured_kwargs.get("mocks") == {
+            "api.example.com": {"/api/users": {"body": {"ok": True}}},
+        }
+
+
 class TestPostComment:
     def test_post_comment_success(self, monkeypatch):
         import httpx
@@ -459,3 +516,67 @@ class TestPostComment:
                 pr_number="42",
                 body="## Review",
             )
+
+
+_BACKEND_DIFF = "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-old\n+new"
+
+
+class TestDiscoveryIntegration:
+    def test_no_frontend_skips_and_posts_comment(self, monkeypatch):
+        monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
+        monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
+        monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _BACKEND_DIFF)
+
+        posted = []
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+        monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+
+        run()
+
+        assert len(posted) == 1
+        assert "no frontend" in posted[0].lower()
+
+    def test_frontend_without_package_skips_and_posts(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
+        monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
+        monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
+
+        posted = []
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+        monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+
+        run()
+
+        assert len(posted) == 1
+        assert "no package.json" in posted[0].lower()
+
+    def test_frontend_with_package_proceeds_normally(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
+        monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
+        monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
+
+        pkg = tmp_path / "package.json"
+        pkg.write_text('{"scripts": {"dev": "next dev"}}')
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
+
+        started_with = {}
+        def track_start(package_dir=None, install_dir=None, **kw):
+            started_with["package_dir"] = package_dir
+            started_with["install_dir"] = install_dir
+        monkeypatch.setattr("src.agent.main._start_dev_server", track_start)
+
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
+        posted = []
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+
+        run()
+
+        assert len(posted) == 1
+        assert "## Review" in posted[0]
