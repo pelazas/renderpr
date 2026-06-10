@@ -216,6 +216,28 @@ def _fetch_diff(token: str, repo_full_name: str, pr_number: str) -> str:
     sys.exit(1)
 
 
+def _fetch_pr_meta(token: str, repo_full_name: str, pr_number: str) -> dict:
+    url = f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "RenderPR/1.0",
+    }
+
+    with httpx.Client(timeout=30) as client:
+        resp = client.get(url, headers=headers)
+
+    if resp.status_code != 200:
+        logger.error("Failed to fetch PR meta: %d %s", resp.status_code, resp.text)
+        sys.exit(1)
+
+    data = resp.json()
+    return {
+        "head_ref": data["head"]["ref"],
+        "is_fork": data["head"]["repo"]["fork"],
+    }
+
+
 def _parse_diff_summary(diff: str) -> str:
     lines = diff.splitlines()
     current_file = ""
