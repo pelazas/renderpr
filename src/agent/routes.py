@@ -170,9 +170,9 @@ def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = N
             body = mock_data.get("body")
             if not isinstance(body, (dict, list)):
                 continue
-            # Skip mocks for endpoints that don't appear in any file
-            if file_contents and path not in combined_code:
-                logger.info("Discarding mock for %s: not found in source code", path)
+            # Skip mocks unless there's an actual fetch/axios call to this path
+            if file_contents and not _has_fetch_call(combined_code, path):
+                logger.info("Discarding mock for %s: no fetch call found in source code", path)
                 continue
             validated_endpoints[path] = {
                 "body": body,
@@ -181,6 +181,18 @@ def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = N
         if validated_endpoints:
             validated[domain] = validated_endpoints
     return validated
+
+
+def _has_fetch_call(code: str, api_path: str) -> bool:
+    """Check if code contains a fetch/axios call to the given API path."""
+    import re
+    # Match fetch('/api/users'), fetch("/api/users"), axios.get('/api/users'), etc.
+    patterns = [
+        rf"""fetch\s*\(\s*['\"]{re.escape(api_path)}['\"]""",
+        rf"""axios\.\w+\s*\(\s*['\"]{re.escape(api_path)}['\"]""",
+        rf"""axios\s*\(\s*['\"]{re.escape(api_path)}['\"]""",
+    ]
+    return any(re.search(p, code) for p in patterns)
 
 
 def _extract_json(text: str) -> dict | None:
