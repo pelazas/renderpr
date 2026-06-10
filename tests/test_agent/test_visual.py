@@ -22,6 +22,9 @@ def mock_playwright(monkeypatch):
             self.screenshot_path = path
             Path(path).touch()
 
+        def route(self, pattern, handler):
+            pass
+
         def click(self, selector: str):
             self.actions_called.append(("click", selector))
 

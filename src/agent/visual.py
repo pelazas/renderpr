@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 import uuid
@@ -65,6 +66,7 @@ def capture_screenshots(
     dev_server_url: str,
     screenshot_dir: Path | None = None,
     routes: list[dict] | None = None,
+    mocks: dict | None = None,
 ) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -80,6 +82,22 @@ def capture_screenshots(
             browser = p.chromium.launch()
             context = browser.new_context()
             page = context.new_page()
+
+            if mocks:
+                for domain, endpoints in mocks.items():
+                    for path, mock_data in endpoints.items():
+                        pattern = f"https://{domain}{path}"
+                        body = json.dumps(mock_data["body"])
+                        status = mock_data.get("status", 200)
+                        page.route(
+                            pattern,
+                            lambda route, b=body, s=status: route.fulfill(
+                                status=s,
+                                content_type="application/json",
+                                body=b,
+                            ),
+                        )
+                logger.info("Registered %d mock endpoint(s)", sum(len(e) for e in mocks.values()))
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
