@@ -462,6 +462,36 @@ class TestBuildScreenshotGrid:
         assert "## Review" in posted[0]
 
 
+class TestCaptureScreenshotsMockWiring:
+    def test_mocks_passed_to_capture_screenshots(self, monkeypatch):
+        from src.agent.visual import capture_screenshots, upload_screenshots
+
+        captured_kwargs = {}
+        def fake_infer_routes(diff, tree, key):
+            return (
+                [{"path": "/", "reason": "test", "actions": []}],
+                {"api.example.com": {"/api/users": {"body": {"ok": True}}}},
+            )
+
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+            captured_kwargs["mocks"] = mocks
+            return [("/tmp/test.png", "Desktop - /")]
+
+        monkeypatch.setattr("src.agent.routes.infer_routes", fake_infer_routes)
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+        monkeypatch.setattr("src.agent.main.REPO_DIR", "/tmp")
+
+        from src.agent.main import _capture_screenshots
+
+        _capture_screenshots("diff content", {"openrouter_api_key": "sk-or-fake"})
+
+        assert captured_kwargs.get("mocks") == {
+            "api.example.com": {"/api/users": {"body": {"ok": True}}},
+        }
+
+
 class TestPostComment:
     def test_post_comment_success(self, monkeypatch):
         import httpx

@@ -229,11 +229,13 @@ def _capture_screenshots(
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     repo_tree = build_repo_tree()
-    routes = infer_routes(diff, repo_tree, secrets["openrouter_api_key"])
+    routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"])
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
+    if mocks:
+        logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes)
+    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     pr_number = os.environ.get("PR_NUMBER", "0")
