@@ -105,21 +105,28 @@ def _start_dev_server(
         sys.exit(1)
 
     try:
-        subprocess.run(
+        proc = subprocess.Popen(
             ["npm", "ci"],
             cwd=str(install_cwd),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            check=True,
-            timeout=300,
         )
+        out_lines: list[str] = []
+        for line in iter(proc.stdout.readline, ""):
+            out_lines.append(line)
+            # Log periodically so we see progress in real time
+            if len(out_lines) % 50 == 0:
+                logger.info("npm ci progress: ... %s", line.rstrip()[:200])
+        proc.wait(timeout=300)
+        if proc.returncode != 0:
+            full = "".join(out_lines)
+            logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
+            logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
+            sys.exit(1)
     except subprocess.TimeoutExpired:
-        logger.error("npm ci timed out after 300s in %s", install_cwd)
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        logger.error("npm ci failed (exit %d) in %s", e.returncode, install_cwd)
-        logger.error("stdout: %s", e.stdout[:2000] if e.stdout else "(empty)")
-        logger.error("stderr: %s", e.stderr[:2000] if e.stderr else "(empty)")
+        proc.kill()
+        logger.error("npm ci timed out after 300s in %s. Last 20 lines:\n%s", install_cwd, "\n".join(out_lines[-20:]))
         sys.exit(1)
     except Exception:
         logger.exception("npm ci failed unexpectedly")

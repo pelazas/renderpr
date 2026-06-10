@@ -68,6 +68,19 @@ def test_run_defaults_when_missing_env(caplog, monkeypatch):
     assert "RenderPR agent finished" in caplog.text
 
 
+def _mock_process(**attrs):
+    proc = type("MockProc", (), {
+        "stdout": type("MockStream", (), {"readline": lambda self: ""})(),
+        "wait": lambda self, timeout=None: 0,
+        "returncode": 0,
+        "kill": lambda self: None,
+        "pid": 123,
+    })
+    for k, v in attrs.items():
+        setattr(proc, k, v)
+    return proc()
+
+
 def _mock_client(response):
     def _respond(*a, **kw):
         return response(*a, **kw) if callable(response) else response
@@ -200,20 +213,20 @@ class TestStartDevServer:
     def test_npm_ci_fails(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
 
-        def mock_run(cmd, **kw):
+        def mock_popen(cmd, **kw):
             raise Exception("npm ci error")
 
-        monkeypatch.setattr("subprocess.run", mock_run)
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
 
         with pytest.raises(SystemExit):
             _start_dev_server()
 
     def test_dev_server_ready_on_first_poll(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)
 
         import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("Proc", (), {"kill": lambda self: None, "pid": 123})())
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
 
         import httpx
         mock_resp = httpx.Response(200)
@@ -229,7 +242,7 @@ class TestStartDevServer:
         monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)
 
         import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("Proc", (), {"kill": lambda self: None, "pid": 123})())
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
 
         import httpx
 
@@ -243,10 +256,9 @@ class TestStartDevServer:
 
     def test_start_dev_server_with_package_dir(self, monkeypatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
-        monkeypatch.setattr("subprocess.run", lambda *a, **kw: None)
 
         import subprocess
-        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: type("Proc", (), {"kill": lambda self: None, "pid": 123})())
+        monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _mock_process())
 
         import httpx
         mock_resp = httpx.Response(200)
