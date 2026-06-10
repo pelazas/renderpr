@@ -235,7 +235,8 @@ def infer_routes(
             data = resp.json()
             try:
                 raw = data["choices"][0]["message"]["content"]
-                logger.info("Raw route inference response: %s", raw[:500])
+                logger.info("LLM response length: %d chars, has 'mocks': %s", len(raw), "'mocks' in raw")
+                logger.info("LLM response tail: ...%s", raw[-800:] if len(raw) > 800 else raw)
                 parsed = _extract_json(raw)
                 if parsed is None:
                     logger.warning("Could not extract JSON from route inference response, falling back to homepage")
@@ -247,7 +248,8 @@ def infer_routes(
                 if routes:
                     logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])
                     if mocks:
-                        logger.info("Generated mocks for %d domain(s)", len(mocks))
+                        mock_paths = sum(len(eps) for eps in mocks.values())
+                        logger.info("Generated mocks for %d domain(s), %d path(s): %s", len(mocks), mock_paths, {d: list(eps.keys()) for d, eps in mocks.items()})
                     return routes, mocks
                 logger.warning("LLM returned empty or invalid routes, falling back to homepage")
                 return _fallback_routes(), {}

@@ -120,7 +120,6 @@ def _start_dev_server(
                 logger.info("npm ci progress: ... %s", line.rstrip()[:200])
         proc.wait(timeout=300)
         if proc.returncode != 0:
-            full = "".join(out_lines)
             logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
             logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
             sys.exit(1)
