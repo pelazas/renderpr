@@ -16,6 +16,19 @@ class TestParseCommand:
     def test_help_falls_to_review(self):
         assert parse_command("@renderpr help") == {"action": "review", "query": None}
 
+    def test_code_change_command(self):
+        result = parse_command("@renderpr code change the button to orange")
+        assert result["action"] == "change"
+        assert result["query"] == "the button to orange"
+
+    def test_code_change_with_colon_separator(self):
+        result = parse_command("@renderpr code change: add a card to the modal")
+        assert result["action"] == "change"
+        assert result["query"] == "add a card to the modal"
+
+    def test_code_change_empty_after_keyword(self):
+        assert parse_command("@renderpr code change") == {"action": "review", "query": None}
+
     def test_change_command(self):
         result = parse_command("@renderpr change the button to orange")
         assert result["action"] == "change"

@@ -16,6 +16,11 @@ def parse_command(text: str) -> dict | None:
     if not after or after.startswith("review") or after.startswith("help"):
         return {"action": "review", "query": None}
 
+    if after.startswith("code change"):
+        query = after.removeprefix("code change").lstrip(": ").strip()
+        if query:
+            return {"action": "change", "query": query}
+
     if after.startswith("change "):
         return {"action": "change", "query": after.removeprefix("change ").strip()}
 
