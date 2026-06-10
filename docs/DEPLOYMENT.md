@@ -212,5 +212,8 @@ Check CloudWatch Logs for the task. Common causes:
 ### Container exits immediately
 Verify `npm ci` and `npm run dev` succeed in the cloned repository. Check git clone permissions (installation token scope).
 
+### Native module compilation fails during npm ci
+If the cloned project depends on native modules (`better-sqlite3`, `sharp`, `canvas`, `node-sass`, etc.), the container needs build tools to compile them. The Docker image includes `build-essential`, `libsqlite3-dev`, `libpng-dev`, `libjpeg-dev`, `libpixman-1-dev`, `libcairo2-dev`, `libpango1.0-dev`, and `pkg-config`. If a project needs a library not in this list, extend the `apt-get install` line in `Dockerfile` and re-deploy.
+
 ### No review comment posted
 Check the OpenRouter API key validity and the GitHub installation access token generation. Verify the container has outbound internet access (public subnet + IGW route).

@@ -4,6 +4,13 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    libcairo2-dev \
+    libjpeg-dev \
+    libpango1.0-dev \
+    libpixman-1-dev \
+    libpng-dev \
+    libsqlite3-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
