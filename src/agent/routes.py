@@ -222,7 +222,18 @@ def infer_routes(
         f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in reverse_contents.items()
     ) if reverse_contents else "(none detected)"
 
-    user_content = f"## Git Diff\n\n```diff\n{diff}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{changed_section}\n\n## Reverse Dependencies (files that import changed files)\n\n{reverse_section}"
+    frontend_diff_lines: list[str] = []
+    in_frontend_block = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git a/") and any(line[13:].endswith(ext) for ext in FRONTEND_EXTENSIONS):
+            in_frontend_block = True
+        elif line.startswith("diff --git "):
+            in_frontend_block = False
+        if in_frontend_block:
+            frontend_diff_lines.append(line)
+    filtered_diff = "\n".join(frontend_diff_lines)
+
+    user_content = f"## Git Diff\n\n```diff\n{filtered_diff or '(no frontend file changes in diff)'}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{changed_section}\n\n## Reverse Dependencies (files that import changed files)\n\n{reverse_section}"
 
     body = {
         "model": LLM_MODEL,
