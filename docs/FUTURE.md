@@ -1,19 +1,21 @@
 # Future Features
 
-Ideas scoped out but not yet implemented. Ordered by priority.
+Ideas scoped out for RenderPR. Implemented items are kept here briefly as product history; pending items remain actionable.
 
-## 1. Intelligent Route Navigation - done
+## Implemented
 
-**Problem:** Currently screenshots only capture the homepage (`localhost:3000`). Real PRs change specific pages.
+### 1. Intelligent Route Navigation
+
+**Problem:** Early RenderPR screenshots only captured the homepage (`localhost:3000`). Real PRs change specific pages.
 
 **Approach:**
 - Parse git diff to find changed file paths
 - Strip framework conventions to guess routes (e.g., `app/profile/page.tsx` → `/profile`, `pages/about.tsx` → `/about`)
-- Framework-specific inference: Next.js app dir, Next.js pages router, React Router `routes.tsx`
+- Framework-specific inference: Next.js app dir, Next.js pages router, React Router patterns
 - Navigate to each unique route and screenshot at all viewports
 - If route can't be inferred (e.g., shared component), screenshot from parent route or homepage
 
-## 2. Monorepo / Frontend Discovery
+### 2. Monorepo / Frontend Discovery
 
 **Problem:** Not all PRs have `package.json` at the repo root. Some use monorepos (`packages/web/package.json`), and some PRs are backend-only with no frontend changes at all.
 
@@ -23,7 +25,7 @@ Ideas scoped out but not yet implemented. Ordered by priority.
 - If multiple candidates found, pick the one with the most frontend-indicative deps
 - If none found, post a comment saying the PR doesn't appear to contain frontend changes and exit gracefully
 
-## 3. AI-Generated Mock Data
+### 3. AI-Generated Mock Data
 
 **Problem:** Without mock data, screenshots show loading spinners or empty states.
 
@@ -32,10 +34,11 @@ Ideas scoped out but not yet implemented. Ordered by priority.
 - For each affected component, trace which fields are rendered
 - Search the codebase for those specific fields to determine their real shapes and types
 - Generate mock data only for what's actually needed on screen
-- Register Playwright route handlers to intercept network requests and serve the mocks
-- No fixture files — everything is ephemeral, PR-specific, and adaptive to schema changes
+- Write temporary server-side API routes so screenshots and live preview use the same mock data
+- Register Playwright route handlers as fallback
+- No committed fixture files: everything is ephemeral, PR-specific, and adaptive to schema changes
 
-## 4. Conversational Code Changes via @renderpr
+### 4. Conversational Code Changes via @renderpr
 
 **Problem:** Users can request changes in comments but the bot only reviews, never edits code.
 
@@ -44,9 +47,24 @@ Ideas scoped out but not yet implemented. Ordered by priority.
 - Apply the requested change to the cloned repo in the active Fargate container
 - Re-run the dev server, capture updated screenshots
 - Post a follow-up comment with the new screenshots
-- Uses the LLM to generate the code diff and `sed`/`git apply` to apply it
+- Uses the LLM to select files and generate edits
+- Supports `@renderpr apply` and `@renderpr reject`
+- Excludes runtime-generated mock/config files from apply commits
 
-## 5. Launch
+### 5. Live Preview Links
+
+**Problem:** Screenshots are useful, but reviewers often need to click around the running app.
+
+**Approach:**
+- Run the dev server with `HOST=0.0.0.0`
+- Resolve the Fargate task public IP from ECS metadata
+- Include `Live app: http://<public-ip>:3000` in review comments
+- Patch temporary Next config with `allowedDevOrigins` for the public IP
+- Keep internal RenderPR browsing on `localhost` for reliable screenshots
+
+## Pending
+
+### 1. Launch
 
 - Buy `renderpr.com` domain
 - Build a landing page
@@ -54,7 +72,7 @@ Ideas scoped out but not yet implemented. Ordered by priority.
 - Tweet / X thread
 - Product Hunt launch
 
-## 6. npm Cache
+### 2. npm Cache
 
 It's not only possible — it's a well-known pattern. Here's how it would work:
 1. Before npm ci, compute a SHA256 hash of the repo's package-lock.json
