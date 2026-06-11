@@ -198,13 +198,13 @@ def handler(event: dict, context: object) -> dict:
         cmd = _parse_renderpr_command(comment_body)
         logger.info("Parsed command: %s", cmd)
 
-        if cmd and cmd["command"] in ("change", "apply", "reject"):
+        if cmd and cmd["command"] in ("change", "apply", "reject", "review"):
             public_ip = _lookup_running_task(pr_number)
             if public_ip:
                 success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
                 if success:
                     return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
-                logger.warning("Dispatch failed, no running task to apply/reject to")
+                logger.warning("Dispatch failed, falling through to cold-start")
             else:
                 logger.info("No running task found for PR #%s", pr_number)
 
@@ -217,6 +217,10 @@ def handler(event: dict, context: object) -> dict:
                     }),
                 }
 
+            if cmd["command"] == "review":
+                _run_fargate_task(base_env, pr_number)
+                return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
+
             command_str = cmd["command"]
             if cmd["command"] == "change" and cmd.get("query"):
                 command_str = f"code_change::{cmd['query']}"
@@ -228,7 +232,7 @@ def handler(event: dict, context: object) -> dict:
             _run_fargate_task(overrides, pr_number)
             return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
-        # Default: full review
+        # Default: full review (no @renderpr command, just a plain comment)
         _run_fargate_task(base_env, pr_number)
         return {"statusCode": 200, "body": json.dumps({"ok": True})}
 

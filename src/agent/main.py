@@ -436,17 +436,16 @@ def run() -> None:
     logger.info("Dev server ready. Proceeding to review...")
 
     skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
-    if skip_review:
-        logger.info("SKIP_REVIEW=true, skipping initial review")
-    else:
+
+    def do_review() -> None:
+        from src.agent.review import ReviewError, run_review
+
         screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
         logger.info(
             "Captured %d screenshots: %s",
             len(screenshot_paths),
             ", ".join(p.name for p in screenshot_paths),
         )
-
-        from src.agent.review import ReviewError, run_review
 
         try:
             review_body = run_review(
@@ -457,7 +456,7 @@ def run() -> None:
             )
         except ReviewError:
             logger.exception("Review failed")
-            sys.exit(1)
+            return
 
         review_body = _append_live_preview_link(review_body, public_ip)
 
@@ -467,7 +466,12 @@ def run() -> None:
             pr_number=pr_number,
             body=review_body,
         )
+        logger.info("Review posted to PR #%s", pr_number)
 
+    if skip_review:
+        logger.info("SKIP_REVIEW=true, skipping initial review")
+    else:
+        do_review()
         logger.info("Initial review posted. Starting command server...")
 
     pr_meta = _fetch_pr_meta(
@@ -601,10 +605,15 @@ Live app: http://{public_ip}:3000
             logger.exception("Reject timed out")
             return {"status": "error", "message": "Reject timed out."}
 
+    def on_review() -> dict:
+        do_review()
+        return {"status": "success", "message": "Review re-posted."}
+
     server = CommandServer(
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
         handle_reject_fn=on_reject,
+        handle_review_fn=on_review,
     )
     server.start()
 
