@@ -79,6 +79,10 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/openrouter` },
       this,
     );
+    const tasksParamArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks/*` },
+      this,
+    );
 
     // IAM: Lambda execution role
     const lambdaRole = new iam.Role(this, "LambdaRole", {
@@ -93,7 +97,7 @@ export class RenderprStack extends cdk.Stack {
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [githubParamArn],
+        resources: [githubParamArn, tasksParamArn],
       }),
     );
 
@@ -116,6 +120,13 @@ export class RenderprStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
         resources: [githubParamArn, openrouterParamArn],
+      }),
+    );
+
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:PutParameter", "ssm:DeleteParameter"],
+        resources: [tasksParamArn],
       }),
     );
 

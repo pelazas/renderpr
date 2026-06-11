@@ -69,50 +69,16 @@ def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
         logger.error("run_task failures: %s", failures)
 
 
-def _get_running_task_eni(pr_number: str) -> str | None:
-    ecs = boto3.client("ecs")
-    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
+def _lookup_running_task(pr_number: str) -> str | None:
+    """Return the public IP of the running task for this PR, or None."""
+    from src.agent.registration import lookup_task
 
-    task_arns: list[str] = []
-    paginator = ecs.get_paginator("list_tasks")
-    for page in paginator.paginate(
-        cluster=ECS_CLUSTER,
-        family=family,
-        desiredStatus="RUNNING",
-    ):
-        task_arns.extend(page.get("taskArns", []))
-
-    logger.info(
-        "list_tasks returned %d running tasks (family=%s) looking for PRNumber=%s",
-        len(task_arns),
-        family,
-        pr_number,
-    )
-
-    if not task_arns:
-        return None
-
-    for i in range(0, len(task_arns), 100):
-        batch = task_arns[i : i + 100]
-        desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=batch)
-        for task in desc.get("tasks", []):
-            task_tag_map = {t["key"]: t["value"] for t in task.get("tags", [])}
-            logger.info("Task %s tags=%s", task["taskArn"], task_tag_map)
-            if task_tag_map.get("PRNumber") == pr_number:
-                for attachment in task.get("attachments", []):
-                    for detail in attachment.get("details", []):
-                        if detail["name"] == "networkInterfaceId":
-                            return detail["value"]
-    return None
-
-
-def _get_public_ip(eni_id: str) -> str | None:
-    ec2 = boto3.client("ec2")
-    resp = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
-    interfaces = resp.get("NetworkInterfaces", [])
-    if interfaces:
-        return interfaces[0].get("Association", {}).get("PublicIp")
-    return None
+    public_ip = lookup_task(pr_number)
+    if public_ip:
+        logger.info("Found running task for PR #%s via SSM at %s", pr_number, public_ip)
+    else:
+        logger.info("No running task found in SSM for PR #%s", pr_number)
+    return public_ip
 
 
 def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
@@ -209,16 +175,12 @@ def handler(event: dict, context: object) -> dict:
         logger.info("Parsed command: %s", cmd)
 
         if cmd and cmd["command"] in ("change", "apply", "reject"):
-            eni_id = _get_running_task_eni(pr_number)
-            if eni_id:
-                public_ip = _get_public_ip(eni_id)
-                if public_ip:
-                    success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
-                    if success:
-                        return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
-                    logger.warning("Dispatch failed, no running task to apply/reject to")
-                else:
-                    logger.warning("Could not get public IP for running task")
+            public_ip = _lookup_running_task(pr_number)
+            if public_ip:
+                success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
+                if success:
+                    return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
+                logger.warning("Dispatch failed, no running task to apply/reject to")
             else:
                 logger.info("No running task found for PR #%s", pr_number)
 

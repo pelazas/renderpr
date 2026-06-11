@@ -68,3 +68,19 @@ def get_public_ip() -> str:
 
     logger.warning("No public IP found for private IP %s", private_ip)
     return "localhost"
+
+
+def get_task_arn() -> str:
+    metadata_uri = os.environ.get(ECS_TASK_METADATA_ENV)
+    if not metadata_uri:
+        logger.warning("ECS_CONTAINER_METADATA_URI_V4 not set, cannot get task ARN")
+        return ""
+
+    task_data = _fetch_json(f"{metadata_uri}/task")
+    if task_data:
+        arn = task_data.get("TaskARN") or task_data.get("taskArn")
+        if arn:
+            return arn
+
+    logger.warning("Could not find TaskARN in task metadata")
+    return ""

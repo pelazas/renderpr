@@ -350,8 +350,7 @@ def test_code_change_with_running_task_dispatches(monkeypatch):
         dispatch_called["args"] = (ip, cmd, query)
         return True
 
-    monkeypatch.setattr("src.lambda_handler.webhook_handler._get_running_task_eni", lambda pr: "eni-123")
-    monkeypatch.setattr("src.lambda_handler.webhook_handler._get_public_ip", lambda eni: "54.1.2.3")
+    monkeypatch.setattr("src.lambda_handler.webhook_handler._lookup_running_task", lambda pr: "54.1.2.3")
     monkeypatch.setattr("src.lambda_handler.webhook_handler._dispatch_to_task", mock_dispatch)
 
     body = json.dumps(

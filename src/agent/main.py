@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import signal
 from pathlib import Path
 import shutil
 import subprocess
@@ -397,10 +398,23 @@ def run() -> None:
         logger.info("Cannot start dev server. Exiting gracefully.")
         return
 
-    from src.agent.network import get_public_ip
+    from src.agent.network import get_public_ip, get_task_arn
+    from src.agent.registration import register_task, deregister_task
     public_ip = get_public_ip()
+    task_arn = get_task_arn()
     os.environ["RENDERPR_PUBLIC_IP"] = public_ip
     logger.info("Public IP: %s", public_ip)
+    logger.info("Task ARN: %s", task_arn)
+
+    def _shutdown(_signum, _frame):
+        deregister_task(pr_number)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    if task_arn and public_ip != "localhost":
+        register_task(pr_number, task_arn, public_ip)
 
     _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
 
