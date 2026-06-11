@@ -71,13 +71,26 @@ def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
 
 def _lookup_running_task(pr_number: str) -> str | None:
     """Return the public IP of the running task for this PR, or None."""
-    from src.agent.registration import lookup_task
+    param_name = f"/renderpr/tasks/{pr_number}"
+    ssm = boto3.client("ssm")
+    try:
+        resp = ssm.get_parameter(Name=param_name)
+    except ssm.exceptions.ParameterNotFound:
+        logger.info("No running task found in SSM for PR #%s", pr_number)
+        return None
+    except Exception:
+        logger.exception("Failed to look up task for PR #%s in SSM", pr_number)
+        return None
 
-    public_ip = lookup_task(pr_number)
+    try:
+        payload = json.loads(resp["Parameter"]["Value"])
+    except (json.JSONDecodeError, KeyError):
+        logger.warning("Malformed SSM payload for PR #%s", pr_number)
+        return None
+
+    public_ip = payload.get("public_ip")
     if public_ip:
         logger.info("Found running task for PR #%s via SSM at %s", pr_number, public_ip)
-    else:
-        logger.info("No running task found in SSM for PR #%s", pr_number)
     return public_ip
 
 
