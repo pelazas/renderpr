@@ -36,7 +36,12 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
 def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
     client = boto3.client("ecs")
     family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
-    client.run_task(
+    task_tags = [
+        {"key": "Project", "value": "renderpr"},
+        {"key": "PRNumber", "value": pr_number},
+    ]
+    logger.info("Starting run_task with tags=%s", task_tags)
+    resp = client.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
         launchType="FARGATE",
@@ -55,8 +60,13 @@ def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
                 }
             ]
         },
-        tags=[{"key": "Project", "value": "renderpr"}, {"key": "PRNumber", "value": pr_number}],
+        tags=task_tags,
     )
+    for t in resp.get("tasks", []):
+        logger.info("Spawned task %s with tags=%s", t.get("taskArn"), t.get("tags"))
+    failures = resp.get("failures", [])
+    if failures:
+        logger.error("run_task failures: %s", failures)
 
 
 def _get_running_task_eni(pr_number: str) -> str | None:
@@ -72,6 +82,13 @@ def _get_running_task_eni(pr_number: str) -> str | None:
     ):
         task_arns.extend(page.get("taskArns", []))
 
+    logger.info(
+        "list_tasks returned %d running tasks (family=%s) looking for PRNumber=%s",
+        len(task_arns),
+        family,
+        pr_number,
+    )
+
     if not task_arns:
         return None
 
@@ -79,12 +96,13 @@ def _get_running_task_eni(pr_number: str) -> str | None:
         batch = task_arns[i : i + 100]
         desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=batch)
         for task in desc.get("tasks", []):
-            for tag in task.get("tags", []):
-                if tag["key"] == "PRNumber" and tag["value"] == pr_number:
-                    for attachment in task.get("attachments", []):
-                        for detail in attachment.get("details", []):
-                            if detail["name"] == "networkInterfaceId":
-                                return detail["value"]
+            task_tag_map = {t["key"]: t["value"] for t in task.get("tags", [])}
+            logger.info("Task %s tags=%s", task["taskArn"], task_tag_map)
+            if task_tag_map.get("PRNumber") == pr_number:
+                for attachment in task.get("attachments", []):
+                    for detail in attachment.get("details", []):
+                        if detail["name"] == "networkInterfaceId":
+                            return detail["value"]
     return None
 
 
@@ -198,15 +216,30 @@ def handler(event: dict, context: object) -> dict:
                     success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
                     if success:
                         return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
-                    logger.warning("Dispatch failed, spawning new task")
+                    logger.warning("Dispatch failed, no running task to apply/reject to")
                 else:
-                    logger.warning("Could not get public IP for running task, spawning new")
+                    logger.warning("Could not get public IP for running task")
+            else:
+                logger.info("No running task found for PR #%s", pr_number)
+
+            if cmd["command"] in ("apply", "reject"):
+                return {
+                    "statusCode": 409,
+                    "body": json.dumps({
+                        "ok": False,
+                        "error": f"No active review session for PR #{pr_number}. Run `@renderpr review` first.",
+                    }),
+                }
 
             command_str = cmd["command"]
             if cmd["command"] == "change" and cmd.get("query"):
                 command_str = f"code_change::{cmd['query']}"
 
-            _run_fargate_task(base_env + [{"name": "COMMAND", "value": command_str}], pr_number)
+            overrides = base_env + [
+                {"name": "COMMAND", "value": command_str},
+                {"name": "SKIP_REVIEW", "value": "true"},
+            ]
+            _run_fargate_task(overrides, pr_number)
             return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
         # Default: full review

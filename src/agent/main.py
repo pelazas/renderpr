@@ -411,36 +411,40 @@ def run() -> None:
 
     logger.info("Dev server ready. Proceeding to review...")
 
-    screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
-    logger.info(
-        "Captured %d screenshots: %s",
-        len(screenshot_paths),
-        ", ".join(p.name for p in screenshot_paths),
-    )
-
-    from src.agent.review import ReviewError, run_review
-
-    try:
-        review_body = run_review(
-            diff=diff,
-            screenshot_paths=screenshot_paths,
-            openrouter_api_key=secrets["openrouter_api_key"],
-            screenshot_urls=screenshot_urls,
+    skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
+    if skip_review:
+        logger.info("SKIP_REVIEW=true, skipping initial review")
+    else:
+        screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
+        logger.info(
+            "Captured %d screenshots: %s",
+            len(screenshot_paths),
+            ", ".join(p.name for p in screenshot_paths),
         )
-    except ReviewError:
-        logger.exception("Review failed")
-        sys.exit(1)
 
-    review_body = _append_live_preview_link(review_body, public_ip)
+        from src.agent.review import ReviewError, run_review
 
-    _post_comment(
-        token=token,
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-        body=review_body,
-    )
+        try:
+            review_body = run_review(
+                diff=diff,
+                screenshot_paths=screenshot_paths,
+                openrouter_api_key=secrets["openrouter_api_key"],
+                screenshot_urls=screenshot_urls,
+            )
+        except ReviewError:
+            logger.exception("Review failed")
+            sys.exit(1)
 
-    logger.info("Initial review posted. Starting command server...")
+        review_body = _append_live_preview_link(review_body, public_ip)
+
+        _post_comment(
+            token=token,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            body=review_body,
+        )
+
+        logger.info("Initial review posted. Starting command server...")
 
     pr_meta = _fetch_pr_meta(
         token=token,

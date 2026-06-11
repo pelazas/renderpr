@@ -297,7 +297,7 @@ def test_code_change_cold_start_spawns_task(monkeypatch):
     assert len(tasks["taskArns"]) > 0
 
 
-def test_apply_cold_start_spawns_task(monkeypatch):
+def test_apply_cold_start_returns_409(monkeypatch):
     from src.lambda_handler.webhook_handler import handler
 
     body = json.dumps(
@@ -314,9 +314,31 @@ def test_apply_cold_start_spawns_task(monkeypatch):
         "body": body,
     }
     result = handler(event, {})
-    assert result["statusCode"] == 200
+    assert result["statusCode"] == 409
     data = json.loads(result["body"])
-    assert data.get("cold_start") is True
+    assert "No active review session" in data["error"]
+
+
+def test_reject_cold_start_returns_409(monkeypatch):
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "action": "created",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "issue": {"number": 77, "pull_request": {}},
+            "comment": {"body": "@renderpr reject"},
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 409
+    data = json.loads(result["body"])
+    assert "No active review session" in data["error"]
 
 
 def test_code_change_with_running_task_dispatches(monkeypatch):
