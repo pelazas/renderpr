@@ -79,6 +79,10 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/openrouter` },
       this,
     );
+    const commandTokenParamArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/renderpr-command-token` },
+      this,
+    );
     const tasksParamArn = cdk.Arn.format(
       { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks/*` },
       this,
@@ -97,7 +101,7 @@ export class RenderprStack extends cdk.Stack {
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [githubParamArn, tasksParamArn],
+        resources: [githubParamArn, commandTokenParamArn, tasksParamArn],
       }),
     );
 
@@ -119,7 +123,7 @@ export class RenderprStack extends cdk.Stack {
     fargateTaskRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [githubParamArn, openrouterParamArn],
+        resources: [githubParamArn, openrouterParamArn, commandTokenParamArn],
       }),
     );
 
@@ -192,10 +196,10 @@ export class RenderprStack extends cdk.Stack {
       environment: {
         GITHUB_PARAM_NAME: githubParamName,
         OPENROUTER_PARAM_NAME: openrouterParamName,
+        COMMAND_TOKEN_PARAM_NAME: "/renderpr/renderpr-command-token",
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
-        RENDERPR_COMMAND_TOKEN: this.node.tryGetContext("commandToken") ?? "",
       },
     });
 
@@ -211,10 +215,7 @@ export class RenderprStack extends cdk.Stack {
     );
     handler.addEnvironment("SECURITY_GROUP_ID", fargateSg.securityGroupId);
     handler.addEnvironment("GITHUB_PARAM_NAME", githubParamName);
-    handler.addEnvironment(
-      "RENDERPR_COMMAND_TOKEN",
-      this.node.tryGetContext("commandToken") ?? "",
-    );
+    handler.addEnvironment("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token");
 
     // Allow Lambda to pass the Fargate roles to ECS (required by RunTask)
     fargateExecutionRole.grantPassRole(lambdaRole);

@@ -25,6 +25,14 @@ except Exception:
     logger.exception("Failed to load webhook secret from SSM at cold start")
     WEBHOOK_SECRET = b""
 
+COMMAND_TOKEN_PARAM_NAME = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
+try:
+    param = _ssm.get_parameter(Name=COMMAND_TOKEN_PARAM_NAME, WithDecryption=True)
+    COMMAND_TOKEN: bytes = param["Parameter"]["Value"].encode("utf-8")
+except Exception:
+    logger.exception("Failed to load command token from SSM at cold start")
+    COMMAND_TOKEN = b""
+
 
 def _verify_signature(body: bytes, signature_header: str) -> bool:
     if not WEBHOOK_SECRET:
@@ -95,14 +103,17 @@ def _lookup_running_task(pr_number: str) -> str | None:
 
 
 def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
+    if not COMMAND_TOKEN:
+        logger.error("Cannot dispatch: command token not loaded from SSM")
+        return False
     body = {"command": command}
     if query:
         body["query"] = query
     data = json.dumps(body).encode()
-    token = os.environ.get("RENDERPR_COMMAND_TOKEN", "")
-    request_headers = {"Content-Type": "application/json"}
-    if token:
-        request_headers["X-RenderPR-Token"] = token
+    request_headers = {
+        "Content-Type": "application/json",
+        "X-RenderPR-Token": COMMAND_TOKEN.decode("utf-8"),
+    }
     try:
         req = urllib.request.Request(
             f"http://{public_ip}:3001/__renderpr/command",

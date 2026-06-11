@@ -143,6 +143,10 @@ class CommandServer:
 
     def start(self) -> None:
         CommandHandler.server_instance = self
+        if not self._token:
+            logger.warning(
+                "RENDERPR_COMMAND_TOKEN is not set — all dispatch requests will be rejected with 401"
+            )
         self._httpd = ThreadingHTTPServer((self._host, self._port), CommandHandler)
         thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         thread.start()

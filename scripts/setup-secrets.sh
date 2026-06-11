@@ -1,15 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PARAM_NAME="${1:-/renderpr/github-app}"
-
 if ! command -v aws &> /dev/null; then
   echo "Error: AWS CLI is not installed." >&2
   exit 1
 fi
 
 echo "=== RenderPR — Post-Deploy Secret Injection ==="
-echo "Target SSM parameter: $PARAM_NAME"
 echo ""
 
 read -rp "GitHub App ID: " APP_ID
@@ -24,7 +21,10 @@ PRIVATE_KEY=$(cat "$PEM_PATH")
 read -rsp "Webhook Secret: " WEBHOOK_SECRET
 echo ""
 
-SECRET_JSON=$(jq -n \
+read -rsp "OpenRouter API Key: " OPENROUTER_KEY
+echo ""
+
+GITHUB_SECRET_JSON=$(jq -n \
   --arg app_id "$APP_ID" \
   --arg private_key "$PRIVATE_KEY" \
   --arg webhook_secret "$WEBHOOK_SECRET" \
@@ -36,11 +36,35 @@ SECRET_JSON=$(jq -n \
 )
 
 aws ssm put-parameter \
-  --name "$PARAM_NAME" \
+  --name "/renderpr/github-app" \
   --type "SecureString" \
-  --value "$SECRET_JSON" \
+  --value "$GITHUB_SECRET_JSON" \
   --overwrite \
-  --output json
+  --output json > /dev/null
+
+aws ssm put-parameter \
+  --name "/renderpr/openrouter" \
+  --type "SecureString" \
+  --value "$OPENROUTER_KEY" \
+  --overwrite \
+  --output json > /dev/null
 
 echo ""
-echo "SSM parameter '$PARAM_NAME' updated successfully."
+echo "SSM parameters updated:"
+echo "  /renderpr/github-app"
+echo "  /renderpr/openrouter"
+echo ""
+
+if aws ssm get-parameter --name "/renderpr/renderpr-command-token" --with-decryption > /dev/null 2>&1; then
+  echo "SSM parameter /renderpr/renderpr-command-token already exists."
+else
+  echo "Generating new command token..."
+  TOKEN=$(openssl rand -hex 32)
+  aws ssm put-parameter \
+    --name "/renderpr/renderpr-command-token" \
+    --type "SecureString" \
+    --value "$TOKEN" \
+    --overwrite \
+    --output json > /dev/null
+  echo "SSM parameter /renderpr/renderpr-command-token created."
+fi

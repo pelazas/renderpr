@@ -27,6 +27,17 @@ from src.agent.polling import ChangeSession, has_pending_edits
 logger = logging.getLogger(__name__)
 
 
+def _fetch_command_token() -> str:
+    param_name = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
+    ssm = boto3.client("ssm")
+    try:
+        resp = ssm.get_parameter(Name=param_name, WithDecryption=True)
+    except Exception:
+        logger.exception("Failed to fetch command token from SSM")
+        sys.exit(1)
+    return resp["Parameter"]["Value"]
+
+
 def _fetch_secrets() -> dict:
     github_param = os.environ.get("GITHUB_PARAM_NAME")
     openrouter_param = os.environ.get("OPENROUTER_PARAM_NAME")
@@ -357,6 +368,8 @@ def run() -> None:
     logger.info("PR Number: %s", pr_number)
 
     secrets = _fetch_secrets()
+    command_token = _fetch_command_token()
+    os.environ["RENDERPR_COMMAND_TOKEN"] = command_token
     token = _get_installation_token(
         installation_id=installation_id,
         app_id=secrets["app_id"],
