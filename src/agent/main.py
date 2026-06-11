@@ -507,10 +507,23 @@ def run() -> None:
         if result["status"] == "success":
             edit = result.get("edit", {})
             change_session.add_edit(edit.get("file", ""))
-            screenshot_url = next(
-                (url for url, label in result.get("screenshot_urls", []) if label.startswith("Desktop -")),
-                result["screenshot_urls"][0][0] if result.get("screenshot_urls") else "",
-            )
+            edit_route = result.get("edit_route")
+            screenshot_urls = result.get("screenshot_urls", [])
+
+            if edit_route:
+                prefix = f"Desktop - {edit_route}"
+                screenshot_url = next(
+                    (url for url, label in screenshot_urls if label == prefix),
+                    next(
+                        (url for url, label in screenshot_urls if label.startswith("Desktop -")),
+                        screenshot_urls[0][0] if screenshot_urls else "",
+                    ),
+                )
+            else:
+                screenshot_url = next(
+                    (url for url, label in screenshot_urls if label.startswith("Desktop -")),
+                    screenshot_urls[0][0] if screenshot_urls else "",
+                )
             public_ip = os.environ.get("RENDERPR_PUBLIC_IP", "localhost")
 
             body = f"""Here's the updated app with the change applied:

@@ -51,6 +51,24 @@ def apply_edit(edit: dict) -> bool:
     return True
 
 
+def file_to_route(file_path: str) -> str | None:
+    """Map a source file path to its Next.js App Router route, if any.
+
+    Returns "/" for app/page.tsx, "/users" for app/users/page.tsx, etc.
+    Returns None for shared components, layouts, or files outside the app/ tree.
+    """
+    import re
+
+    normalized = file_path.replace("\\", "/")
+    match = re.search(r"/app((?:/[^/]+)*)/page\.(?:tsx|jsx|ts|js)$", normalized)
+    if match:
+        sub = match.group(1)
+        return sub if sub else "/"
+    if re.search(r"/app/page\.(?:tsx|jsx|ts|js)$", normalized):
+        return "/"
+    return None
+
+
 def wait_for_dev_server(url: str, timeout: int | None = None, interval: float | None = None) -> bool:
     import httpx
 
@@ -137,6 +155,9 @@ def execute_change(
             route["actions"] = edit_actions
         logger.info("Using edit-provided actions for all routes: %s", edit_actions)
 
+    edit_route = file_to_route(edit["file"])
+    logger.info("Edit route for %s: %s", edit["file"], edit_route)
+
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(
         dev_server_url,
@@ -149,6 +170,7 @@ def execute_change(
     return {
         "status": "success",
         "edit": edit,
+        "edit_route": edit_route,
         "screenshot_paths": [p for p, _ in results],
         "screenshot_urls": screenshot_urls,
     }

@@ -193,8 +193,13 @@ def handler(event: dict, context: object) -> dict:
 
     action = body.get("action", "")
     comment_body = body.get("comment", {}).get("body", "")
+    comment_author = body.get("comment", {}).get("user", {}).get("login", "")
+    sender_type = body.get("sender", {}).get("type", "")
 
     if action == "created" and "@renderpr" in comment_body:
+        if comment_author.endswith("[bot]") or sender_type == "Bot":
+            logger.info("Ignoring comment from bot account: %s", comment_author)
+            return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": "self"})}
         cmd = _parse_renderpr_command(comment_body)
         logger.info("Parsed command: %s", cmd)
 
