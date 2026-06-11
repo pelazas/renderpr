@@ -224,6 +224,14 @@ export class RenderprStack extends cdk.Stack {
             },
             this,
           ),
+          cdk.Arn.format(
+            {
+              service: "ecs",
+              resource: "container-instance",
+              resourceName: `${cluster.clusterName}/*`,
+            },
+            this,
+          ),
         ],
       }),
     );
