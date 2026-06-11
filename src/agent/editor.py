@@ -158,6 +158,10 @@ def execute_change(
     edit_route = file_to_route(edit["file"])
     logger.info("Edit route for %s: %s", edit["file"], edit_route)
 
+    if edit_route and not any(r["path"] == edit_route for r in routes):
+        routes.append({"path": edit_route, "actions": [], "reason": "edit-target"})
+        logger.info("Added edit route %s to capture list (was missing from inferred routes)", edit_route)
+
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(
         dev_server_url,
