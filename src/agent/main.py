@@ -426,9 +426,6 @@ def run() -> None:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    if task_arn and public_ip != "localhost":
-        register_task(pr_number, task_arn, public_ip)
-
     _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
 
     _start_dev_server(
@@ -506,7 +503,10 @@ def run() -> None:
         if result["status"] == "success":
             edit = result.get("edit", {})
             change_session.add_edit(edit.get("file", ""))
-            screenshot_url = result["screenshot_urls"][0][0] if result.get("screenshot_urls") else ""
+            screenshot_url = next(
+                (url for url, label in result.get("screenshot_urls", []) if label.startswith("Desktop -")),
+                result["screenshot_urls"][0][0] if result.get("screenshot_urls") else "",
+            )
             public_ip = os.environ.get("RENDERPR_PUBLIC_IP", "localhost")
 
             body = f"""Here's the updated app with the change applied:
@@ -607,6 +607,9 @@ Live app: http://{public_ip}:3000
         handle_reject_fn=on_reject,
     )
     server.start()
+
+    if task_arn and public_ip != "localhost":
+        register_task(pr_number, task_arn, public_ip)
 
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:
