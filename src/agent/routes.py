@@ -30,9 +30,12 @@ Rules:
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
 - A shared component change (e.g., components/Button.tsx) -> routes that use it
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- ONLY include actions if the change is inside a modal, dropdown, overlay, or toggle that is hidden by default and requires a click to reveal. Do NOT guess or assume — look at the source code for useState toggles or conditional rendering tied to a button.
-- If you include an action, derive the selector from the exact button text in the source code. For a button with text "Open", use "text=Open".
+- ONLY include actions if the change is inside hidden UI that requires a real user interaction to reveal: modal, dialog, dropdown, popover, drawer, sheet, accordion, overlay, or toggle.
+- Do NOT guess or assume actions. Only include a click if the source code contains an actual interactive trigger such as button, link, role="button", onClick, DialogTrigger, DropdownMenuTrigger, PopoverTrigger, SheetTrigger, or AccordionTrigger.
+- If you include an action, derive the selector from the exact trigger text in the source code. For a button with text "Open", use "text=Open" and set sourceText to "Open". For an icon button with aria-label="Open menu", use "[aria-label='Open menu']" and sourceText "Open menu".
+- Never create actions for rendered data, mock values, table cells, badges, names, roles, statuses, headings, labels, or arbitrary visible text.
 - If uncertain about a route, include it anyway (false positive > false negative)
+- If uncertain about an action, return an empty actions list for that route.
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
 - Do NOT include routes that are API routes (route.ts, api/)
@@ -48,7 +51,8 @@ Output ONLY valid JSON with this exact schema:
 {"routes": [{"path": "/...", "reason": "...", "actions": []}], "mocks": {"api.example.com": {"/api/path": {"body": {...}, "status": 200}}}}
 
 The "status" field in mocks is optional (defaults to 200). The "body" field is required.
-Each action object: {"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}
+Each click action object: {"type": "click", "selector": "text=Exact trigger text" | "[aria-label='Exact trigger text']", "sourceText": "Exact trigger text", "reason": "source-backed explanation of hidden UI revealed"}
+Each wait action object: {"type": "wait", "ms": number}
 If no interaction needed, actions should be an empty list."""
 
 
@@ -132,7 +136,7 @@ def build_repo_tree() -> str:
     return "\n".join(paths)
 
 
-def _validate_routes(routes: list[dict]) -> list[dict]:
+def _validate_routes(routes: list[dict], file_contents: dict[str, str] | None = None) -> list[dict]:
     valid: list[dict] = []
     for r in routes:
         if not isinstance(r.get("path"), str) or not r["path"].startswith("/"):
@@ -144,11 +148,49 @@ def _validate_routes(routes: list[dict]) -> list[dict]:
         for a in actions:
             if a.get("type") not in ("click", "wait"):
                 continue
-            if a["type"] == "click" and not isinstance(a.get("selector"), str):
+            if a["type"] == "click":
+                if not _is_valid_click_action(a, file_contents):
+                    continue
+            if a["type"] == "wait" and not isinstance(a.get("ms"), int):
                 continue
             validated_actions.append(a)
         valid.append({"path": r["path"], "reason": r.get("reason", ""), "actions": validated_actions})
     return valid
+
+
+def _is_valid_click_action(action: dict, file_contents: dict[str, str] | None) -> bool:
+    selector = action.get("selector")
+    source_text = action.get("sourceText")
+    reason = action.get("reason")
+    if not all(isinstance(value, str) and value.strip() for value in (selector, source_text, reason)):
+        return False
+    if selector not in {f"text={source_text}", f"[aria-label='{source_text}']", f'[aria-label="{source_text}"]'}:
+        return False
+    if not _has_reveal_reason(reason):
+        return False
+    if not file_contents:
+        return False
+    return any(_has_interactive_source_text(content, source_text) for content in file_contents.values())
+
+
+def _has_reveal_reason(reason: str) -> bool:
+    return bool(re.search(r"\b(modal|dialog|dropdown|popover|drawer|sheet|accordion|overlay|toggle|hidden|reveal|open|menu)\b", reason, re.IGNORECASE))
+
+
+def _has_interactive_source_text(content: str, source_text: str) -> bool:
+    text = re.escape(source_text)
+    trigger_names = "DialogTrigger|DropdownMenuTrigger|PopoverTrigger|SheetTrigger|AccordionTrigger|DrawerTrigger"
+    patterns = [
+        rf"<button\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</button>",
+        rf"<button\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
+        rf"<a\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</a>",
+        rf"<a\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
+        rf"<[^>]+\brole=[\"']button[\"'][^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
+        rf"<[^>]+\brole=[\"']button[\"'][^>]*\baria-label=[\"']{text}[\"'][^>]*>",
+        rf"<[^>]+\bonClick=\{{[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
+        rf"<({trigger_names})\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</\1>",
+    ]
+    return any(re.search(pattern, content, re.IGNORECASE) for pattern in patterns)
 
 
 def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = None) -> dict:
@@ -276,8 +318,8 @@ def infer_routes(
                     return _fallback_routes(), {}
                 raw_routes = parsed.get("routes", [])
                 raw_mocks = parsed.get("mocks")
-                routes = _validate_routes(raw_routes)
                 all_contents = {**file_contents, **reverse_contents}
+                routes = _validate_routes(raw_routes, all_contents)
                 mocks = _validate_mocks(raw_mocks, all_contents)
                 if routes:
                     logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])

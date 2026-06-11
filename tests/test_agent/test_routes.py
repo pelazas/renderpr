@@ -39,14 +39,24 @@ def mock_httpx_client(monkeypatch):
 
 
 class TestInferRoutes:
-    def test_returns_parsed_routes(self, mock_httpx_client):
+    def test_returns_parsed_routes(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "profile" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "profile" / "page.tsx").write_text(
+            "export default function Page() { return <button>Open menu</button>; }"
+        )
         mock_httpx_client([
             httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps({
                     "routes": [
                         {"path": "/dashboard", "reason": "file changed", "actions": []},
                         {"path": "/profile", "reason": "component used", "actions": [
-                            {"type": "click", "selector": "#menu"},
+                            {
+                                "type": "click",
+                                "selector": "text=Open menu",
+                                "sourceText": "Open menu",
+                                "reason": "button opens dropdown",
+                            },
                             {"type": "wait", "ms": 500},
                         ]},
                     ],
@@ -56,7 +66,11 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff content", "file tree", "sk-or-fake")
+        diff = """diff --git a/app/profile/page.tsx b/app/profile/page.tsx
+--- a/app/profile/page.tsx
++++ b/app/profile/page.tsx"""
+
+        routes, mocks = infer_routes(diff, "file tree", "sk-or-fake")
 
         assert len(routes) == 2
         assert routes[0]["path"] == "/dashboard"
@@ -121,11 +135,28 @@ class TestValidateRoutes:
 
         routes = [
             {"path": "/a", "reason": "r1", "actions": []},
-            {"path": "/b", "reason": "r2", "actions": [{"type": "click", "selector": "#x"}, {"type": "wait", "ms": 500}]},
+            {"path": "/b", "reason": "r2", "actions": [
+                {
+                    "type": "click",
+                    "selector": "text=Open filters",
+                    "sourceText": "Open filters",
+                    "reason": "button opens filter dropdown",
+                },
+                {"type": "wait", "ms": 500},
+            ]},
         ]
 
-        result = _validate_routes(routes)
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button onClick={() => setOpen(true)}>Open filters</button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
         assert len(result) == 2
+        assert len(result[1]["actions"]) == 2
 
     def test_invalid_paths_are_filtered(self):
         from src.agent.routes import _validate_routes
@@ -153,6 +184,123 @@ class TestValidateRoutes:
         result = _validate_routes(routes)
         assert len(result) == 1
         assert result[0]["actions"] == []
+
+    def test_accepts_click_when_source_text_is_interactive_trigger(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/settings", "actions": [{
+            "type": "click",
+            "selector": "text=Open settings",
+            "sourceText": "Open settings",
+            "reason": "button opens settings modal",
+        }]}]
+        file_contents = {
+            "app/settings/page.tsx": """
+                export default function SettingsPage() {
+                  return (
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <button>Open settings</button>
+                      </DialogTrigger>
+                      <DialogContent>Changed modal content</DialogContent>
+                    </Dialog>
+                  );
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
+
+    def test_rejects_click_when_source_text_is_plain_rendered_data(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Admin",
+            "sourceText": "Admin",
+            "reason": "users/page.tsx changed",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <td>Admin</td>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == []
+
+    def test_rejects_click_without_source_evidence(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Active",
+            "sourceText": "Active",
+            "reason": "users/page.tsx changed",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button>Open filters</button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == []
+
+    def test_accepts_dropdown_trigger_component_action(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Filters",
+            "sourceText": "Filters",
+            "reason": "DropdownMenuTrigger opens hidden filters dropdown",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger>Filters</DropdownMenuTrigger>
+                      <DropdownMenuContent>Status controls changed here</DropdownMenuContent>
+                    </DropdownMenu>
+                  );
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
+
+    def test_accepts_aria_label_button_trigger_action(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "[aria-label='Open menu']",
+            "sourceText": "Open menu",
+            "reason": "button opens menu dropdown",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button aria-label="Open menu"><MenuIcon /></button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
 
 
 class TestBuildRepoTree:

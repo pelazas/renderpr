@@ -66,30 +66,71 @@ def _screenshot_route(
         except Exception:
             logger.warning("Failed to read document.readyState for %s", path, exc_info=True)
 
-        for action in actions:
-            try:
-                if action["type"] == "click":
-                    page.click(action["selector"], timeout=PLAYWRIGHT_CLICK_TIMEOUT)
-                elif action["type"] == "wait":
-                    page.wait_for_timeout(action.get("ms", 1000))
-            except Exception:
-                logger.warning("Action %s failed for %s", action.get("type"), path, exc_info=True)
-
         page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
+        has_click = _has_click_action(actions)
+        if actions and not has_click:
+            _perform_actions(page, path, actions)
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
-        label = f"{vp_label} - {path}"
-        filename = screenshot_dir / f"{vp_label}-{route_slug}-{timestamp}.png"
+        baseline = _save_screenshot(page, screenshot_dir, path, route_slug, width, "")
+        if baseline:
+            results.append(baseline)
 
-        try:
-            page.screenshot(path=str(filename), full_page=True)
-            logger.info("Screenshot saved: %s", filename)
-            results.append((filename, label))
-        except Exception:
-            logger.warning("Screenshot failed for %s at viewport %d", path, width, exc_info=True)
+        if has_click and _perform_actions(page, path, actions):
+            page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
+            interacted = _save_screenshot(page, screenshot_dir, path, route_slug, width, " after interaction")
+            if interacted:
+                results.append(interacted)
+
 
     return results
+
+
+def _has_click_action(actions: list[dict]) -> bool:
+    return any(action.get("type") == "click" for action in actions)
+
+
+def _perform_actions(page: "Page", path: str, actions: list[dict]) -> bool:
+    try:
+        _wait_for_document_ready(page)
+        for action in actions:
+            if action["type"] == "click":
+                selector = action["selector"]
+                page.wait_for_selector(selector, state="visible", timeout=PLAYWRIGHT_CLICK_TIMEOUT)
+                page.click(selector, timeout=PLAYWRIGHT_CLICK_TIMEOUT)
+            elif action["type"] == "wait":
+                page.wait_for_timeout(action.get("ms", 1000))
+        return True
+    except Exception as exc:
+        logger.warning("Skipping interacted screenshot for %s after action failure: %s", path, exc)
+        return False
+
+
+def _wait_for_document_ready(page: "Page") -> None:
+    if hasattr(page, "wait_for_function"):
+        page.wait_for_function("document.readyState === 'complete'", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+
+
+def _save_screenshot(
+    page: "Page",
+    screenshot_dir: Path,
+    path: str,
+    route_slug: str,
+    width: int,
+    label_suffix: str,
+) -> tuple[Path, str] | None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
+    label = f"{vp_label} - {path}{label_suffix}"
+    suffix = "-interacted" if label_suffix else ""
+    filename = screenshot_dir / f"{vp_label}-{route_slug}{suffix}-{timestamp}.png"
+
+    try:
+        page.screenshot(path=str(filename), full_page=True)
+        logger.info("Screenshot saved: %s", filename)
+        return filename, label
+    except Exception:
+        logger.warning("Screenshot failed for %s at viewport %d", path, width, exc_info=True)
+        return None
 
 
 def capture_screenshots(

@@ -30,8 +30,14 @@ def mock_playwright(monkeypatch):
         def route(self, pattern, handler):
             pass
 
-        def click(self, selector: str):
+        def click(self, selector: str, **kw):
             self.actions_called.append(("click", selector))
+
+        def wait_for_selector(self, selector: str, **kw):
+            self.actions_called.append(("wait_for_selector", selector, kw))
+
+        def wait_for_function(self, expression: str, **kw):
+            self.actions_called.append(("wait_for_function", expression, kw))
 
         def wait_for_timeout(self, ms: int):
             self.actions_called.append(("wait", ms))
@@ -142,6 +148,56 @@ class TestCaptureScreenshots:
         labels = [label for _, label in result]
         assert all(" - /" in label_text or " - /dashboard" in label_text for label_text in labels)
 
+    def test_wait_only_actions_run_before_baseline_screenshot(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        events = []
+
+        class WaitPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): events.append(("wait", ms))
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw):
+                events.append(("screenshot", Path(path).name))
+                Path(path).touch()
+            def click(self, selector, **kw): pass
+            def wait_for_selector(self, selector, **kw): pass
+            def wait_for_function(self, expression, **kw): pass
+            def on(self, event, handler): pass
+
+        class Context:
+            def new_page(self): return WaitPage()
+
+        class Browser:
+            def new_context(self): return Context()
+            def close(self): pass
+
+        class Playwright:
+            class chromium:
+                @staticmethod
+                def launch(): return Browser()
+
+        class SyncPlaywright:
+            def __enter__(self): return Playwright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: SyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{
+                "path": "/dashboard",
+                "actions": [{"type": "wait", "ms": 500}],
+                "reason": "test",
+            }],
+        )
+
+        first_custom_wait = events.index(("wait", 500))
+        first_screenshot = next(i for i, event in enumerate(events) if event[0] == "screenshot")
+        assert first_custom_wait < first_screenshot
+
     def test_route_label_included(self, tmp_path):
         from src.agent.visual import capture_screenshots
 
@@ -157,6 +213,65 @@ class TestCaptureScreenshots:
 
         assert len(result) == 4
         assert all(" - /profile" in label for _, label in result)
+
+    def test_click_actions_add_interacted_screenshots_after_baseline(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        routes = [{"path": "/users", "actions": [{"type": "click", "selector": "text=Open filters"}], "reason": "test"}]
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=routes,
+        )
+
+        labels = [label for _, label in result]
+        assert len(result) == 8
+        assert labels.count("Mobile XS - /users") == 1
+        assert labels.count("Mobile XS - /users after interaction") == 1
+
+    def test_failed_click_action_still_keeps_baseline_screenshots(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        class FailingPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def wait_for_function(self, expression, **kw): pass
+            def wait_for_selector(self, selector, **kw):
+                raise RuntimeError("missing selector")
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+
+        class Context:
+            def new_page(self): return FailingPage()
+
+        class Browser:
+            def new_context(self): return Context()
+            def close(self): pass
+
+        class Playwright:
+            class chromium:
+                @staticmethod
+                def launch(): return Browser()
+
+        class SyncPlaywright:
+            def __enter__(self): return Playwright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: SyncPlaywright())
+
+        result = visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/users", "actions": [{"type": "click", "selector": "text=Missing"}], "reason": "test"}],
+        )
+
+        labels = [label for _, label in result]
+        assert len(result) == 4
+        assert all("after interaction" not in label for label in labels)
 
 
 
