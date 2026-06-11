@@ -148,6 +148,56 @@ class TestCaptureScreenshots:
         labels = [label for _, label in result]
         assert all(" - /" in label_text or " - /dashboard" in label_text for label_text in labels)
 
+    def test_wait_only_actions_run_before_baseline_screenshot(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        events = []
+
+        class WaitPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): events.append(("wait", ms))
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw):
+                events.append(("screenshot", Path(path).name))
+                Path(path).touch()
+            def click(self, selector, **kw): pass
+            def wait_for_selector(self, selector, **kw): pass
+            def wait_for_function(self, expression, **kw): pass
+            def on(self, event, handler): pass
+
+        class Context:
+            def new_page(self): return WaitPage()
+
+        class Browser:
+            def new_context(self): return Context()
+            def close(self): pass
+
+        class Playwright:
+            class chromium:
+                @staticmethod
+                def launch(): return Browser()
+
+        class SyncPlaywright:
+            def __enter__(self): return Playwright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: SyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{
+                "path": "/dashboard",
+                "actions": [{"type": "wait", "ms": 500}],
+                "reason": "test",
+            }],
+        )
+
+        first_custom_wait = events.index(("wait", 500))
+        first_screenshot = next(i for i, event in enumerate(events) if event[0] == "screenshot")
+        assert first_custom_wait < first_screenshot
+
     def test_route_label_included(self, tmp_path):
         from src.agent.visual import capture_screenshots
 

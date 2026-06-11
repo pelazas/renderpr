@@ -106,7 +106,7 @@ def execute_change(
     frontend_root: str | None = None,
 ) -> dict:
     from src.agent.code_edit import EditGenerationError, request_edit, validate_edit
-    from src.agent.routes import build_repo_tree, infer_routes
+    from src.agent.routes import build_repo_tree, infer_routes, _validate_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     try:
@@ -133,9 +133,17 @@ def execute_change(
 
     edit_actions = edit.get("actions", [])
     if edit_actions:
-        for route in routes:
-            route["actions"] = edit_actions
-        logger.info("Using edit-provided actions for all routes: %s", edit_actions)
+        source_path = Path(REPO_DIR) / edit["file"]
+        source_contents = {edit["file"]: source_path.read_text(errors="replace")} if source_path.exists() else {}
+        routes_with_actions = [
+            {**route, "actions": edit_actions}
+            for route in routes
+        ]
+        routes = _validate_routes(routes_with_actions, source_contents)
+        logger.info(
+            "Using validated edit-provided actions for all routes: %s",
+            [route.get("actions", []) for route in routes],
+        )
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(

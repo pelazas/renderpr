@@ -67,11 +67,15 @@ def _screenshot_route(
             logger.warning("Failed to read document.readyState for %s", path, exc_info=True)
 
         page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
+        has_click = _has_click_action(actions)
+        if actions and not has_click:
+            _perform_actions(page, path, actions)
+
         baseline = _save_screenshot(page, screenshot_dir, path, route_slug, width, "")
         if baseline:
             results.append(baseline)
 
-        if _has_click_action(actions) and _perform_actions(page, path, actions):
+        if has_click and _perform_actions(page, path, actions):
             page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
             interacted = _save_screenshot(page, screenshot_dir, path, route_slug, width, " after interaction")
             if interacted:

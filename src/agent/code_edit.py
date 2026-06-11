@@ -42,9 +42,10 @@ OUTPUT FORMAT:
   "newString": "<replacement string>"
 }
 
-Optionally, if the change is inside a modal, overlay, dropdown, or toggle that requires a click to reveal,
-include an "actions" array with click selectors derived from the exact button text in the source code:
-  "actions": [{"type": "click", "selector": "text=Open modal"}]
+Optionally, if the change is inside hidden UI such as a modal, overlay, dropdown, popover, drawer, accordion, or toggle that requires a click to reveal,
+include an "actions" array only when the source contains a real interactive trigger. Use the exact trigger text and include source evidence:
+  "actions": [{"type": "click", "selector": "text=Open modal", "sourceText": "Open modal", "reason": "button opens modal"}]
+Never create actions for rendered data, table cells, badges, names, roles, statuses, headings, labels, or arbitrary visible text.
 
 The oldString must match the file exactly. Be precise with whitespace."""
 
