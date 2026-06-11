@@ -281,6 +281,27 @@ class TestValidateRoutes:
 
         assert result[0]["actions"] == routes[0]["actions"]
 
+    def test_accepts_aria_label_button_trigger_action(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "[aria-label='Open menu']",
+            "sourceText": "Open menu",
+            "reason": "button opens menu dropdown",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button aria-label="Open menu"><MenuIcon /></button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
+
 
 class TestBuildRepoTree:
     def test_excludes_common_dirs(self, tmp_path, monkeypatch):

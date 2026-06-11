@@ -32,7 +32,7 @@ Rules:
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
 - ONLY include actions if the change is inside hidden UI that requires a real user interaction to reveal: modal, dialog, dropdown, popover, drawer, sheet, accordion, overlay, or toggle.
 - Do NOT guess or assume actions. Only include a click if the source code contains an actual interactive trigger such as button, link, role="button", onClick, DialogTrigger, DropdownMenuTrigger, PopoverTrigger, SheetTrigger, or AccordionTrigger.
-- If you include an action, derive the selector from the exact trigger text in the source code. For a button with text "Open", use "text=Open" and set sourceText to "Open".
+- If you include an action, derive the selector from the exact trigger text in the source code. For a button with text "Open", use "text=Open" and set sourceText to "Open". For an icon button with aria-label="Open menu", use "[aria-label='Open menu']" and sourceText "Open menu".
 - Never create actions for rendered data, mock values, table cells, badges, names, roles, statuses, headings, labels, or arbitrary visible text.
 - If uncertain about a route, include it anyway (false positive > false negative)
 - If uncertain about an action, return an empty actions list for that route.
@@ -51,7 +51,7 @@ Output ONLY valid JSON with this exact schema:
 {"routes": [{"path": "/...", "reason": "...", "actions": []}], "mocks": {"api.example.com": {"/api/path": {"body": {...}, "status": 200}}}}
 
 The "status" field in mocks is optional (defaults to 200). The "body" field is required.
-Each click action object: {"type": "click", "selector": "text=Exact trigger text", "sourceText": "Exact trigger text", "reason": "source-backed explanation of hidden UI revealed"}
+Each click action object: {"type": "click", "selector": "text=Exact trigger text" | "[aria-label='Exact trigger text']", "sourceText": "Exact trigger text", "reason": "source-backed explanation of hidden UI revealed"}
 Each wait action object: {"type": "wait", "ms": number}
 If no interaction needed, actions should be an empty list."""
 
@@ -164,7 +164,7 @@ def _is_valid_click_action(action: dict, file_contents: dict[str, str] | None) -
     reason = action.get("reason")
     if not all(isinstance(value, str) and value.strip() for value in (selector, source_text, reason)):
         return False
-    if selector != f"text={source_text}":
+    if selector not in {f"text={source_text}", f"[aria-label='{source_text}']", f'[aria-label="{source_text}"]'}:
         return False
     if not _has_reveal_reason(reason):
         return False
@@ -182,8 +182,11 @@ def _has_interactive_source_text(content: str, source_text: str) -> bool:
     trigger_names = "DialogTrigger|DropdownMenuTrigger|PopoverTrigger|SheetTrigger|AccordionTrigger|DrawerTrigger"
     patterns = [
         rf"<button\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</button>",
+        rf"<button\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
         rf"<a\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</a>",
+        rf"<a\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
         rf"<[^>]+\brole=[\"']button[\"'][^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
+        rf"<[^>]+\brole=[\"']button[\"'][^>]*\baria-label=[\"']{text}[\"'][^>]*>",
         rf"<[^>]+\bonClick=\{{[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
         rf"<({trigger_names})\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</\1>",
     ]
