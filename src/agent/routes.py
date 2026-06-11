@@ -21,38 +21,33 @@ from src.agent.config import (
 
 logger = logging.getLogger(__name__)
 
-ROUTE_INFERENCE_PROMPT = """You are a frontend routing analyzer. Given a git diff, full file contents of changed files, their reverse dependencies (files that import the changed files), and the project file tree,
-identify which routes are affected by this change and what interactions are needed to surface the changes visually.
 
-You MUST also identify API calls in the changed files and generate mock JSON response data for them.
+ROUTE_AUGMENT_PROMPT = """You are a frontend routing analyzer. A PR changed some files and a deterministic analysis already identified these routes as affected:
+
+{deterministic_routes}
+
+Given the git diff and full file contents below, identify any ADDITIONAL routes that are affected but missing from the list above.
 
 Rules:
-- A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard)
-- A shared component change (e.g., components/Button.tsx) -> routes that use it
+- Only return routes that are genuinely affected. False positives are worse than false negatives here — deterministic already covers the obvious cases.
+- A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard) — but these are already in the list.
+- A shared component change -> routes that use it — check if the list above already captures them. Only add if missing.
+- A global stylesheet or config change -> all routes — already in the list if the deterministic analyzer handled it.
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- ONLY include actions if the change is inside hidden UI that requires a real user interaction to reveal: modal, dialog, dropdown, popover, drawer, sheet, accordion, overlay, or toggle.
-- Do NOT guess or assume actions. Only include a click if the source code contains an actual interactive trigger such as button, link, role="button", onClick, DialogTrigger, DropdownMenuTrigger, PopoverTrigger, SheetTrigger, or AccordionTrigger.
-- If you include an action, derive the selector from the exact trigger text in the source code. For a button with text "Open", use "text=Open" and set sourceText to "Open". For an icon button with aria-label="Open menu", use "[aria-label='Open menu']" and sourceText "Open menu".
-- Never create actions for rendered data, mock values, table cells, badges, names, roles, statuses, headings, labels, or arbitrary visible text.
+- ONLY include actions if the change is inside a modal, dropdown, overlay, or toggle that is hidden by default and requires a click to reveal. Do NOT guess or assume — look at the source code for useState toggles or conditional rendering tied to a button.
+- If you include an action, derive the selector from the exact button text in the source code. For a button with text "Open", use "text=Open".
 - If uncertain about a route, include it anyway (false positive > false negative)
-- If uncertain about an action, return an empty actions list for that route.
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
 - Do NOT include routes that are API routes (route.ts, api/)
 
-For mock data:
-- Scan the changed files for fetch(), axios, useQuery(), or other API call patterns
-- For each unique API endpoint found, generate realistic mock JSON response data
-- Use the full file contents to infer the shape of the data (field names, types, nesting)
-- Include the mock under the "mocks" key, keyed by domain and path
-- If no API calls are found, omit the "mocks" key entirely
-
 Output ONLY valid JSON with this exact schema:
-{"routes": [{"path": "/...", "reason": "...", "actions": []}], "mocks": {"api.example.com": {"/api/path": {"body": {...}, "status": 200}}}}
+{{"routes": [{{"path": "/...", "reason": "...", "actions": []}}]}}
+
+If no additional routes are affected, output: {{"routes": []}}
 
 The "status" field in mocks is optional (defaults to 200). The "body" field is required.
-Each click action object: {"type": "click", "selector": "text=Exact trigger text" | "[aria-label='Exact trigger text']", "sourceText": "Exact trigger text", "reason": "source-backed explanation of hidden UI revealed"}
-Each wait action object: {"type": "wait", "ms": number}
+Each action object: {{"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}}
 If no interaction needed, actions should be an empty list."""
 
 
@@ -64,6 +59,74 @@ EXCLUDED_DIRS: Final[set[str]] = {".git", "node_modules", ".next", "__pycache__"
 SOURCE_EXTENSIONS: Final[tuple[str, ...]] = (".ts", ".tsx", ".js", ".jsx")
 
 _MAX_REVERSE_DEPS: Final[int] = 5
+_MAX_BFS_DEPTH: Final[int] = 5
+_GLOBAL_FILES: Final[frozenset[str]] = frozenset({
+    "src/app/globals.css",
+    "app/globals.css",
+    "next.config.js",
+    "next.config.mjs",
+    "next.config.ts",
+    "src/middleware.ts",
+    "middleware.ts",
+})
+
+
+def file_to_route(file_path: str) -> str | None:
+    """Map a source file path to its Next.js App Router route, if any.
+
+    Returns "/" for app/page.tsx, "/users" for app/users/page.tsx, etc.
+    Returns None for shared components, layouts, or files outside the app/ tree.
+
+    Handles paths with or without a leading "/" and with or without a "src/" prefix.
+    """
+    normalized = file_path.replace("\\", "/")
+    match = re.search(r"(?:^|/)app((?:/[^/]+)*)/page\.(?:tsx|jsx|ts|js)$", normalized)
+    if match:
+        sub = match.group(1)
+        return sub if sub else "/"
+    if re.search(r"(?:^|/)app/page\.(?:tsx|jsx|ts|js)$", normalized):
+        return "/"
+    return None
+
+
+def _is_layout_file(file_path: str) -> tuple[bool, str]:
+    """Return (is_layout, route_prefix). For app/dashboard/layout.tsx -> (True, "/dashboard")."""
+    normalized = file_path.replace("\\", "/")
+    match = re.search(r"(?:^|/)app((?:/[^/]+)*)/layout\.(?:tsx|jsx|ts|js)$", normalized)
+    if match:
+        sub = match.group(1)
+        return True, sub if sub else "/"
+    if re.search(r"(?:^|/)app/layout\.(?:tsx|jsx|ts|js)$", normalized):
+        return True, "/"
+    return False, ""
+
+
+def _is_global_file(file_path: str) -> bool:
+    return file_path in _GLOBAL_FILES
+
+
+def _discover_all_routes(repo_path: Path) -> list[str]:
+    """Enumerate every Next.js App Router route in the repo by walking app/**/page.*"""
+    routes: set[str] = set()
+    if not (repo_path / "app").exists() and not (repo_path / "src" / "app").exists():
+        return []
+    for page in repo_path.rglob("page.*"):
+        if not re.search(r"page\.(?:tsx|jsx|ts|js)$", page.name):
+            continue
+        if any(part in EXCLUDED_DIRS for part in page.relative_to(repo_path).parts):
+            continue
+        rel = str(page.relative_to(repo_path))
+        route = file_to_route(rel)
+        if route:
+            routes.add(route)
+    return sorted(routes)
+
+
+def _routes_under_prefix(prefix: str, all_routes: list[str]) -> list[str]:
+    """Return all routes that live under the given prefix (or are exactly the prefix)."""
+    sep = "" if prefix == "/" else "/"
+    target = prefix + sep
+    return [r for r in all_routes if r == prefix or r.startswith(target)]
 
 
 def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
@@ -93,6 +156,39 @@ def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
             continue
 
     return importers[:_MAX_REVERSE_DEPS]
+
+
+def _bfs_to_pages(start_file: str, repo_path: Path, max_depth: int = _MAX_BFS_DEPTH) -> set[str]:
+    """Walk the import graph from start_file until we hit page.tsx files.
+
+    Returns the set of page.tsx file paths (relative) that import the changed file
+    (transitively, up to max_depth hops).
+    """
+    found_pages: set[str] = set()
+    visited: set[str] = set()
+    current_layer: list[str] = [start_file]
+
+    for _ in range(max_depth + 1):
+        next_layer: list[str] = []
+        for src in current_layer:
+            if src in visited:
+                continue
+            visited.add(src)
+
+            if re.search(r"(?:^|/)app(?:/[^/]+)*/page\.(?:tsx|jsx|ts|js)$", src):
+                found_pages.add(src)
+                continue
+
+            stem = Path(src).stem
+            importers = _find_importers([stem], visited)
+            for imp in importers:
+                if imp not in visited:
+                    next_layer.append(imp)
+        if not next_layer:
+            break
+        current_layer = next_layer
+
+    return found_pages
 
 
 def _get_changed_files(diff: str) -> list[str]:
@@ -136,6 +232,100 @@ def build_repo_tree() -> str:
     return "\n".join(paths)
 
 
+def _classify_file(file_path: str, repo_path: Path, all_routes: list[str]) -> list[str]:
+    """Deterministically compute which routes are affected by a change to this file.
+
+    Order of classification:
+    1. page.tsx -> its own route
+    2. globals.css / next.config.* / middleware.ts -> all routes
+    3. layout.tsx -> all routes under its directory
+    4. anything else (shared component, util, etc.) -> BFS import graph to find pages
+    """
+    route = file_to_route(file_path)
+    if route is not None:
+        return [route]
+
+    if _is_global_file(file_path):
+        return list(all_routes) if all_routes else ["/"]
+
+    is_layout, prefix = _is_layout_file(file_path)
+    if is_layout:
+        scoped = _routes_under_prefix(prefix, all_routes)
+        return scoped if scoped else [prefix]
+
+    page_files = _bfs_to_pages(file_path, repo_path)
+    routes: list[str] = []
+    for page in page_files:
+        r = file_to_route(page)
+        if r and r not in routes:
+            routes.append(r)
+    return routes
+
+
+def _deterministic_routes(changed_files: list[str]) -> list[str]:
+    """Compute the deterministic set of routes affected by the given changed files."""
+    repo_path = Path(REPO_DIR)
+    all_routes = _discover_all_routes(repo_path)
+    routes: list[str] = []
+    for f in changed_files:
+        for r in _classify_file(f, repo_path, all_routes):
+            if r not in routes:
+                routes.append(r)
+    return routes
+
+
+def _is_valid_click_action(action: dict, file_contents: dict[str, str] | None) -> bool:
+    selector = action.get("selector")
+    source_text = action.get("sourceText")
+    reason = action.get("reason")
+    if not all(isinstance(value, str) and value.strip() for value in (selector, source_text, reason)):
+        return False
+    if selector not in {f"text={source_text}", f"[aria-label='{source_text}']", f'[aria-label="{source_text}"]'}:
+        return False
+    if not _has_reveal_reason(reason):
+        return False
+    if not file_contents:
+        return False
+    return any(_has_interactive_source_text(content, source_text) for content in file_contents.values())
+
+
+def _has_reveal_reason(reason: str) -> bool:
+    return bool(re.search(
+        r"\b(modal|dialog|dropdown|popover|drawer|sheet|accordion|overlay|toggle|hidden|reveal|open|menu)\b",
+        reason,
+        re.IGNORECASE,
+    ))
+
+
+_INTERACTIVE_PATTERNS = [
+    re.compile(r"<button[^>]*>[^<]*"),
+    re.compile(r"<a[^>]*href=[^>]*>"),
+    re.compile(r"onClick="),
+    re.compile(r"onPress="),
+    re.compile(r"DropdownMenuTrigger"),
+    re.compile(r"DialogTrigger"),
+    re.compile(r"PopoverTrigger"),
+    re.compile(r"SheetTrigger"),
+    re.compile(r"TooltipTrigger"),
+    re.compile(r"role=[\"']?button[\"']?"),
+    re.compile(r"aria-haspopup=[\"']?true"),
+    re.compile(r"<summary[^>]*>"),
+    re.compile(r"<details[^>]*>"),
+    re.compile(r"<label[^>]*>"),
+    re.compile(r"type=[\"']?(submit|button|reset)[\"']?"),
+    re.compile(r"tabIndex=[\"']?0"),
+    re.compile(r"aria-label=[\"'][^\"']*"),
+]
+
+
+def _has_interactive_source_text(content: str, source_text: str) -> bool:
+    text = re.escape(source_text)
+    for pattern in _INTERACTIVE_PATTERNS:
+        if re.search(rf"{pattern.pattern}\s*[^<]*{text}", content, re.IGNORECASE):
+            return True
+    return False
+
+
 def _validate_routes(routes: list[dict], file_contents: dict[str, str] | None = None) -> list[dict]:
     valid: list[dict] = []
     for r in routes:
@@ -156,41 +346,6 @@ def _validate_routes(routes: list[dict], file_contents: dict[str, str] | None = 
             validated_actions.append(a)
         valid.append({"path": r["path"], "reason": r.get("reason", ""), "actions": validated_actions})
     return valid
-
-
-def _is_valid_click_action(action: dict, file_contents: dict[str, str] | None) -> bool:
-    selector = action.get("selector")
-    source_text = action.get("sourceText")
-    reason = action.get("reason")
-    if not all(isinstance(value, str) and value.strip() for value in (selector, source_text, reason)):
-        return False
-    if selector not in {f"text={source_text}", f"[aria-label='{source_text}']", f'[aria-label="{source_text}"]'}:
-        return False
-    if not _has_reveal_reason(reason):
-        return False
-    if not file_contents:
-        return False
-    return any(_has_interactive_source_text(content, source_text) for content in file_contents.values())
-
-
-def _has_reveal_reason(reason: str) -> bool:
-    return bool(re.search(r"\b(modal|dialog|dropdown|popover|drawer|sheet|accordion|overlay|toggle|hidden|reveal|open|menu)\b", reason, re.IGNORECASE))
-
-
-def _has_interactive_source_text(content: str, source_text: str) -> bool:
-    text = re.escape(source_text)
-    trigger_names = "DialogTrigger|DropdownMenuTrigger|PopoverTrigger|SheetTrigger|AccordionTrigger|DrawerTrigger"
-    patterns = [
-        rf"<button\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</button>",
-        rf"<button\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
-        rf"<a\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</a>",
-        rf"<a\b[^>]*\baria-label=[\"']{text}[\"'][^>]*>",
-        rf"<[^>]+\brole=[\"']button[\"'][^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
-        rf"<[^>]+\brole=[\"']button[\"'][^>]*\baria-label=[\"']{text}[\"'][^>]*>",
-        rf"<[^>]+\bonClick=\{{[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</[^>]+>",
-        rf"<({trigger_names})\b[^>]*>[\s\S]{{0,300}}?{text}[\s\S]{{0,300}}?</\1>",
-    ]
-    return any(re.search(pattern, content, re.IGNORECASE) for pattern in patterns)
 
 
 def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = None) -> dict:
@@ -227,8 +382,6 @@ def _validate_mocks(mocks: dict | None, file_contents: dict[str, str] | None = N
 
 def _has_fetch_call(code: str, api_path: str) -> bool:
     """Check if code contains a fetch/axios call to the given API path."""
-    import re
-    # Match fetch('/api/users'), fetch("/api/users"), axios.get('/api/users'), etc.
     patterns = [
         rf"""fetch\s*\(\s*['\"]{re.escape(api_path)}['\"]""",
         rf"""axios\.\w+\s*\(\s*['\"]{re.escape(api_path)}['\"]""",
@@ -237,17 +390,188 @@ def _has_fetch_call(code: str, api_path: str) -> bool:
     return any(re.search(p, code) for p in patterns)
 
 
-def _extract_json(text: str) -> dict | None:
+def _strip_code_fence(text: str) -> str:
+    text = re.sub(r"^```\w*\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _find_balanced_json_objects(text: str) -> list[str]:
+    """Return all balanced top-level JSON objects in text, longest first."""
+    candidates: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth = 0
+            start = i
+            in_string = False
+            escape = False
+            for j in range(i, len(text)):
+                c = text[j]
+                if escape:
+                    escape = False
+                    continue
+                if c == "\\" and in_string:
+                    escape = True
+                    continue
+                if c == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start : j + 1])
+                        i = j
+                        break
+        i += 1
+    candidates.sort(key=len, reverse=True)
+    return candidates
+
+
+def _extract_balanced_json(text: str) -> dict | None:
+    """Try to extract a JSON object from text, handling fences, preamble, and nested objects."""
+    cleaned = _strip_code_fence(text)
+
     try:
-        return json.loads(text)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, re.DOTALL)
-        if match:
+        pass
+
+    for candidate in _find_balanced_json_objects(cleaned):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def _validate_and_repair_json(text: str) -> str:
+    """Best-effort fix for common JSON issues from LLMs (trailing commas, single quotes)."""
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    return text
+
+
+def _llm_augment_routes(
+    deterministic_routes: list[str],
+    diff: str,
+    file_contents: dict[str, str],
+    api_key: str,
+) -> tuple[list[dict], dict]:
+    """Ask the LLM for additional routes the deterministic pass may have missed.
+
+    Returns (validated_routes, validated_mocks). Returns ([], {}) on any failure
+    — the deterministic set is still correct on its own.
+    """
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    det_str = ", ".join(deterministic_routes) if deterministic_routes else "(none)"
+    user_content = (
+        f"## Already-Detected Routes\n\n{det_str}\n\n"
+        f"## Git Diff\n\n```diff\n{diff[:8000]}\n```\n\n"
+        f"## Project File Tree\n\n```\n{build_repo_tree()[:4000]}\n```\n\n"
+    )
+    if file_contents:
+        snippets = []
+        for fp, c in list(file_contents.items())[:5]:
+            snippets.append(f"### {fp}\n\n```tsx\n{c[:2000]}\n```")
+        user_content += "\n\n## Changed File Contents\n\n" + "\n\n".join(snippets)
+
+    body = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": ROUTE_AUGMENT_PROMPT.format(deterministic_routes=det_str)},
+            {"role": "user", "content": user_content},
+        ],
+    }
+
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
+                resp = client.post(url, headers=headers, json=body)
+        except Exception:
+            logger.warning("LLM augment request failed (attempt %d)", attempt + 1, exc_info=True)
+            if attempt < RETRY_MAX_ATTEMPTS - 1:
+                _sleep_backoff(attempt)
+            continue
+
+        if resp.status_code == 200:
+            data = resp.json()
             try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                return None
-        return None
+                raw = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                logger.warning("LLM augment: unexpected response shape")
+                return [], {}
+
+            parsed = _extract_balanced_json(raw) or _extract_balanced_json(_validate_and_repair_json(raw))
+            if parsed is None:
+                logger.warning("LLM augment: could not extract JSON from response")
+                if attempt < RETRY_MAX_ATTEMPTS - 1:
+                    _sleep_backoff(attempt)
+                    body["messages"].append({"role": "assistant", "content": raw})
+                    body["messages"].append({"role": "user", "content": "Return ONLY valid JSON. No prose, no markdown fences."})
+                continue
+
+            raw_routes = parsed.get("routes", [])
+            raw_mocks = parsed.get("mocks")
+            routes = _validate_routes(raw_routes, file_contents)
+            mocks = _validate_mocks(raw_mocks, file_contents)
+            return routes, mocks
+
+        if 400 <= resp.status_code < 500 and resp.status_code != 429:
+            logger.warning("LLM augment: non-retryable %d %s", resp.status_code, resp.text[:200])
+            return [], {}
+
+        logger.warning("LLM augment: HTTP %d (attempt %d)", resp.status_code, attempt + 1)
+        if attempt < RETRY_MAX_ATTEMPTS - 1:
+            _sleep_backoff(attempt)
+
+    logger.warning("LLM augment: exhausted retries, returning empty")
+    return [], {}
+
+
+def _sleep_backoff(attempt: int) -> None:
+    delay = min(LLM_RETRY_BASE_DELAY * (2 ** attempt), LLM_RETRY_MAX_DELAY)
+    jitter = delay * LLM_RETRY_JITTER
+    time.sleep(delay + jitter)
+
+
+def _merge_routes(deterministic: list[str], llm_routes: list[dict]) -> list[dict]:
+    """Merge deterministic route list with LLM-augmented routes.
+
+    Deterministic routes come first, in order. For routes that appear in both
+    lists, the deterministic entry is kept but its actions are replaced with
+    the LLM's (since the LLM can add click/wait actions the deterministic
+    analysis can't infer). LLM-only routes are appended in the order the LLM
+    returned them.
+    """
+    by_path: dict[str, dict] = {}
+    llm_by_path: dict[str, dict] = {r["path"]: r for r in llm_routes}
+
+    for r in deterministic:
+        llm_match = llm_by_path.get(r)
+        if llm_match and llm_match.get("actions"):
+            by_path[r] = {
+                "path": r,
+                "reason": llm_match.get("reason", "deterministic"),
+                "actions": llm_match["actions"],
+            }
+        else:
+            by_path[r] = {"path": r, "reason": "deterministic", "actions": []}
+
+    for r in llm_routes:
+        if r["path"] not in by_path:
+            by_path[r["path"]] = r
+
+    return [by_path[r] for r in deterministic] + [v for k, v in by_path.items() if k not in set(deterministic)]
 
 
 def infer_routes(
@@ -255,99 +579,35 @@ def infer_routes(
     repo_tree: str,
     openrouter_api_key: str,
 ) -> tuple[list[dict], dict]:
-    url = f"{OPENROUTER_BASE_URL}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {openrouter_api_key}",
-        "Content-Type": "application/json",
-    }
-
     changed_files = _get_changed_files(diff)
+    if not changed_files:
+        logger.warning("No changed files in diff, falling back to homepage")
+        return _fallback_routes(), {}
+
+    logger.info("Deterministic route inference for %d file(s): %s", len(changed_files), changed_files)
+    deterministic = _deterministic_routes(changed_files)
+    logger.info("Deterministic routes: %s", deterministic)
+
     file_contents = _read_full_files(changed_files)
     file_contents = {fp: c for fp, c in file_contents.items() if Path(fp).suffix in FRONTEND_EXTENSIONS}
     if file_contents:
         logger.info("Sending full contents for %d frontend file(s): %s", len(file_contents), list(file_contents.keys()))
 
-    stems = [Path(fp).stem for fp in changed_files]
-    exclude_paths = set(changed_files)
-    reverse_dep_paths = _find_importers(stems, exclude_paths)
-    reverse_contents = _read_full_files(reverse_dep_paths)
-    reverse_contents = {fp: c for fp, c in reverse_contents.items() if Path(fp).suffix in FRONTEND_EXTENSIONS}
+    llm_routes, llm_mocks = _llm_augment_routes(deterministic, diff, file_contents, openrouter_api_key)
+    if llm_routes:
+        logger.info("LLM augment added %d additional route(s): %s", len(llm_routes), [r["path"] for r in llm_routes])
+    if llm_mocks:
+        logger.info("LLM augment provided %d mock domain(s)", len(llm_mocks))
 
-    changed_section = "\n".join(
-        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in file_contents.items()
-    ) if file_contents else "(none)"
+    merged = _merge_routes(deterministic, llm_routes)
+    if not merged:
+        logger.warning("No routes from any source, falling back to homepage")
+        return _fallback_routes(), llm_mocks
 
-    reverse_section = "\n".join(
-        f"### {fp}\n\n```tsx\n{content}\n```" for fp, content in reverse_contents.items()
-    ) if reverse_contents else "(none detected)"
+    return merged, llm_mocks
 
-    frontend_diff_lines: list[str] = []
-    in_frontend_block = False
-    for line in diff.splitlines():
-        if line.startswith("diff --git a/") and any(line[13:].endswith(ext) for ext in FRONTEND_EXTENSIONS):
-            in_frontend_block = True
-        elif line.startswith("diff --git "):
-            in_frontend_block = False
-        if in_frontend_block:
-            frontend_diff_lines.append(line)
-    filtered_diff = "\n".join(frontend_diff_lines)
-
-    user_content = f"## Git Diff\n\n```diff\n{filtered_diff or '(no frontend file changes in diff)'}\n```\n\n## Project File Tree\n\n```\n{repo_tree}\n```\n\n## Full File Contents (changed files)\n\n{changed_section}\n\n## Reverse Dependencies (files that import changed files)\n\n{reverse_section}"
-
-    body = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": ROUTE_INFERENCE_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-    }
-
-    for attempt in range(RETRY_MAX_ATTEMPTS):
-        with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
-            resp = client.post(url, headers=headers, json=body)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            try:
-                raw = data["choices"][0]["message"]["content"]
-                logger.info("LLM response length: %d chars, has 'mocks': %s", len(raw), "'mocks' in raw")
-                logger.info("LLM response tail: ...%s", raw[-800:] if len(raw) > 800 else raw)
-                parsed = _extract_json(raw)
-                if parsed is None:
-                    logger.warning("Could not extract JSON from route inference response, falling back to homepage")
-                    return _fallback_routes(), {}
-                raw_routes = parsed.get("routes", [])
-                raw_mocks = parsed.get("mocks")
-                all_contents = {**file_contents, **reverse_contents}
-                routes = _validate_routes(raw_routes, all_contents)
-                mocks = _validate_mocks(raw_mocks, all_contents)
-                if routes:
-                    logger.info("Inferred %d route(s): %s", len(routes), [r["path"] for r in routes])
-                    if mocks:
-                        mock_paths = sum(len(eps) for eps in mocks.values())
-                        logger.info("Generated mocks for %d domain(s), %d path(s): %s", len(mocks), mock_paths, {d: list(eps.keys()) for d, eps in mocks.items()})
-                    return routes, mocks
-                logger.warning("LLM returned empty or invalid routes, falling back to homepage")
-                return _fallback_routes(), {}
-            except (KeyError, IndexError, TypeError):
-                logger.warning("Unexpected OpenRouter response shape, falling back to homepage")
-                return _fallback_routes(), {}
-
-        logger.error(
-            "OpenRouter API error (attempt %d/%d): %d %s",
-            attempt + 1, RETRY_MAX_ATTEMPTS, resp.status_code, resp.text,
-        )
-
-        if 400 <= resp.status_code < 500 and resp.status_code != 429:
-            return _fallback_routes(), {}
-
-        if attempt < RETRY_MAX_ATTEMPTS - 1:
-            delay = min(LLM_RETRY_BASE_DELAY * (2 ** attempt), LLM_RETRY_MAX_DELAY)
-            jitter = delay * LLM_RETRY_JITTER
-            time.sleep(delay + jitter)
-
-    logger.warning("Route inference failed after %d attempts, falling back to homepage", RETRY_MAX_ATTEMPTS)
-    return _fallback_routes(), {}
+    logger.info("Final routes: %s", [r["path"] for r in merged])
+    return merged, {}
 
 
 def _fallback_routes() -> list[dict]:
