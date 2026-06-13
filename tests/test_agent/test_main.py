@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _start_dev_server, run
+from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _render_progress, _start_dev_server, _update_comment, run
 
 
 _FRONTEND_DIFF = "diff --git a/src/page.tsx b/src/page.tsx\n--- a/src/page.tsx\n+++ b/src/page.tsx\n@@ -1 +1 @@\n-old\n+new"
@@ -42,10 +42,15 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
+    # The review flow posts a placeholder comment (returns an id), then edits it via
+    # _update_comment for each progress stage and the final review. posted_body collects
+    # every body delivered to the PR, whether by a fresh post or an in-place edit.
     if posted_body is not None:
-        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted_body.append(body))
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: (posted_body.append(body), 999)[1])
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: (posted_body.append(body), True)[1])
     else:
-        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 999)
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, **kw: True)
     monkeypatch.setenv("RENDERPR_PUBLIC_IP", "127.0.0.1")
 
 
@@ -108,6 +113,8 @@ def _mock_client(response):
         def post(self, *a, **kw):
             return _respond(*a, **kw)
         def get(self, *a, **kw):
+            return _respond(*a, **kw)
+        def patch(self, *a, **kw):
             return _respond(*a, **kw)
     return MockClient()
 
@@ -885,8 +892,9 @@ class TestBuildScreenshotGrid:
         _mock_all_deps(monkeypatch, posted_body=posted)
         run()
 
-        assert len(posted) == 1
-        assert "## Review" in posted[0]
+        # First a placeholder is posted, then the same comment is edited into the review.
+        assert "is reviewing this PR" in posted[0]
+        assert any("## Review" in body for body in posted)
 
 
 class TestCaptureScreenshotsMockWiring:
@@ -969,30 +977,93 @@ class TestPostComment:
 
         assert body == "## Review\n\nLooks good."
 
-    def test_post_comment_success(self, monkeypatch):
+    def test_post_comment_success_returns_id(self, monkeypatch):
         import httpx
         mock_resp = httpx.Response(201, json={"id": 1})
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
-        _post_comment(
+        comment_id = _post_comment(
             token="fake-token",
             repo_full_name="owner/repo",
             pr_number="42",
             body="## Review\n\nLooks good.",
         )
 
-    def test_post_comment_failure_exits(self, monkeypatch):
+        assert comment_id == 1
+
+    def test_post_comment_failure_returns_none(self, monkeypatch):
         import httpx
         mock_resp = httpx.Response(400, json={"message": "Error"})
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
-        with pytest.raises(SystemExit):
-            _post_comment(
-                token="fake-token",
-                repo_full_name="owner/repo",
-                pr_number="42",
-                body="## Review",
-            )
+        # A failed post no longer kills the agent; the review continues without observability.
+        result = _post_comment(
+            token="fake-token",
+            repo_full_name="owner/repo",
+            pr_number="42",
+            body="## Review",
+        )
+
+        assert result is None
+
+    def test_update_comment_success(self, monkeypatch):
+        import httpx
+        mock_resp = httpx.Response(200, json={"id": 7})
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        assert _update_comment(
+            token="fake-token",
+            repo_full_name="owner/repo",
+            comment_id=7,
+            body="updated",
+        ) is True
+
+    def test_update_comment_failure_is_best_effort(self, monkeypatch):
+        import httpx
+        mock_resp = httpx.Response(404, json={"message": "Not Found"})
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
+
+        # Best-effort: a failed edit must not raise, just report failure.
+        assert _update_comment(
+            token="fake-token",
+            repo_full_name="owner/repo",
+            comment_id=7,
+            body="updated",
+        ) is False
+
+
+class TestProgressComment:
+    def test_render_progress_marks_current_and_done(self):
+        body = _render_progress(2)
+        assert "is reviewing this PR" in body
+        assert "✅ Setting up preview environment" in body
+        assert "✅ Installing dependencies & starting dev server" in body
+        assert "🔄 Capturing screenshots" in body
+        assert "⬜ Generating review" in body
+
+    def test_render_progress_failure_marks_stage_and_stops(self):
+        body = _render_progress(1, failed_at=1)
+        assert "review failed" in body.lower()
+        assert "✅ Setting up preview environment" in body
+        assert "❌ Installing dependencies & starting dev server" in body
+        assert "⬜ Capturing screenshots" in body
+        assert "⬜ Generating review" in body
+
+    def test_run_edits_comment_to_failed_on_crash(self, monkeypatch):
+        _mock_all_deps(monkeypatch)
+        updates = []
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 777)
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: updates.append(body) or True)
+
+        def boom(*a, **kw):
+            raise RuntimeError("dev server exploded")
+        monkeypatch.setattr("src.agent.main._start_dev_server", boom)
+
+        with pytest.raises(RuntimeError):
+            run()
+
+        # The placeholder is edited into a failure state rather than left hanging.
+        assert any("review failed" in body.lower() for body in updates)
 
 
 _BACKEND_DIFF = "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-old\n+new"
@@ -1006,12 +1077,14 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _BACKEND_DIFF)
 
         posted = []
-        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
 
         run()
 
+        # The skip reason replaces the in-progress placeholder via an edit.
         assert len(posted) == 1
         assert "no frontend" in posted[0].lower()
 
@@ -1023,7 +1096,8 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
 
         posted = []
-        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
 
@@ -1056,9 +1130,10 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
-        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
+        monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 456)
+        monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
 
         run()
 
-        assert len(posted) == 1
-        assert "## Review" in posted[0]
+        # The review is delivered by editing the placeholder comment, not a fresh post.
+        assert any("## Review" in body for body in posted)

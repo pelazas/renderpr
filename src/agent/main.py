@@ -420,7 +420,8 @@ def _build_screenshot_grid(pairs: list[tuple[str, str]]) -> str:
 ---"""
 
 
-def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> None:
+def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) -> int | None:
+    """Post a new PR comment. Returns the new comment's id, or None on failure."""
     url = f"https://api.github.com/repos/{repo_full_name}/issues/{pr_number}/comments"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -434,9 +435,81 @@ def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) ->
 
     if resp.status_code != 201:
         logger.error("Failed to post comment: %d %s", resp.status_code, resp.text)
-        sys.exit(1)
+        return None
 
-    logger.info("Review posted to PR #%s", pr_number)
+    logger.info("Comment posted to PR #%s", pr_number)
+    try:
+        return resp.json().get("id")
+    except Exception:
+        logger.warning("Comment posted but could not parse its id from the response")
+        return None
+
+
+def _update_comment(token: str, repo_full_name: str, comment_id: int, body: str) -> bool:
+    """Edit an existing PR comment in place. Best-effort: never raises, returns success."""
+    url = f"https://api.github.com/repos/{repo_full_name}/issues/comments/{comment_id}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "RenderPR/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.patch(url, headers=headers, json={"body": body})
+    except Exception:
+        logger.exception("Failed to update comment %s", comment_id)
+        return False
+
+    if resp.status_code != 200:
+        logger.error("Failed to update comment %s: %d %s", comment_id, resp.status_code, resp.text)
+        return False
+
+    return True
+
+
+# Ordered stages shown in the live progress comment while a review runs.
+PROGRESS_STAGES = [
+    "Setting up preview environment",
+    "Installing dependencies & starting dev server",
+    "Capturing screenshots",
+    "Generating review",
+]
+
+
+def _render_progress(current: int, failed_at: int | None = None) -> str:
+    """Render the progress checklist. Marks `current` as in-progress, earlier as done.
+
+    When `failed_at` is set, that stage is marked failed and later stages stay pending.
+    """
+    lines = []
+    for i, label in enumerate(PROGRESS_STAGES):
+        if failed_at is not None and i == failed_at:
+            marker = "❌"
+        elif failed_at is not None and i > failed_at:
+            marker = "⬜"
+        elif i < current:
+            marker = "✅"
+        elif i == current:
+            marker = "🔄"
+        else:
+            marker = "⬜"
+        lines.append(f"- {marker} {label}")
+    checklist = "\n".join(lines)
+
+    if failed_at is not None:
+        header = (
+            "## ❌ RenderPR review failed\n\n"
+            f"Something went wrong while **{PROGRESS_STAGES[failed_at].lower()}**. "
+            "Check the task logs, or comment `@renderpr review` to try again."
+        )
+    else:
+        header = (
+            "## 🔄 RenderPR is reviewing this PR\n\n"
+            "This usually takes **5–7 minutes**. I'll update this comment as I go."
+        )
+    return f"{header}\n\n{checklist}"
 
 
 def _append_live_preview_link(body: str, public_ip: str) -> str:
@@ -465,104 +538,137 @@ def run() -> None:
         app_id=secrets["app_id"],
         private_key=secrets["private_key"],
     )
-    _clone_repo(
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-        token=token,
-    )
-
-    diff = _fetch_diff(
-        token=token,
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-    )
-    logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
-    logger.info("Changes: %s", _parse_diff_summary(diff))
-
-    discovery = discover_frontend(diff)
-    logger.info("Frontend discovery result: %s", {k: v for k, v in discovery.items() if k != "reason" or v is not None})
-    if not discovery["has_frontend"]:
-        _post_comment(
-            token=token,
-            repo_full_name=repo_full_name,
-            pr_number=pr_number,
-            body=f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.",
-        )
-        logger.info("No frontend changes detected. Exiting gracefully.")
-        return
-
-    if discovery["package_json_path"] is None or discovery["dev_command"] is None:
-        _post_comment(
-            token=token,
-            repo_full_name=repo_full_name,
-            pr_number=pr_number,
-            body=f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.",
-        )
-        logger.info("Cannot start dev server. Exiting gracefully.")
-        return
-
-    from src.agent.network import get_public_ip, get_task_arn
-    from src.agent.registration import register_task, deregister_task
-    public_ip = get_public_ip()
-    task_arn = get_task_arn()
-    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
-    logger.info("Public IP: %s", public_ip)
-    logger.info("Task ARN: %s", task_arn)
-
-    def _shutdown(_signum, _frame):
-        deregister_task(pr_number)
-        sys.exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
-
-    _start_dev_server(
-        package_dir=discovery["package_json_path"],
-        install_dir=discovery.get("workspace_root"),
-    )
-
-    logger.info("Dev server ready. Proceeding to review...")
-
     skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
 
-    def do_review() -> None:
-        from src.agent.review import ReviewError, run_review
+    # Post an immediate placeholder so the PR shows the review is underway, then edit
+    # this same comment as stages complete (and into the final review or an error).
+    # Conversational re-runs (change/apply/reject) set SKIP_REVIEW and get no placeholder.
+    progress_comment_id = (
+        None
+        if skip_review
+        else _post_comment(token, repo_full_name, pr_number, body=_render_progress(0))
+    )
+    current_stage = 0
 
-        screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
-        logger.info(
-            "Captured %d screenshots: %s",
-            len(screenshot_paths),
-            ", ".join(p.name for p in screenshot_paths),
+    def update_progress(stage: int) -> None:
+        nonlocal current_stage
+        current_stage = stage
+        if progress_comment_id is not None:
+            _update_comment(token, repo_full_name, progress_comment_id, body=_render_progress(stage))
+
+    def finalize(body: str) -> None:
+        """Replace the progress comment with a final message, or post fresh if none exists."""
+        if progress_comment_id is not None and _update_comment(
+            token, repo_full_name, progress_comment_id, body=body
+        ):
+            return
+        _post_comment(token, repo_full_name, pr_number, body=body)
+
+    try:
+        _clone_repo(
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            token=token,
         )
 
-        try:
-            review_body = run_review(
-                diff=diff,
-                screenshot_paths=screenshot_paths,
-                openrouter_api_key=secrets["openrouter_api_key"],
-                screenshot_urls=screenshot_urls,
-            )
-        except ReviewError:
-            logger.exception("Review failed")
-            return
-
-        review_body = _append_live_preview_link(review_body, public_ip)
-
-        _post_comment(
+        diff = _fetch_diff(
             token=token,
             repo_full_name=repo_full_name,
             pr_number=pr_number,
-            body=review_body,
         )
-        logger.info("Review posted to PR #%s", pr_number)
+        logger.info("Fetched diff for PR #%s (%d bytes)", pr_number, len(diff))
+        logger.info("Changes: %s", _parse_diff_summary(diff))
 
-    if skip_review:
-        logger.info("SKIP_REVIEW=true, skipping initial review")
-    else:
-        do_review()
-        logger.info("Initial review posted. Starting command server...")
+        discovery = discover_frontend(diff)
+        logger.info("Frontend discovery result: %s", {k: v for k, v in discovery.items() if k != "reason" or v is not None})
+        if not discovery["has_frontend"]:
+            finalize(f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.")
+            logger.info("No frontend changes detected. Exiting gracefully.")
+            return
+
+        if discovery["package_json_path"] is None or discovery["dev_command"] is None:
+            finalize(f"## RenderPR\n\n{discovery['reason']}\n\nSkipping review.")
+            logger.info("Cannot start dev server. Exiting gracefully.")
+            return
+
+        from src.agent.network import get_public_ip, get_task_arn
+        from src.agent.registration import register_task, deregister_task
+        public_ip = get_public_ip()
+        task_arn = get_task_arn()
+        os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+        logger.info("Public IP: %s", public_ip)
+        logger.info("Task ARN: %s", task_arn)
+
+        def _shutdown(_signum, _frame):
+            deregister_task(pr_number)
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
+
+        _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
+
+        update_progress(1)
+        _start_dev_server(
+            package_dir=discovery["package_json_path"],
+            install_dir=discovery.get("workspace_root"),
+        )
+
+        logger.info("Dev server ready. Proceeding to review...")
+
+        def do_review(use_progress: bool = False) -> None:
+            from src.agent.review import ReviewError, run_review
+
+            # Only the initial review edits the progress comment; re-runs post fresh.
+            pid = progress_comment_id if use_progress else None
+
+            if pid is not None:
+                update_progress(2)
+            screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
+            logger.info(
+                "Captured %d screenshots: %s",
+                len(screenshot_paths),
+                ", ".join(p.name for p in screenshot_paths),
+            )
+
+            if pid is not None:
+                update_progress(3)
+            try:
+                review_body = run_review(
+                    diff=diff,
+                    screenshot_paths=screenshot_paths,
+                    openrouter_api_key=secrets["openrouter_api_key"],
+                    screenshot_urls=screenshot_urls,
+                )
+            except ReviewError:
+                logger.exception("Review failed")
+                if pid is not None:
+                    _update_comment(token, repo_full_name, pid, body=_render_progress(3, failed_at=3))
+                return
+
+            review_body = _append_live_preview_link(review_body, public_ip)
+
+            if pid is not None and _update_comment(token, repo_full_name, pid, body=review_body):
+                logger.info("Review posted (edited progress comment) to PR #%s", pr_number)
+            else:
+                _post_comment(token, repo_full_name, pr_number, body=review_body)
+                logger.info("Review posted to PR #%s", pr_number)
+
+        if skip_review:
+            logger.info("SKIP_REVIEW=true, skipping initial review")
+        else:
+            do_review(use_progress=True)
+            logger.info("Initial review posted. Starting command server...")
+    except BaseException:
+        logger.exception("Review pipeline failed at stage %d", current_stage)
+        if progress_comment_id is not None:
+            _update_comment(
+                token,
+                repo_full_name,
+                progress_comment_id,
+                body=_render_progress(current_stage, failed_at=current_stage),
+            )
+        raise
 
     pr_meta = _fetch_pr_meta(
         token=token,
