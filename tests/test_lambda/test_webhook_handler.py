@@ -288,9 +288,9 @@ class TestParseRenderprCommand:
         from src.lambda_handler.webhook_handler import _parse_renderpr_command
         assert _parse_renderpr_command("@renderpr apply") == {"command": "apply"}
 
-    def test_reject_command(self):
+    def test_reject_is_ignored(self):
         from src.lambda_handler.webhook_handler import _parse_renderpr_command
-        assert _parse_renderpr_command("@renderpr reject") == {"command": "reject"}
+        assert _parse_renderpr_command("@renderpr reject") is None
 
     def test_unknown_falls_to_review(self):
         from src.lambda_handler.webhook_handler import _parse_renderpr_command
@@ -346,7 +346,7 @@ def test_apply_cold_start_returns_409(monkeypatch):
     assert "No active review session" in data["error"]
 
 
-def test_reject_cold_start_returns_409(monkeypatch):
+def test_reject_is_ignored_no_task_spawned(monkeypatch):
     from src.lambda_handler.webhook_handler import handler
 
     body = json.dumps(
@@ -363,9 +363,13 @@ def test_reject_cold_start_returns_409(monkeypatch):
         "body": body,
     }
     result = handler(event, {})
-    assert result["statusCode"] == 409
+    assert result["statusCode"] == 200
     data = json.loads(result["body"])
-    assert "No active review session" in data["error"]
+    assert data.get("ignored") == "noop"
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    tasks = ecs.list_tasks(cluster=CLUSTER_ARN)
+    assert len(tasks["taskArns"]) == 0
 
 
 def test_code_change_with_running_task_dispatches(monkeypatch):

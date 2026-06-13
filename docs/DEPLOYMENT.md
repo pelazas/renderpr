@@ -158,7 +158,7 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 3. Check the PR thread for a review comment from the bot
 4. Open the `Live app: http://<public-ip>:3000` link while the task is still running
 5. Comment `@renderpr code change: <request>` to verify conversational edits
-6. Use `@renderpr apply` or `@renderpr reject` for pending edits
+6. Use `@renderpr apply` to commit pending edits (leave them uncommitted to discard)
 
 The live app URL uses the Fargate task's ephemeral public IP. It is expected to stop working after the task exits its idle window.
 

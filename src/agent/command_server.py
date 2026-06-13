@@ -91,7 +91,6 @@ class CommandServer:
         self,
         handle_change_fn: Callable,
         handle_apply_fn: Callable,
-        handle_reject_fn: Callable,
         handle_review_fn: Callable | None = None,
         host: str = "0.0.0.0",
         port: int = 3001,
@@ -100,7 +99,6 @@ class CommandServer:
     ):
         self._handle_change = handle_change_fn
         self._handle_apply = handle_apply_fn
-        self._handle_reject = handle_reject_fn
         self._handle_review = handle_review_fn
         self._host = host
         self._port = port
@@ -119,8 +117,6 @@ class CommandServer:
             self.handle_change(query or "")
         elif command == "apply":
             self.handle_apply()
-        elif command == "reject":
-            self.handle_reject()
         elif command == "review":
             self.handle_review()
         else:
@@ -137,12 +133,6 @@ class CommandServer:
             self._handle_apply()
         except Exception:
             logger.exception("handle_apply failed")
-
-    def handle_reject(self) -> None:
-        try:
-            self._handle_reject()
-        except Exception:
-            logger.exception("handle_reject failed")
 
     def handle_review(self) -> None:
         if self._handle_review is None:

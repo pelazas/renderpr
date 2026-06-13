@@ -48,7 +48,7 @@ Ideas scoped out for RenderPR. Implemented items are kept here briefly as produc
 - Re-run the dev server, capture updated screenshots
 - Post a follow-up comment with the new screenshots
 - Uses the LLM to select files and generate edits
-- Supports `@renderpr apply` and `@renderpr reject`
+- Supports `@renderpr apply`
 - Excludes runtime-generated mock/config files from apply commits
 
 ### 5. Live Preview Links

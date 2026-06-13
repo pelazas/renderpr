@@ -27,8 +27,9 @@ def parse_command(text: str) -> dict | None:
     if after == "apply":
         return {"action": "apply", "query": None}
 
+    # "@renderpr reject" is a no-op: an unwanted change is left uncommitted.
     if after == "reject":
-        return {"action": "reject", "query": None}
+        return None
 
     return {"action": "review", "query": None}
 

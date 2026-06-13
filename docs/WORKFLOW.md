@@ -22,8 +22,8 @@ This document describes the exact step-by-step workflow an agent follows when pr
    - empty/help/review → full review
    - `code change: <request>` or `change <request>` → code edit command
    - `apply` → apply pending user edit
-   - `reject` → reject pending user edit
-8. For `change`, `apply`, or `reject`, Lambda looks for a running ECS task tagged with `PRNumber`.
+   - `reject` → ignored (no-op; an unwanted change is left uncommitted)
+8. For `change` or `apply`, Lambda looks for a running ECS task tagged with `PRNumber`.
 9. If a running task exists, Lambda resolves the task public IP and POSTs to `http://<ip>:3001/__renderpr/command`.
 10. If dispatch fails or no task is running, Lambda cold-starts ECS with a `COMMAND` environment variable.
 11. For full reviews, Lambda calls ECS `RunTask` with environment overrides:
@@ -155,7 +155,6 @@ LLM_RETRY_JITTER = 0.1
 5. Supported commands:
    - `change` — LLM selects files, generates edit, applies it to the cloned repo, validates dev server health, re-screenshots, uploads screenshots, and posts a preview comment.
    - `apply` — stages and commits only user-edited files, pushes to the PR branch, and clears pending user edits.
-   - `reject` — reverts pending user-edited files and clears pending user edits.
 6. If the task was cold-started with `COMMAND`, it executes that command after boot and then waits for more commands.
 7. If no command arrives before idle timeout, the task exits.
 

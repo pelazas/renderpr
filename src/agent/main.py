@@ -622,7 +622,7 @@ def run() -> None:
 
 Live app: http://{public_ip}:3000
 
-*Type @renderpr apply to accept, or @renderpr reject to reject the change.*"""
+*Type @renderpr apply to accept the change, or leave it uncommitted to discard it.*"""
             _post_comment(
                 token=token,
                 repo_full_name=repo_full_name,
@@ -684,30 +684,6 @@ Live app: http://{public_ip}:3000
             logger.exception("Apply timed out")
             return {"status": "error", "message": "Apply timed out. Check git state."}
 
-    def on_reject() -> dict:
-        if not change_session.edited_files:
-            return {"status": "error", "message": "No pending changes to reject."}
-
-        try:
-            for file_path in change_session.edited_files:
-                subprocess.run(
-                    ["git", "checkout", "--", file_path],
-                    cwd=REPO_DIR,
-                    capture_output=True,
-                    check=True,
-                    timeout=30,
-                )
-            change_session.clear()
-            msg = "Changes reverted. The app is back to its original state."
-            _post_comment(token, repo_full_name, pr_number, msg)
-            return {"status": "success", "message": msg}
-        except subprocess.CalledProcessError as e:
-            logger.exception("Reject failed: %s", e.stderr)
-            return {"status": "error", "message": "Failed to revert changes."}
-        except subprocess.TimeoutExpired:
-            logger.exception("Reject timed out")
-            return {"status": "error", "message": "Reject timed out."}
-
     def on_review() -> dict:
         do_review()
         return {"status": "success", "message": "Review re-posted."}
@@ -715,7 +691,6 @@ Live app: http://{public_ip}:3000
     server = CommandServer(
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
-        handle_reject_fn=on_reject,
         handle_review_fn=on_review,
     )
     server.start()
@@ -731,8 +706,6 @@ Live app: http://{public_ip}:3000
             on_change(query)
         elif boot_cmd == "apply":
             on_apply()
-        elif boot_cmd == "reject":
-            on_reject()
 
     logger.info("RenderPR agent entering idle loop")
     server.wait_for_command()
