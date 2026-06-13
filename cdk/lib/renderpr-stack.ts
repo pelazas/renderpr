@@ -60,7 +60,15 @@ export class RenderprStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       lifecycleRules: [
         {
+          id: "ScreenshotRetention",
           enabled: true,
+          prefix: "screenshots/",
+          expiration: cdk.Duration.days(7),
+        },
+        {
+          id: "NpmCacheExpiration",
+          enabled: true,
+          prefix: "npm-cache/",
           expiration: cdk.Duration.days(7),
         },
       ],
@@ -138,6 +146,13 @@ export class RenderprStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["s3:PutObject"],
         resources: [screenshotBucket.arnForObjects("*")],
+      }),
+    );
+
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        resources: [screenshotBucket.arnForObjects("npm-cache/*")],
       }),
     );
 

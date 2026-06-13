@@ -1,4 +1,3 @@
-import hashlib
 import hmac
 import json
 import logging
@@ -7,7 +6,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Callable
+from typing import Callable
 
 from src.agent.config import IDLE_TIMEOUT_SECONDS
 

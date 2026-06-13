@@ -1,8 +1,5 @@
-import httpx
-import pytest
 
 from src.agent.code_edit import (
-    EditGenerationError,
     _build_directory_tree,
     validate_edit,
 )
