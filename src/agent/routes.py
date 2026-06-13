@@ -26,9 +26,9 @@ ROUTE_AUGMENT_PROMPT = """You are a frontend routing analyzer. A PR changed some
 
 {deterministic_routes}
 
-Given the git diff and full file contents below, identify any ADDITIONAL routes that are affected but missing from the list above.
+Given the git diff and full file contents below, identify any ADDITIONAL routes that are affected but missing from the list above, AND any internal API data-fetches that must be mocked so the affected pages render with data instead of erroring.
 
-Rules:
+Route rules:
 - Only return routes that are genuinely affected. False positives are worse than false negatives here — deterministic already covers the obvious cases.
 - A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard) — but these are already in the list.
 - A shared component change -> routes that use it — check if the list above already captures them. Only add if missing.
@@ -39,16 +39,21 @@ Rules:
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
-- Do NOT include routes that are API routes (route.ts, api/)
+- Do NOT include routes that are API routes (route.ts, api/) in the "routes" list — those belong in "mocks".
+- Each action object: {{"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}}. If no interaction needed, actions should be an empty list.
+
+Mock rules:
+- The pages run in an ephemeral environment with NO database or backend. Any page that fetches data from an internal API route at runtime will error (e.g. "x.map is not a function") unless that endpoint is mocked.
+- Scan the file contents for client-side or server-side data fetches to internal API paths — calls like `fetch('/api/users')` or `axios.get('/api/items')`. Only consider paths beginning with `/api/`.
+- For every such internal API path used by an affected route, provide a mock with a realistic response `body`. INFER THE SHAPE from how the data is consumed in the component: if the code does `users.map(u => ... u.id ... u.name ... u.role ...)`, the body must be an array of objects containing those exact fields. Provide 2-4 plausible sample items for list endpoints, or a single object for detail endpoints.
+- The "body" field is REQUIRED and must be a JSON array or object (the literal data the endpoint returns). The "status" field is optional (defaults to 200).
+- Only mock endpoints you can see an actual fetch/axios call for in the provided file contents. Do not invent endpoints.
+- If there are no internal API data-fetches, use an empty object: "mocks": {{}}.
 
 Output ONLY valid JSON with this exact schema:
-{{"routes": [{{"path": "/...", "reason": "...", "actions": []}}]}}
+{{"routes": [{{"path": "/...", "reason": "...", "actions": []}}], "mocks": {{"local": {{"/api/...": {{"body": [], "status": 200}}}}}}}}
 
-If no additional routes are affected, output: {{"routes": []}}
-
-The "status" field in mocks is optional (defaults to 200). The "body" field is required.
-Each action object: {{"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}}
-If no interaction needed, actions should be an empty list."""
+If no additional routes are affected and nothing needs mocking, output: {{"routes": [], "mocks": {{}}}}"""
 
 
 class RouteInferenceError(Exception):
