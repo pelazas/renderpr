@@ -37,6 +37,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
     monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
+    monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **kw: {})
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
     monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
@@ -1137,3 +1138,62 @@ class TestDiscoveryIntegration:
 
         # The review is delivered by editing the placeholder comment, not a fresh post.
         assert any("## Review" in body for body in posted)
+
+
+def test_env_injection_writes_dotenv_and_passes_injected_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("INSTALLATION_ID", "999")
+    monkeypatch.setenv("REPO_FULL_NAME", "test-owner/test-repo")
+    monkeypatch.setenv("PR_NUMBER", "42")
+    _mock_all_deps(monkeypatch)
+
+    # Point the repo + frontend at a writable tmp dir.
+    monkeypatch.setattr("src.agent.main.REPO_DIR", str(tmp_path))
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / ".env.example").write_text("NEXT_PUBLIC_X=\nMISSING_ONE=\n")
+    monkeypatch.setattr(
+        "src.agent.main.discover_frontend",
+        lambda *a, **k: {
+            "has_frontend": True,
+            "package_json_path": str(tmp_path / "package.json"),
+            "workspace_root": None,
+            "dev_command": "npm run dev",
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **k: {"NEXT_PUBLIC_X": "hello"})
+
+    captured = {}
+    monkeypatch.setattr("src.agent.main._start_dev_server", lambda **kw: captured.update(kw))
+
+    run()
+
+    assert captured["injected_env"] == {"NEXT_PUBLIC_X": "hello"}
+    assert (tmp_path / ".env.local").read_text().strip() == 'NEXT_PUBLIC_X="hello"'
+
+
+def test_invalid_renderpr_yml_degrades(tmp_path, monkeypatch):
+    monkeypatch.setenv("INSTALLATION_ID", "999")
+    monkeypatch.setenv("REPO_FULL_NAME", "test-owner/test-repo")
+    monkeypatch.setenv("PR_NUMBER", "42")
+    posted = []
+    _mock_all_deps(monkeypatch, posted_body=posted)
+    monkeypatch.setattr("src.agent.main.REPO_DIR", str(tmp_path))
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / ".renderpr.yml").write_text("auth:\n  type: not-a-real-provider\n")
+    monkeypatch.setattr(
+        "src.agent.main.discover_frontend",
+        lambda *a, **k: {
+            "has_frontend": True,
+            "package_json_path": str(tmp_path / "package.json"),
+            "workspace_root": None,
+            "dev_command": "npm run dev",
+            "reason": None,
+        },
+    )
+    started = []
+    monkeypatch.setattr("src.agent.main._start_dev_server", lambda **kw: started.append(kw))
+
+    run()
+
+    assert not started  # never boots the dev server on a config error
+    assert any("Invalid `.renderpr.yml`" in body for body in posted)

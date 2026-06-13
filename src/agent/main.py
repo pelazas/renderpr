@@ -28,8 +28,11 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.env_inject import build_injected_env, write_env_local
 from src.agent.mock_server import write_next_allowed_origin, write_server_mocks
 from src.agent.polling import ChangeSession
+from src.agent.renderpr_config import ConfigError, load_config
+from src.agent.secrets import load_repo_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +187,7 @@ _runtime_generated_files: set[str] = set()
 def _start_dev_server(
     package_dir: str | None = None,
     install_dir: str | None = None,
+    injected_env: dict[str, str] | None = None,
 ) -> None:
     global _dev_server_proc, _dev_server_url
 
@@ -236,7 +240,9 @@ def _start_dev_server(
 
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
-    _dev_server_env = {**os.environ, "HOST": "0.0.0.0"}
+    # User-provided env vars/secrets win over the ambient environment, but HOST is
+    # always forced so the dev server binds publicly for the live preview.
+    _dev_server_env = {**os.environ, **(injected_env or {}), "HOST": "0.0.0.0"}
     _dev_server_proc = subprocess.Popen(
         ["npm", "run", "dev"],
         cwd=str(dev_cwd),
@@ -591,6 +597,29 @@ def run() -> None:
             logger.info("Cannot start dev server. Exiting gracefully.")
             return
 
+        # Fork status gates env/secret injection (secrets never touch fork PRs).
+        # Fetched once here, before the dev server starts, and reused for apply.
+        pr_meta = _fetch_pr_meta(token=token, repo_full_name=repo_full_name, pr_number=pr_number)
+        is_fork = pr_meta["is_fork"]
+
+        try:
+            repo_config = load_config(REPO_DIR)
+        except ConfigError as exc:
+            finalize(
+                "## RenderPR\n\n"
+                f"Invalid `.renderpr.yml`: {exc}\n\n"
+                "Fix the config and comment `@renderpr review` to retry."
+            )
+            logger.error("Invalid .renderpr.yml: %s", exc)
+            return
+
+        repo_secrets = load_repo_secrets(installation_id, repo_full_name, is_fork)
+        frontend_root = str(Path(discovery["package_json_path"]).parent)
+        injected_env, missing_env = build_injected_env(frontend_root, repo_config["env"], repo_secrets)
+        env_local_rel = write_env_local(frontend_root, injected_env, REPO_DIR)
+        if env_local_rel:
+            _runtime_generated_files.add(env_local_rel)
+
         from src.agent.network import get_public_ip, get_task_arn
         from src.agent.registration import register_task, deregister_task
         public_ip = get_public_ip()
@@ -612,6 +641,7 @@ def run() -> None:
         _start_dev_server(
             package_dir=discovery["package_json_path"],
             install_dir=discovery.get("workspace_root"),
+            injected_env=injected_env,
         )
 
         logger.info("Dev server ready. Proceeding to review...")
@@ -670,13 +700,8 @@ def run() -> None:
             )
         raise
 
-    pr_meta = _fetch_pr_meta(
-        token=token,
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-    )
+    # pr_meta / is_fork were fetched before the dev server started (for the fork gate).
     head_ref = pr_meta["head_ref"]
-    is_fork = pr_meta["is_fork"]
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     change_session = ChangeSession()
     for runtime_file in _runtime_generated_files:
