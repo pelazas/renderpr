@@ -39,14 +39,64 @@ def mock_httpx_client(monkeypatch):
 
 
 class TestInferRoutes:
-    def test_returns_parsed_routes(self, mock_httpx_client):
+    def test_page_file_yields_its_route_without_llm(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("export default function Page() { return null; }")
+        mock_httpx_client([])
+
+        from src.agent.routes import infer_routes
+
+        diff = "+++ b/app/users/page.tsx"
+        routes, mocks = infer_routes(diff, "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert routes[0]["path"] == "/users"
+        assert mocks == {}
+
+    def test_deterministic_routes_come_first(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "profile" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "profile" / "page.tsx").write_text(
+            "export default function Page() { return <button>Open menu</button>; }"
+        )
+        (tmp_path / "app" / "dashboard" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "dashboard" / "page.tsx").write_text("export default function Page() { return null; }")
         mock_httpx_client([
             httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps({
                     "routes": [
                         {"path": "/dashboard", "reason": "file changed", "actions": []},
-                        {"path": "/profile", "reason": "component used", "actions": [
-                            {"type": "click", "selector": "#menu"},
+                    ],
+                })}}],
+            }),
+        ])
+
+        from src.agent.routes import infer_routes
+
+        diff = "+++ b/app/profile/page.tsx"
+        routes, mocks = infer_routes(diff, "file tree", "sk-or-fake")
+
+        assert len(routes) == 2
+        assert routes[0]["path"] == "/profile"
+        assert routes[1]["path"] == "/dashboard"
+
+    def test_llm_actions_are_preserved_on_deterministic_route(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "profile" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "profile" / "page.tsx").write_text(
+            "export default function Page() { return <button>Open menu</button>; }"
+        )
+        mock_httpx_client([
+            httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps({
+                    "routes": [
+                        {"path": "/profile", "reason": "click reveals menu", "actions": [
+                            {
+                                "type": "click",
+                                "selector": "text=Open menu",
+                                "sourceText": "Open menu",
+                                "reason": "button opens dropdown",
+                            },
                             {"type": "wait", "ms": 500},
                         ]},
                     ],
@@ -56,28 +106,27 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff content", "file tree", "sk-or-fake")
-
-        assert len(routes) == 2
-        assert routes[0]["path"] == "/dashboard"
-        assert routes[1]["path"] == "/profile"
-        assert len(routes[1]["actions"]) == 2
+        diff = "+++ b/app/profile/page.tsx"
+        routes, mocks = infer_routes(diff, "file tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert routes[0]["path"] == "/profile"
+        assert len(routes[0]["actions"]) == 2
         assert mocks == {}
 
-    def test_empty_routes_falls_back(self, mock_httpx_client):
-        mock_httpx_client([
-            httpx.Response(200, json={
-                "choices": [{"message": {"content": json.dumps({"routes": []})}}],
-            }),
-        ])
+    def test_empty_diff_falls_back(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        mock_httpx_client([])
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        routes, mocks = infer_routes("no diff here", "tree", "sk-or-fake")
         assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
         assert mocks == {}
 
-    def test_malformed_json_falls_back(self, mock_httpx_client):
+    def test_llm_failure_keeps_deterministic_routes(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("export default function Page() { return null; }")
         mock_httpx_client([
             httpx.Response(200, json={
                 "choices": [{"message": {"content": "not json at all"}}],
@@ -86,22 +135,16 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
-        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        diff = "+++ b/app/users/page.tsx"
+        routes, mocks = infer_routes(diff, "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert routes[0]["path"] == "/users"
         assert mocks == {}
 
-    def test_api_4xx_falls_back(self, mock_httpx_client):
-        mock_httpx_client([
-            httpx.Response(401, json={"error": "Unauthorized"}),
-        ])
-
-        from src.agent.routes import infer_routes
-
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
-        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
-        assert mocks == {}
-
-    def test_api_5xx_retry_then_fallback(self, mock_httpx_client):
+    def test_llm_5xx_retry_then_deterministic_survives(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("export default function Page() { return null; }")
         mock_httpx_client([
             httpx.Response(500, json={"error": "Server error"}),
             httpx.Response(500, json={"error": "Server error"}),
@@ -110,8 +153,10 @@ class TestInferRoutes:
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
-        assert routes == [{"path": "/", "reason": "fallback", "actions": []}]
+        diff = "+++ b/app/users/page.tsx"
+        routes, mocks = infer_routes(diff, "tree", "sk-or-fake")
+        assert len(routes) == 1
+        assert routes[0]["path"] == "/users"
         assert mocks == {}
 
 
@@ -121,11 +166,28 @@ class TestValidateRoutes:
 
         routes = [
             {"path": "/a", "reason": "r1", "actions": []},
-            {"path": "/b", "reason": "r2", "actions": [{"type": "click", "selector": "#x"}, {"type": "wait", "ms": 500}]},
+            {"path": "/b", "reason": "r2", "actions": [
+                {
+                    "type": "click",
+                    "selector": "text=Open filters",
+                    "sourceText": "Open filters",
+                    "reason": "button opens filter dropdown",
+                },
+                {"type": "wait", "ms": 500},
+            ]},
         ]
 
-        result = _validate_routes(routes)
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button onClick={() => setOpen(true)}>Open filters</button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
         assert len(result) == 2
+        assert len(result[1]["actions"]) == 2
 
     def test_invalid_paths_are_filtered(self):
         from src.agent.routes import _validate_routes
@@ -153,6 +215,123 @@ class TestValidateRoutes:
         result = _validate_routes(routes)
         assert len(result) == 1
         assert result[0]["actions"] == []
+
+    def test_accepts_click_when_source_text_is_interactive_trigger(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/settings", "actions": [{
+            "type": "click",
+            "selector": "text=Open settings",
+            "sourceText": "Open settings",
+            "reason": "button opens settings modal",
+        }]}]
+        file_contents = {
+            "app/settings/page.tsx": """
+                export default function SettingsPage() {
+                  return (
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <button>Open settings</button>
+                      </DialogTrigger>
+                      <DialogContent>Changed modal content</DialogContent>
+                    </Dialog>
+                  );
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
+
+    def test_rejects_click_when_source_text_is_plain_rendered_data(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Admin",
+            "sourceText": "Admin",
+            "reason": "users/page.tsx changed",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <td>Admin</td>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == []
+
+    def test_rejects_click_without_source_evidence(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Active",
+            "sourceText": "Active",
+            "reason": "users/page.tsx changed",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button>Open filters</button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == []
+
+    def test_accepts_dropdown_trigger_component_action(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "text=Filters",
+            "sourceText": "Filters",
+            "reason": "DropdownMenuTrigger opens hidden filters dropdown",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger>Filters</DropdownMenuTrigger>
+                      <DropdownMenuContent>Status controls changed here</DropdownMenuContent>
+                    </DropdownMenu>
+                  );
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
+
+    def test_accepts_aria_label_button_trigger_action(self):
+        from src.agent.routes import _validate_routes
+
+        routes = [{"path": "/users", "actions": [{
+            "type": "click",
+            "selector": "[aria-label='Open menu']",
+            "sourceText": "Open menu",
+            "reason": "button opens menu dropdown",
+        }]}]
+        file_contents = {
+            "app/users/page.tsx": """
+                export default function UsersPage() {
+                  return <button aria-label="Open menu"><MenuIcon /></button>;
+                }
+            """,
+        }
+
+        result = _validate_routes(routes, file_contents)
+
+        assert result[0]["actions"] == routes[0]["actions"]
 
 
 class TestBuildRepoTree:
@@ -263,22 +442,34 @@ class TestFindImporters:
 
 class TestExtractJson:
     def test_plain_json(self):
-        from src.agent.routes import _extract_json
-        assert _extract_json('{"routes": []}') == {"routes": []}
+        from src.agent.routes import _extract_balanced_json
+        assert _extract_balanced_json('{"routes": []}') == {"routes": []}
 
     def test_extracts_from_markdown_fence(self):
-        from src.agent.routes import _extract_json
-        result = _extract_json("```json\n{\"routes\": []}\n```")
+        from src.agent.routes import _extract_balanced_json
+        result = _extract_balanced_json("```json\n{\"routes\": []}\n```")
         assert result == {"routes": []}
 
     def test_extracts_from_surrounding_text(self):
-        from src.agent.routes import _extract_json
-        result = _extract_json("Here is the result: {\"routes\": [{\"path\": \"/\"}]}.")
+        from src.agent.routes import _extract_balanced_json
+        result = _extract_balanced_json("Here is the result: {\"routes\": [{\"path\": \"/\"}]}.")
         assert result == {"routes": [{"path": "/"}]}
 
     def test_returns_none_for_invalid(self):
-        from src.agent.routes import _extract_json
-        assert _extract_json("not json at all") is None
+        from src.agent.routes import _extract_balanced_json
+        assert _extract_balanced_json("not json at all") is None
+
+    def test_picks_largest_balanced_object_when_multiple(self):
+        from src.agent.routes import _extract_balanced_json
+        text = 'noise {"small": true} more noise {"routes": [{"path": "/x"}]}'
+        result = _extract_balanced_json(text)
+        assert result == {"routes": [{"path": "/x"}]}
+
+    def test_handles_nested_objects(self):
+        from src.agent.routes import _extract_balanced_json
+        text = '{"routes": [{"path": "/a", "actions": [{"type": "click", "selector": "text=Go"}]}]}'
+        result = _extract_balanced_json(text)
+        assert result == {"routes": [{"path": "/a", "actions": [{"type": "click", "selector": "text=Go"}]}]}
 
 
 class TestValidateMocks:
@@ -370,17 +561,114 @@ class TestValidateMocks:
         assert result == {}
 
 
+class TestDeterministicClassification:
+    def test_page_file_routes_to_itself(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("")
+
+        from src.agent.routes import _deterministic_routes
+
+        assert _deterministic_routes(["app/users/page.tsx"]) == ["/users"]
+
+    def test_globals_css_routes_to_every_route(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        for route_path in ["", "/users", "/dashboard"]:
+            d = tmp_path / "app" / route_path.strip("/") if route_path else tmp_path / "app"
+            (d / "page.tsx").parent.mkdir(parents=True, exist_ok=True)
+            (d / "page.tsx").write_text("")
+        (tmp_path / "app" / "globals.css").write_text("")
+
+        from src.agent.routes import _deterministic_routes
+
+        result = _deterministic_routes(["app/globals.css"])
+        assert "/" in result
+        assert "/users" in result
+        assert "/dashboard" in result
+
+    def test_layout_file_routes_to_its_segment(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "dashboard" / "layout.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "dashboard" / "layout.tsx").write_text("")
+        (tmp_path / "app" / "dashboard" / "page.tsx").write_text("")
+
+        from src.agent.routes import _deterministic_routes
+
+        result = _deterministic_routes(["app/dashboard/layout.tsx"])
+        assert result == ["/dashboard"]
+
+    def test_layout_at_root_includes_all_routes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "layout.tsx").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "app" / "layout.tsx").write_text("")
+        (tmp_path / "app" / "page.tsx").write_text("")
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("")
+
+        from src.agent.routes import _deterministic_routes
+
+        result = _deterministic_routes(["app/layout.tsx"])
+        assert "/" in result
+        assert "/users" in result
+
+    def test_shared_component_traces_to_consuming_pages(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "components" / "Button.tsx").parent.mkdir(parents=True)
+        (tmp_path / "components" / "Button.tsx").write_text("export const Button = () => null;")
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text(
+            "import { Button } from '../../components/Button';\nexport default () => <Button />;"
+        )
+        (tmp_path / "app" / "dashboard" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "dashboard" / "page.tsx").write_text(
+            "import { Button } from '../../components/Button';\nexport default () => <Button />;"
+        )
+
+        from src.agent.routes import _deterministic_routes
+
+        result = _deterministic_routes(["components/Button.tsx"])
+        assert set(result) == {"/users", "/dashboard"}
+
+    def test_shared_component_with_no_pages_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "lib" / "utils.ts").parent.mkdir(parents=True)
+        (tmp_path / "lib" / "utils.ts").write_text("export const noop = () => null;")
+
+        from src.agent.routes import _deterministic_routes
+
+        assert _deterministic_routes(["lib/utils.ts"]) == []
+
+    def test_deduplicates_routes_across_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("")
+        (tmp_path / "components" / "Button.tsx").parent.mkdir(parents=True)
+        (tmp_path / "components" / "Button.tsx").write_text("export const Button = () => null;")
+        (tmp_path / "app" / "users" / "components-in-users.tsx").parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "app" / "users" / "components-in-users.tsx").write_text(
+            "import { Button } from '../../components/Button'; export default () => <Button />;"
+        )
+
+        from src.agent.routes import _deterministic_routes
+
+        result = _deterministic_routes(["app/users/page.tsx", "components/Button.tsx"])
+        assert result == ["/users"]
+
+
 class TestMockOutput:
-    def test_route_inference_includes_mocks(self, mock_httpx_client):
+    def test_llm_augment_can_add_mocks(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text(
+            "export default () => { fetch('/api/users').then(r => r.json()); return null; };"
+        )
         mock_httpx_client([
             httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps({
-                    "routes": [{"path": "/", "reason": "test", "actions": []}],
+                    "routes": [],
                     "mocks": {
                         "api.example.com": {
-                            "/api/users": {
-                                "body": {"users": [{"id": 1, "name": "Alice"}]},
-                            },
+                            "/api/users": {"body": {"users": [{"id": 1, "name": "Alice"}]}},
                         },
                     },
                 })}}],
@@ -389,37 +677,28 @@ class TestMockOutput:
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        diff = "+++ b/app/users/page.tsx"
+        routes, mocks = infer_routes(diff, "tree", "sk-or-fake")
         assert len(routes) == 1
+        assert routes[0]["path"] == "/users"
         assert "/api/users" in mocks.get("api.example.com", {})
 
-    def test_no_mocks_in_response(self, mock_httpx_client):
+    def test_llm_failure_does_not_block_deterministic_routes(self, mock_httpx_client, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+        (tmp_path / "app" / "users" / "page.tsx").parent.mkdir(parents=True)
+        (tmp_path / "app" / "users" / "page.tsx").write_text("export default () => null;")
         mock_httpx_client([
             httpx.Response(200, json={
                 "choices": [{"message": {"content": json.dumps({
-                    "routes": [{"path": "/", "reason": "test", "actions": []}],
+                    "routes": [{"path": "/users", "actions": []}],
                 })}}],
             }),
         ])
 
         from src.agent.routes import infer_routes
 
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
+        diff = "+++ b/app/users/page.tsx"
+        routes, mocks = infer_routes(diff, "tree", "sk-or-fake")
         assert len(routes) == 1
+        assert routes[0]["path"] == "/users"
         assert mocks == {}
-
-    def test_empty_routes_with_mocks_still_proceeds(self, mock_httpx_client):
-        mock_httpx_client([
-            httpx.Response(200, json={
-                "choices": [{"message": {"content": json.dumps({
-                    "routes": [{"path": "/", "reason": "fallback", "actions": []}],
-                    "mocks": {"api.example.com": {"/api/ping": {"body": {"ok": True}}}},
-                })}}],
-            }),
-        ])
-
-        from src.agent.routes import infer_routes
-
-        routes, mocks = infer_routes("diff", "tree", "sk-or-fake")
-        assert len(routes) == 1
-        assert "api.example.com" in mocks

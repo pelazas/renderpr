@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import logging
+import signal
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,9 +28,21 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.mock_server import write_next_allowed_origin, write_server_mocks
 from src.agent.polling import ChangeSession
 
 logger = logging.getLogger(__name__)
+
+
+def _fetch_command_token() -> str:
+    param_name = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
+    ssm = boto3.client("ssm")
+    try:
+        resp = ssm.get_parameter(Name=param_name, WithDecryption=True)
+    except Exception:
+        logger.exception("Failed to fetch command token from SSM")
+        sys.exit(1)
+    return resp["Parameter"]["Value"]
 
 
 def _fetch_secrets() -> dict:
@@ -134,7 +147,9 @@ def _try_npm_cache_restore(install_cwd: Path, cache_key: str, s3) -> bool:
             tarball.unlink(missing_ok=True)
             return False
     except BotoClientError as e:
-        if e.response["Error"]["Code"] == "NotFound":
+        # head_object on a missing key surfaces as "404"; other clients/ops may
+        # use "NotFound"/"NoSuchKey". Treat all as a normal cache miss.
+        if e.response["Error"]["Code"] in ("404", "NotFound", "NoSuchKey"):
             logger.info("npm cache MISS for %s", cache_key[:12])
         else:
             logger.warning("npm cache head_object error: %s", e)
@@ -163,6 +178,7 @@ def _try_npm_cache_store(install_cwd: Path, cache_key: str | None) -> None:
 
 _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
+_runtime_generated_files: set[str] = set()
 
 
 def _start_dev_server(
@@ -366,6 +382,8 @@ def _capture_screenshots(
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
+        generated = write_server_mocks(Path(REPO_DIR), mocks)
+        _runtime_generated_files.update(generated)
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
@@ -421,6 +439,12 @@ def _post_comment(token: str, repo_full_name: str, pr_number: str, body: str) ->
     logger.info("Review posted to PR #%s", pr_number)
 
 
+def _append_live_preview_link(body: str, public_ip: str) -> str:
+    if not public_ip:
+        return body
+    return f"{body}\n\n---\n\nLive app: http://{public_ip}:{DEV_SERVER_PORT}"
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO)
 
@@ -434,6 +458,8 @@ def run() -> None:
     logger.info("PR Number: %s", pr_number)
 
     secrets = _fetch_secrets()
+    command_token = _fetch_command_token()
+    os.environ["RENDERPR_COMMAND_TOKEN"] = command_token
     token = _get_installation_token(
         installation_id=installation_id,
         app_id=secrets["app_id"],
@@ -475,6 +501,23 @@ def run() -> None:
         logger.info("Cannot start dev server. Exiting gracefully.")
         return
 
+    from src.agent.network import get_public_ip, get_task_arn
+    from src.agent.registration import register_task, deregister_task
+    public_ip = get_public_ip()
+    task_arn = get_task_arn()
+    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
+    logger.info("Public IP: %s", public_ip)
+    logger.info("Task ARN: %s", task_arn)
+
+    def _shutdown(_signum, _frame):
+        deregister_task(pr_number)
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
+
     _start_dev_server(
         package_dir=discovery["package_json_path"],
         install_dir=discovery.get("workspace_root"),
@@ -482,34 +525,44 @@ def run() -> None:
 
     logger.info("Dev server ready. Proceeding to review...")
 
-    screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
-    logger.info(
-        "Captured %d screenshots: %s",
-        len(screenshot_paths),
-        ", ".join(p.name for p in screenshot_paths),
-    )
+    skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
 
-    from src.agent.review import ReviewError, run_review
+    def do_review() -> None:
+        from src.agent.review import ReviewError, run_review
 
-    try:
-        review_body = run_review(
-            diff=diff,
-            screenshot_paths=screenshot_paths,
-            openrouter_api_key=secrets["openrouter_api_key"],
-            screenshot_urls=screenshot_urls,
+        screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
+        logger.info(
+            "Captured %d screenshots: %s",
+            len(screenshot_paths),
+            ", ".join(p.name for p in screenshot_paths),
         )
-    except ReviewError:
-        logger.exception("Review failed")
-        sys.exit(1)
 
-    _post_comment(
-        token=token,
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-        body=review_body,
-    )
+        try:
+            review_body = run_review(
+                diff=diff,
+                screenshot_paths=screenshot_paths,
+                openrouter_api_key=secrets["openrouter_api_key"],
+                screenshot_urls=screenshot_urls,
+            )
+        except ReviewError:
+            logger.exception("Review failed")
+            return
 
-    logger.info("Initial review posted. Starting command server...")
+        review_body = _append_live_preview_link(review_body, public_ip)
+
+        _post_comment(
+            token=token,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            body=review_body,
+        )
+        logger.info("Review posted to PR #%s", pr_number)
+
+    if skip_review:
+        logger.info("SKIP_REVIEW=true, skipping initial review")
+    else:
+        do_review()
+        logger.info("Initial review posted. Starting command server...")
 
     pr_meta = _fetch_pr_meta(
         token=token,
@@ -520,6 +573,8 @@ def run() -> None:
     is_fork = pr_meta["is_fork"]
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     change_session = ChangeSession()
+    for runtime_file in _runtime_generated_files:
+        change_session.add_runtime_file(runtime_file)
 
     from src.agent.command_server import CommandServer
     from src.agent.editor import execute_change
@@ -542,7 +597,23 @@ def run() -> None:
         if result["status"] == "success":
             edit = result.get("edit", {})
             change_session.add_edit(edit.get("file", ""))
-            screenshot_url = result["screenshot_urls"][0][0] if result.get("screenshot_urls") else ""
+            edit_route = result.get("edit_route")
+            screenshot_urls = result.get("screenshot_urls", [])
+
+            if edit_route:
+                prefix = f"Desktop - {edit_route}"
+                screenshot_url = next(
+                    (url for url, label in screenshot_urls if label == prefix),
+                    next(
+                        (url for url, label in screenshot_urls if label.startswith("Desktop -")),
+                        screenshot_urls[0][0] if screenshot_urls else "",
+                    ),
+                )
+            else:
+                screenshot_url = next(
+                    (url for url, label in screenshot_urls if label.startswith("Desktop -")),
+                    screenshot_urls[0][0] if screenshot_urls else "",
+                )
             public_ip = os.environ.get("RENDERPR_PUBLIC_IP", "localhost")
 
             body = f"""Here's the updated app with the change applied:
@@ -562,11 +633,12 @@ Live app: http://{public_ip}:3000
         return result
 
     def on_apply() -> dict:
-        if not change_session.edited_files:
+        stageable_files = change_session.stageable_edits()
+        if not stageable_files:
             return {"status": "error", "message": "No pending changes to apply."}
 
         try:
-            for file_path in change_session.edited_files:
+            for file_path in stageable_files:
                 subprocess.run(
                     ["git", "add", "--", file_path],
                     cwd=REPO_DIR,
@@ -636,17 +708,20 @@ Live app: http://{public_ip}:3000
             logger.exception("Reject timed out")
             return {"status": "error", "message": "Reject timed out."}
 
+    def on_review() -> dict:
+        do_review()
+        return {"status": "success", "message": "Review re-posted."}
+
     server = CommandServer(
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
         handle_reject_fn=on_reject,
+        handle_review_fn=on_review,
     )
     server.start()
 
-    from src.agent.network import get_public_ip
-    public_ip = get_public_ip()
-    os.environ["RENDERPR_PUBLIC_IP"] = public_ip
-    logger.info("Public IP: %s", public_ip)
+    if task_arn and public_ip != "localhost":
+        register_task(pr_number, task_arn, public_ip)
 
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:

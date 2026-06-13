@@ -25,6 +25,14 @@ except Exception:
     logger.exception("Failed to load webhook secret from SSM at cold start")
     WEBHOOK_SECRET = b""
 
+COMMAND_TOKEN_PARAM_NAME = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
+try:
+    param = _ssm.get_parameter(Name=COMMAND_TOKEN_PARAM_NAME, WithDecryption=True)
+    COMMAND_TOKEN: bytes = param["Parameter"]["Value"].encode("utf-8")
+except Exception:
+    logger.exception("Failed to load command token from SSM at cold start")
+    COMMAND_TOKEN = b""
+
 
 def _verify_signature(body: bytes, signature_header: str) -> bool:
     if not WEBHOOK_SECRET:
@@ -36,7 +44,12 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
 def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
     client = boto3.client("ecs")
     family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
-    client.run_task(
+    task_tags = [
+        {"key": "Project", "value": "renderpr"},
+        {"key": "PRNumber", "value": pr_number},
+    ]
+    logger.info("Starting run_task with tags=%s", task_tags)
+    resp = client.run_task(
         cluster=ECS_CLUSTER,
         taskDefinition=ECS_TASK_DEF,
         launchType="FARGATE",
@@ -55,57 +68,52 @@ def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
                 }
             ]
         },
-        tags=[{"key": "Project", "value": "renderpr"}, {"key": "PRNumber", "value": pr_number}],
+        tags=task_tags,
     )
+    for t in resp.get("tasks", []):
+        logger.info("Spawned task %s with tags=%s", t.get("taskArn"), t.get("tags"))
+    failures = resp.get("failures", [])
+    if failures:
+        logger.error("run_task failures: %s", failures)
 
 
-def _get_running_task_eni(pr_number: str) -> str | None:
-    ecs = boto3.client("ecs")
-    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
-
-    task_arns: list[str] = []
-    paginator = ecs.get_paginator("list_tasks")
-    for page in paginator.paginate(
-        cluster=ECS_CLUSTER,
-        family=family,
-        desiredStatus="RUNNING",
-    ):
-        task_arns.extend(page.get("taskArns", []))
-
-    if not task_arns:
+def _lookup_running_task(pr_number: str) -> str | None:
+    """Return the public IP of the running task for this PR, or None."""
+    param_name = f"/renderpr/tasks/{pr_number}"
+    ssm = boto3.client("ssm")
+    try:
+        resp = ssm.get_parameter(Name=param_name)
+    except ssm.exceptions.ParameterNotFound:
+        logger.info("No running task found in SSM for PR #%s", pr_number)
+        return None
+    except Exception:
+        logger.exception("Failed to look up task for PR #%s in SSM", pr_number)
         return None
 
-    for i in range(0, len(task_arns), 100):
-        batch = task_arns[i : i + 100]
-        desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=batch)
-        for task in desc.get("tasks", []):
-            for tag in task.get("tags", []):
-                if tag["key"] == "PRNumber" and tag["value"] == pr_number:
-                    for attachment in task.get("attachments", []):
-                        for detail in attachment.get("details", []):
-                            if detail["name"] == "networkInterfaceId":
-                                return detail["value"]
-    return None
+    try:
+        payload = json.loads(resp["Parameter"]["Value"])
+    except (json.JSONDecodeError, KeyError):
+        logger.warning("Malformed SSM payload for PR #%s", pr_number)
+        return None
 
-
-def _get_public_ip(eni_id: str) -> str | None:
-    ec2 = boto3.client("ec2")
-    resp = ec2.describe_network_interfaces(NetworkInterfaceIds=[eni_id])
-    interfaces = resp.get("NetworkInterfaces", [])
-    if interfaces:
-        return interfaces[0].get("Association", {}).get("PublicIp")
-    return None
+    public_ip = payload.get("public_ip")
+    if public_ip:
+        logger.info("Found running task for PR #%s via SSM at %s", pr_number, public_ip)
+    return public_ip
 
 
 def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
+    if not COMMAND_TOKEN:
+        logger.error("Cannot dispatch: command token not loaded from SSM")
+        return False
     body = {"command": command}
     if query:
         body["query"] = query
     data = json.dumps(body).encode()
-    token = os.environ.get("RENDERPR_COMMAND_TOKEN", "")
-    request_headers = {"Content-Type": "application/json"}
-    if token:
-        request_headers["X-RenderPR-Token"] = token
+    request_headers = {
+        "Content-Type": "application/json",
+        "X-RenderPR-Token": COMMAND_TOKEN.decode("utf-8"),
+    }
     try:
         req = urllib.request.Request(
             f"http://{public_ip}:3001/__renderpr/command",
@@ -185,31 +193,51 @@ def handler(event: dict, context: object) -> dict:
 
     action = body.get("action", "")
     comment_body = body.get("comment", {}).get("body", "")
+    comment_author = body.get("comment", {}).get("user", {}).get("login", "")
+    sender_type = body.get("sender", {}).get("type", "")
 
     if action == "created" and "@renderpr" in comment_body:
+        if comment_author.endswith("[bot]") or sender_type == "Bot":
+            logger.info("Ignoring comment from bot account: %s", comment_author)
+            return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": "self"})}
         cmd = _parse_renderpr_command(comment_body)
         logger.info("Parsed command: %s", cmd)
 
-        if cmd and cmd["command"] in ("change", "apply", "reject"):
-            eni_id = _get_running_task_eni(pr_number)
-            if eni_id:
-                public_ip = _get_public_ip(eni_id)
-                if public_ip:
-                    success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
-                    if success:
-                        return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
-                    logger.warning("Dispatch failed, spawning new task")
-                else:
-                    logger.warning("Could not get public IP for running task, spawning new")
+        if cmd and cmd["command"] in ("change", "apply", "reject", "review"):
+            public_ip = _lookup_running_task(pr_number)
+            if public_ip:
+                success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
+                if success:
+                    return {"statusCode": 200, "body": json.dumps({"ok": True, "dispatched": True})}
+                logger.warning("Dispatch failed, falling through to cold-start")
+            else:
+                logger.info("No running task found for PR #%s", pr_number)
+
+            if cmd["command"] in ("apply", "reject"):
+                return {
+                    "statusCode": 409,
+                    "body": json.dumps({
+                        "ok": False,
+                        "error": f"No active review session for PR #{pr_number}. Run `@renderpr review` first.",
+                    }),
+                }
+
+            if cmd["command"] == "review":
+                _run_fargate_task(base_env, pr_number)
+                return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
             command_str = cmd["command"]
             if cmd["command"] == "change" and cmd.get("query"):
                 command_str = f"code_change::{cmd['query']}"
 
-            _run_fargate_task(base_env + [{"name": "COMMAND", "value": command_str}], pr_number)
+            overrides = base_env + [
+                {"name": "COMMAND", "value": command_str},
+                {"name": "SKIP_REVIEW", "value": "true"},
+            ]
+            _run_fargate_task(overrides, pr_number)
             return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
-        # Default: full review
+        # Default: full review (no @renderpr command, just a plain comment)
         _run_fargate_task(base_env, pr_number)
         return {"statusCode": 200, "body": json.dumps({"ok": True})}
 

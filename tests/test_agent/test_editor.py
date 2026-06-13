@@ -79,3 +79,52 @@ class TestRevertEdit:
         monkeypatch.setattr("subprocess.run", mock_run)
         revert_edit({"file": "src/page.tsx"})
         assert ["git", "checkout", "src/page.tsx"] in calls
+
+
+class TestRunEditPreview:
+    def test_drops_unvalidated_edit_actions(self, tmp_path, monkeypatch):
+        from src.agent import editor
+
+        target = tmp_path / "app" / "users" / "page.tsx"
+        target.parent.mkdir(parents=True)
+        target.write_text("<td>Admin</td>")
+
+        captured = {}
+
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "src.agent.code_edit.request_edit",
+            lambda *a, **kw: {
+                "file": "app/users/page.tsx",
+                "line": 1,
+                "oldString": "Admin",
+                "newString": "Administrator",
+                "actions": [{"type": "click", "selector": "text=Admin"}],
+            },
+        )
+        monkeypatch.setattr(editor, "wait_for_dev_server", lambda *a, **kw: True)
+        monkeypatch.setattr("src.agent.routes.build_repo_tree", lambda: "app/users/page.tsx")
+        monkeypatch.setattr(
+            "src.agent.routes.infer_routes",
+            lambda *a, **kw: ([{"path": "/users", "actions": [], "reason": "test"}], {}),
+        )
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+
+        def fake_capture_screenshots(*a, **kw):
+            captured["routes"] = kw["routes"]
+            return []
+
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture_screenshots)
+
+        result = editor.execute_change(
+            "change role text",
+            "sk-or-fake",
+            "http://localhost:3000",
+            "diff",
+            bucket="",
+            pr_number="1",
+        )
+
+        assert result["status"] == "success"
+        assert captured["routes"] == [{"path": "/users", "actions": [], "reason": "test"}]

@@ -92,6 +92,7 @@ class CommandServer:
         handle_change_fn: Callable,
         handle_apply_fn: Callable,
         handle_reject_fn: Callable,
+        handle_review_fn: Callable | None = None,
         host: str = "0.0.0.0",
         port: int = 3001,
         idle_timeout: int | None = None,
@@ -100,6 +101,7 @@ class CommandServer:
         self._handle_change = handle_change_fn
         self._handle_apply = handle_apply_fn
         self._handle_reject = handle_reject_fn
+        self._handle_review = handle_review_fn
         self._host = host
         self._port = port
         self._idle_timeout = idle_timeout or IDLE_TIMEOUT_SECONDS
@@ -119,6 +121,8 @@ class CommandServer:
             self.handle_apply()
         elif command == "reject":
             self.handle_reject()
+        elif command == "review":
+            self.handle_review()
         else:
             logger.warning("Unknown command: %s", command)
 
@@ -140,8 +144,21 @@ class CommandServer:
         except Exception:
             logger.exception("handle_reject failed")
 
+    def handle_review(self) -> None:
+        if self._handle_review is None:
+            logger.warning("handle_review not configured, ignoring")
+            return
+        try:
+            self._handle_review()
+        except Exception:
+            logger.exception("handle_review failed")
+
     def start(self) -> None:
         CommandHandler.server_instance = self
+        if not self._token:
+            logger.warning(
+                "RENDERPR_COMMAND_TOKEN is not set — all dispatch requests will be rejected with 401"
+            )
         self._httpd = ThreadingHTTPServer((self._host, self._port), CommandHandler)
         thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         thread.start()

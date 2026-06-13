@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,10 @@ def mock_playwright(monkeypatch):
             self.goto_url = None
             self.screenshot_path = None
             self.actions_called: list[tuple] = []
+            self.event_handlers: dict[str, list] = {}
+            self.init_scripts: list[str] = []
+            self.evaluate_calls: list[tuple] = []
+            self.ready_state: str = "complete"
 
         def set_viewport_size(self, size):
             self.viewport_size = size
@@ -25,13 +30,33 @@ def mock_playwright(monkeypatch):
         def route(self, pattern, handler):
             pass
 
-        def click(self, selector: str):
+        def click(self, selector: str, **kw):
             self.actions_called.append(("click", selector))
+
+        def wait_for_selector(self, selector: str, **kw):
+            self.actions_called.append(("wait_for_selector", selector, kw))
+
+        def wait_for_function(self, expression: str, **kw):
+            self.actions_called.append(("wait_for_function", expression, kw))
 
         def wait_for_timeout(self, ms: int):
             self.actions_called.append(("wait", ms))
 
+        def on(self, event, handler):
+            self.event_handlers.setdefault(event, []).append(handler)
+
+        def add_init_script(self, script: str):
+            self.init_scripts.append(script)
+
+        def evaluate(self, expression: str):
+            self.evaluate_calls.append(expression)
+            if "readyState" in expression:
+                return self.ready_state
+
     class MockContext:
+        def route(self, pattern, handler):
+            pass
+
         def new_page(self):
             return MockPage()
 
@@ -123,6 +148,56 @@ class TestCaptureScreenshots:
         labels = [label for _, label in result]
         assert all(" - /" in label_text or " - /dashboard" in label_text for label_text in labels)
 
+    def test_wait_only_actions_run_before_baseline_screenshot(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        events = []
+
+        class WaitPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): events.append(("wait", ms))
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw):
+                events.append(("screenshot", Path(path).name))
+                Path(path).touch()
+            def click(self, selector, **kw): pass
+            def wait_for_selector(self, selector, **kw): pass
+            def wait_for_function(self, expression, **kw): pass
+            def on(self, event, handler): pass
+
+        class Context:
+            def new_page(self): return WaitPage()
+
+        class Browser:
+            def new_context(self): return Context()
+            def close(self): pass
+
+        class Playwright:
+            class chromium:
+                @staticmethod
+                def launch(): return Browser()
+
+        class SyncPlaywright:
+            def __enter__(self): return Playwright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: SyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{
+                "path": "/dashboard",
+                "actions": [{"type": "wait", "ms": 500}],
+                "reason": "test",
+            }],
+        )
+
+        first_custom_wait = events.index(("wait", 500))
+        first_screenshot = next(i for i, event in enumerate(events) if event[0] == "screenshot")
+        assert first_custom_wait < first_screenshot
+
     def test_route_label_included(self, tmp_path):
         from src.agent.visual import capture_screenshots
 
@@ -138,6 +213,65 @@ class TestCaptureScreenshots:
 
         assert len(result) == 4
         assert all(" - /profile" in label for _, label in result)
+
+    def test_click_actions_add_interacted_screenshots_after_baseline(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        routes = [{"path": "/users", "actions": [{"type": "click", "selector": "text=Open filters"}], "reason": "test"}]
+
+        result = capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=routes,
+        )
+
+        labels = [label for _, label in result]
+        assert len(result) == 8
+        assert labels.count("Mobile XS - /users") == 1
+        assert labels.count("Mobile XS - /users after interaction") == 1
+
+    def test_failed_click_action_still_keeps_baseline_screenshots(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        class FailingPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def wait_for_function(self, expression, **kw): pass
+            def wait_for_selector(self, selector, **kw):
+                raise RuntimeError("missing selector")
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+
+        class Context:
+            def new_page(self): return FailingPage()
+
+        class Browser:
+            def new_context(self): return Context()
+            def close(self): pass
+
+        class Playwright:
+            class chromium:
+                @staticmethod
+                def launch(): return Browser()
+
+        class SyncPlaywright:
+            def __enter__(self): return Playwright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: SyncPlaywright())
+
+        result = visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/users", "actions": [{"type": "click", "selector": "text=Missing"}], "reason": "test"}],
+        )
+
+        labels = [label for _, label in result]
+        assert len(result) == 4
+        assert all("after interaction" not in label for label in labels)
 
 
 
@@ -184,6 +318,253 @@ class TestCaptureScreenshotsWithMocks:
         )
 
         assert len(result) == 4
+
+    def test_mocks_register_context_route_without_init_script(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        seen = {"routes": [], "init_scripts": []}
+
+        class MockPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+            def add_init_script(self, script):
+                seen["init_scripts"].append(script)
+
+        class MockContext:
+            def route(self, pattern, handler):
+                seen["routes"].append((pattern, handler))
+
+            def new_page(self):
+                return MockPage()
+
+        class MockBrowser:
+            def new_context(self): return MockContext()
+            def close(self): pass
+
+        class MockPlaywright:
+            class chromium:
+                @staticmethod
+                def launch(): return MockBrowser()
+
+        class MockSyncPlaywright:
+            def __enter__(self): return MockPlaywright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: MockSyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/users", "actions": [], "reason": "test"}],
+            mocks={
+                "api.example.com": {
+                    "/api/users": {"body": [{"id": 1, "name": "Alice"}], "status": 200}
+                }
+            },
+        )
+
+        assert seen["routes"]
+        assert seen["routes"][0][0] == "**/*"
+        assert seen["init_scripts"] == []
+
+    def test_context_mock_handler_fulfills_matching_path(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        captured = {"handler": None, "fulfilled": None, "continued": False}
+
+        class MockRequest:
+            url = "http://127.0.0.1:3000/api/users"
+            method = "GET"
+
+        class MockRoute:
+            request = MockRequest()
+
+            def fulfill(self, **kw):
+                captured["fulfilled"] = kw
+
+            def continue_(self):
+                captured["continued"] = True
+
+        class MockPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+            def add_init_script(self, script): pass
+
+        class MockContext:
+            def route(self, pattern, handler):
+                captured["handler"] = handler
+
+            def new_page(self):
+                return MockPage()
+
+        class MockBrowser:
+            def new_context(self): return MockContext()
+            def close(self): pass
+
+        class MockPlaywright:
+            class chromium:
+                @staticmethod
+                def launch(): return MockBrowser()
+
+        class MockSyncPlaywright:
+            def __enter__(self): return MockPlaywright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: MockSyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/users", "actions": [], "reason": "test"}],
+            mocks={
+                "api.example.com": {
+                    "/api/users": {"body": [{"id": 1, "name": "Alice"}], "status": 200}
+                }
+            },
+        )
+
+        assert captured["handler"] is not None
+        captured["handler"](MockRoute())
+
+        assert captured["fulfilled"]["status"] == 200
+        assert captured["fulfilled"]["content_type"] == "application/json"
+        assert json.loads(captured["fulfilled"]["body"]) == [{"id": 1, "name": "Alice"}]
+        assert captured["continued"] is False
+
+    def test_context_mock_handler_continues_unmatched_path(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        captured = {"handler": None, "fulfilled": None, "continued": False}
+
+        class MockRequest:
+            url = "http://127.0.0.1:3000/_next/static/chunk.js"
+            method = "GET"
+
+        class MockRoute:
+            request = MockRequest()
+
+            def fulfill(self, **kw):
+                captured["fulfilled"] = kw
+
+            def continue_(self):
+                captured["continued"] = True
+
+        class MockPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+            def add_init_script(self, script): pass
+
+        class MockContext:
+            def route(self, pattern, handler):
+                captured["handler"] = handler
+
+            def new_page(self):
+                return MockPage()
+
+        class MockBrowser:
+            def new_context(self): return MockContext()
+            def close(self): pass
+
+        class MockPlaywright:
+            class chromium:
+                @staticmethod
+                def launch(): return MockBrowser()
+
+        class MockSyncPlaywright:
+            def __enter__(self): return MockPlaywright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: MockSyncPlaywright())
+
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/users", "actions": [], "reason": "test"}],
+            mocks={
+                "api.example.com": {
+                    "/api/users": {"body": [{"id": 1, "name": "Alice"}], "status": 200}
+                }
+            },
+        )
+
+        assert captured["handler"] is not None
+        captured["handler"](MockRoute())
+
+        assert captured["fulfilled"] is None
+        assert captured["continued"] is True
+
+    def test_hydration_diagnostics_registered(self, tmp_path):
+        """capture_screenshots must register a pageerror handler and
+        call page.evaluate to inspect document.readyState after navigation,
+        so we can diagnose silent React hydration failures."""
+        import unittest.mock as um
+        from src.agent import visual as visual_mod
+
+        seen = {"on_calls": [], "evaluate_calls": []}
+
+        class MockPg:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def screenshot(self, path, **kw):
+                Path(path).touch()
+            def route(self, p, h): pass
+            def click(self, s): pass
+            def wait_for_timeout(self, ms): pass
+            def on(self, event, handler):
+                seen["on_calls"].append(event)
+            def add_init_script(self, script): pass
+            def evaluate(self, expr):
+                seen["evaluate_calls"].append(expr)
+                return "complete"
+
+        class P:
+            class chromium:
+                @staticmethod
+                def launch():
+                    class B:
+                        @staticmethod
+                        def new_context():
+                            class Ctx:
+                                @staticmethod
+                                def new_page():
+                                    return MockPg()
+                            return Ctx()
+                        def close(self): pass
+                    return B()
+
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+
+        with um.patch("src.agent.visual.sync_playwright", lambda: P()):
+            visual_mod.capture_screenshots(
+                "http://localhost:3000",
+                screenshot_dir=tmp_path,
+                routes=[{"path": "/", "actions": [], "reason": "home"}],
+            )
+
+        assert "pageerror" in seen["on_calls"], (
+            f"Expected page.on('pageerror', ...) to be registered for hydration "
+            f"diagnostics, but only registered: {seen['on_calls']}"
+        )
+        assert any("readyState" in e for e in seen["evaluate_calls"]), (
+            f"Expected page.evaluate(...) to check document.readyState for "
+            f"hydration diagnostics, but evaluate calls were: {seen['evaluate_calls']}"
+        )
 
 
 class TestUploadScreenshots:

@@ -45,10 +45,18 @@ def has_pending_edits(workdir: str) -> bool:
 @dataclass
 class ChangeSession:
     edited_files: list[str] = field(default_factory=list)
+    runtime_generated_files: list[str] = field(default_factory=list)
 
     def add_edit(self, file_path: str) -> None:
         if file_path not in self.edited_files:
             self.edited_files.append(file_path)
+
+    def add_runtime_file(self, file_path: str) -> None:
+        if file_path not in self.runtime_generated_files:
+            self.runtime_generated_files.append(file_path)
+
+    def stageable_edits(self) -> list[str]:
+        return [f for f in self.edited_files if f not in self.runtime_generated_files]
 
     def clear(self) -> None:
         self.edited_files.clear()

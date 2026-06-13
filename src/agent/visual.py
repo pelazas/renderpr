@@ -5,15 +5,36 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
+from urllib.parse import urlparse
 
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_ACTIONS_MS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
 logger = logging.getLogger(__name__)
+
+
+def _flatten_mocks(mocks: dict | None) -> dict[str, dict]:
+    if not mocks:
+        return {}
+
+    flattened: dict[str, dict] = {}
+    for endpoints in mocks.values():
+        if not isinstance(endpoints, dict):
+            continue
+        for path, mock_data in endpoints.items():
+            if not isinstance(path, str) or not path.startswith("/"):
+                continue
+            if not isinstance(mock_data, dict) or "body" not in mock_data:
+                continue
+            flattened[path] = {
+                "body": mock_data["body"],
+                "status": mock_data.get("status", 200),
+            }
+    return flattened
 
 
 def _screenshot_route(
@@ -39,31 +60,77 @@ def _screenshot_route(
             logger.warning("Navigation timeout for %s at viewport %d, skipping", path, width)
             continue
 
-        for action in actions:
-            try:
-                if action["type"] == "click":
-                    page.click(action["selector"], timeout=PLAYWRIGHT_CLICK_TIMEOUT)
-                elif action["type"] == "wait":
-                    page.wait_for_timeout(action.get("ms", 1000))
-            except Exception:
-                logger.warning("Action %s failed for %s", action.get("type"), path, exc_info=True)
-
-        if actions:
-            page.wait_for_timeout(SETTLE_AFTER_ACTIONS_MS)
-
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
-        label = f"{vp_label} - {path}"
-        filename = screenshot_dir / f"{vp_label}-{route_slug}-{timestamp}.png"
-
         try:
-            page.screenshot(path=str(filename), full_page=True)
-            logger.info("Screenshot saved: %s", filename)
-            results.append((filename, label))
+            ready_state = page.evaluate("document.readyState")
+            logger.info("PAGE STATE [%s] readyState=%s", path, ready_state)
         except Exception:
-            logger.warning("Screenshot failed for %s at viewport %d", path, width, exc_info=True)
+            logger.warning("Failed to read document.readyState for %s", path, exc_info=True)
+
+        page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
+        has_click = _has_click_action(actions)
+        if actions and not has_click:
+            _perform_actions(page, path, actions)
+
+        baseline = _save_screenshot(page, screenshot_dir, path, route_slug, width, "")
+        if baseline:
+            results.append(baseline)
+
+        if has_click and _perform_actions(page, path, actions):
+            page.wait_for_timeout(SETTLE_AFTER_NAVIGATION_MS)
+            interacted = _save_screenshot(page, screenshot_dir, path, route_slug, width, " after interaction")
+            if interacted:
+                results.append(interacted)
+
 
     return results
+
+
+def _has_click_action(actions: list[dict]) -> bool:
+    return any(action.get("type") == "click" for action in actions)
+
+
+def _perform_actions(page: "Page", path: str, actions: list[dict]) -> bool:
+    try:
+        _wait_for_document_ready(page)
+        for action in actions:
+            if action["type"] == "click":
+                selector = action["selector"]
+                page.wait_for_selector(selector, state="visible", timeout=PLAYWRIGHT_CLICK_TIMEOUT)
+                page.click(selector, timeout=PLAYWRIGHT_CLICK_TIMEOUT)
+            elif action["type"] == "wait":
+                page.wait_for_timeout(action.get("ms", 1000))
+        return True
+    except Exception as exc:
+        logger.warning("Skipping interacted screenshot for %s after action failure: %s", path, exc)
+        return False
+
+
+def _wait_for_document_ready(page: "Page") -> None:
+    if hasattr(page, "wait_for_function"):
+        page.wait_for_function("document.readyState === 'complete'", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+
+
+def _save_screenshot(
+    page: "Page",
+    screenshot_dir: Path,
+    path: str,
+    route_slug: str,
+    width: int,
+    label_suffix: str,
+) -> tuple[Path, str] | None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
+    label = f"{vp_label} - {path}{label_suffix}"
+    suffix = "-interacted" if label_suffix else ""
+    filename = screenshot_dir / f"{vp_label}-{route_slug}{suffix}-{timestamp}.png"
+
+    try:
+        page.screenshot(path=str(filename), full_page=True)
+        logger.info("Screenshot saved: %s", filename)
+        return filename, label
+    except Exception:
+        logger.warning("Screenshot failed for %s at viewport %d", path, width, exc_info=True)
+        return None
 
 
 def capture_screenshots(
@@ -85,27 +152,32 @@ def capture_screenshots(
         with sync_playwright() as p:
             browser = p.chromium.launch()
             context = browser.new_context()
+
+            mock_entries = _flatten_mocks(mocks)
+            if mock_entries:
+                def handle_mock_route(route):
+                    request = route.request
+                    parsed = urlparse(request.url)
+                    mock = mock_entries.get(parsed.path)
+
+                    if mock is None:
+                        return route.continue_()
+
+                    logger.info("Mock matched %s %s -> %d", request.method, parsed.path, mock["status"])
+                    return route.fulfill(
+                        status=mock["status"],
+                        content_type="application/json",
+                        body=json.dumps(mock["body"]),
+                    )
+
+                context.route("**/*", handle_mock_route)
+                logger.info("Mock routes registered for %d endpoint(s): %s", len(mock_entries), list(mock_entries.keys()))
+
             page = context.new_page()
 
-            if mocks:
-                mock_count = 0
-                for domain, endpoints in mocks.items():
-                    for path, mock_data in endpoints.items():
-                        pattern = f"**{path}**"
-                        body = json.dumps(mock_data["body"])
-                        status = mock_data.get("status", 200)
-                        def make_handler(p, bd, st):
-                            def handler(route):
-                                logger.info("Mock intercepted: %s -> %d", p, st)
-                                route.fulfill(
-                                    status=st,
-                                    content_type="application/json",
-                                    body=bd,
-                                )
-                            return handler
-                        page.route(pattern, make_handler(path, body, status))
-                        mock_count += 1
-                logger.info("Registered %d mock endpoint(s)", mock_count)
+            page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
+            page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
+            page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
 
             for route in routes:
                 route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)

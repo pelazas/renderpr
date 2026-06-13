@@ -78,7 +78,8 @@ Edit `cdk/cdk.json` or pass context parameters at deploy time:
     "fargateCpu": "256",
     "fargateMemory": "512",
     "idleTimeoutSeconds": "900",
-    "pollIntervalSeconds": "10"
+    "pollIntervalSeconds": "10",
+    "commandToken": "shared-command-token"
   }
 }
 ```
@@ -91,9 +92,10 @@ Edit `cdk/cdk.json` or pass context parameters at deploy time:
 | `fargateCpu` | CPU units for the Fargate task | `256` |
 | `fargateMemory` | Memory (MiB) for the Fargate task | `512` |
 | `idleTimeoutSeconds` | Max idle time before self-termination | `900` |
-| `pollIntervalSeconds` | GitHub comment poll interval | `10` |
+| `pollIntervalSeconds` | Legacy/default interval setting | `10` |
+| `commandToken` | Shared token Lambda uses to authenticate with the task command server | required for conversational commands |
 
-Note: `githubAppId` and `githubWebhookSecret` are not stored in CDK context. They are injected into SSM Parameter Store post-deploy.
+Note: `githubAppId` and `githubWebhookSecret` are not stored in CDK context. They are injected into SSM Parameter Store post-deploy. `commandToken` must be set consistently for Lambda and Fargate because the command server rejects unauthenticated requests.
 
 ### 4. Create SSM Parameters
 
@@ -122,6 +124,8 @@ After deployment, the output shows:
 - **API Gateway URL** — use this as your GitHub App webhook URL
 - **ECS Cluster ARN**
 - **SSM Parameter Name** — `/renderpr/github-app` and `/renderpr/openrouter`
+- **Task Definition ARN**
+- **Screenshot Bucket Name**
 
 ### 6. Inject Secrets
 
@@ -152,6 +156,11 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 1. Push a PR to a watched repository
 2. Comment `@renderpr review` on the PR
 3. Check the PR thread for a review comment from the bot
+4. Open the `Live app: http://<public-ip>:3000` link while the task is still running
+5. Comment `@renderpr code change: <request>` to verify conversational edits
+6. Use `@renderpr apply` or `@renderpr reject` for pending edits
+
+The live app URL uses the Fargate task's ephemeral public IP. It is expected to stop working after the task exits its idle window.
 
 ## Environment Variables
 
@@ -165,6 +174,7 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 | `SUBNET_IDS` | CDK (auto) | Target public subnets |
 | `SECURITY_GROUP_ID` | CDK (auto) | Security group for Fargate |
 | `GITHUB_PARAM_NAME` | CDK (auto) | SSM parameter name for GitHub App credentials |
+| `RENDERPR_COMMAND_TOKEN` | CDK context/env | Auth token for task command server |
 
 ### Fargate Container
 
@@ -178,6 +188,17 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 | `AWS_REGION` | ECS task role | AWS region for SDK calls |
 | `IDLE_TIMEOUT` | CDK context | Seconds before auto-termination |
 | `POLL_INTERVAL` | CDK context | Seconds between poll cycles |
+| `RENDERPR_COMMAND_TOKEN` | CDK context/env | Auth token for command server requests |
+| `COMMAND` | ECS env override (from Lambda) | Cold-start command to execute, if any |
+
+### Network Ports
+
+| Port | Direction | Purpose |
+|------|-----------|---------|
+| `3000` | Public inbound to Fargate | Live preview app served by `npm run dev` |
+| `3001` | Public inbound to Fargate | RenderPR command server for Lambda dispatch |
+
+RenderPR intentionally runs Fargate in public subnets with `assignPublicIp: true`. Do not move tasks to private subnets or add NAT unless the architecture is explicitly changed.
 
 ## Updating
 
@@ -187,6 +208,8 @@ npx cdk deploy
 ```
 
 CDK handles diffing and updating only changed resources. SSM parameters are preserved across updates (set with `--overwrite`).
+
+The GitHub Actions deploy workflow rebuilds and redeploys when deployment-relevant paths change, including `src/**`, `cdk/**`, `Dockerfile`, and `.github/workflows/deploy.yml`.
 
 ## Teardown
 
@@ -217,3 +240,15 @@ If the cloned project depends on native modules (`better-sqlite3`, `sharp`, `can
 
 ### No review comment posted
 Check the OpenRouter API key validity and the GitHub installation access token generation. Verify the container has outbound internet access (public subnet + IGW route).
+
+### Live preview link does not work
+Verify the task is still running and within the idle timeout. The live preview uses the task's ephemeral public IP on port 3000, so the URL dies when the task exits.
+
+### Screenshots work but live preview shows loading data
+Check CloudWatch logs for temporary mock route generation. RenderPR writes server-side mock API routes for inferred API data so public live preview and screenshots see the same data. Playwright network mocks only affect screenshots and do not help an external browser.
+
+### Next.js blocks dev resources from the public IP
+RenderPR patches or creates temporary Next config with `allowedDevOrigins` for the task public IP. If HMR or dev resources are blocked, inspect the generated Next config logs and confirm the public IP was detected.
+
+### `@renderpr code change` does nothing
+Check Lambda logs for command parsing and dispatch. Lambda should find a running task tagged for the PR and POST to port 3001. If no task is running, Lambda should cold-start a new task with the command in `COMMAND`.

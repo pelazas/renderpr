@@ -4,7 +4,7 @@ This document describes the exact step-by-step workflow an agent follows when pr
 
 ## 1. Webhook Received (Lambda)
 
-**Trigger:** GitHub App sends a `pull_request.opened` or `issue_comment.created` (with `@renderpr`) webhook to API Gateway.
+**Trigger:** GitHub App sends a `pull_request.opened`, `pull_request.synchronize`, or `issue_comment.created` webhook to API Gateway.
 
 **Steps:**
 
@@ -18,16 +18,25 @@ This document describes the exact step-by-step workflow an agent follows when pr
    - `pull_request.number` (or `issue.number` for comments)
    - `action` (opened, synchronize, created)
 6. If `action` is not a trigger event → return 200 OK (no-op)
-7. Lambda calls ECS `RunTask` with environment overrides:
+7. For `issue_comment.created`, Lambda parses `@renderpr` commands:
+   - empty/help/review → full review
+   - `code change: <request>` or `change <request>` → code edit command
+   - `apply` → apply pending user edit
+   - `reject` → reject pending user edit
+8. For `change`, `apply`, or `reject`, Lambda looks for a running ECS task tagged with `PRNumber`.
+9. If a running task exists, Lambda resolves the task public IP and POSTs to `http://<ip>:3001/__renderpr/command`.
+10. If dispatch fails or no task is running, Lambda cold-starts ECS with a `COMMAND` environment variable.
+11. For full reviews, Lambda calls ECS `RunTask` with environment overrides:
    - `INSTALLATION_ID`
    - `REPO_FULL_NAME`
    - `PR_NUMBER`
-8. Lambda returns 200 OK to GitHub
+12. Lambda returns 200 OK to GitHub
 
 **Error handling:**
 
 - HMAC mismatch: log minimal info, return 401, no retry
 - RunTask API failure: log error, return 500, GitHub retries webhook
+- Command dispatch failure: log error, cold-start a task for the command
 - Unparseable payload: log, return 400
 
 ## 2. Fargate Container Boots
@@ -50,11 +59,18 @@ This document describes the exact step-by-step workflow an agent follows when pr
    git fetch origin pull/{pr}/head:review-pr
    git checkout review-pr
    ```
-5. Agent installs dependencies: `npm ci`
-6. Agent starts the dev server: `npm run dev &`
-7. Agent waits for dev server readiness:
+5. Agent fetches the Fargate task public IP from ECS container metadata + EC2 ENI lookup
+6. Agent temporarily patches/creates Next config so `allowedDevOrigins` includes the public IP
+7. Agent installs dependencies: `npm ci`
+8. Agent starts the dev server with `HOST=0.0.0.0 npm run dev`
+9. Agent waits for dev server readiness:
    - Poll `http://localhost:3000` until 200 or 60s timeout
    - Interval: 2s
+
+Important host split:
+
+- The dev server binds to `0.0.0.0` so the live preview is reachable at `http://<public-ip>:3000`.
+- RenderPR's own health checks and Playwright browser use `http://localhost:3000` to avoid Next.js dev-origin/HMR blocking.
 
 **Error handling:**
 
@@ -64,6 +80,7 @@ This document describes the exact step-by-step workflow an agent follows when pr
 - Git clone fails: retry once, then post error comment, exit with status 1
 - `npm ci` fails: capture stderr, post diagnostic comment, exit gracefully
 - Dev server timeout: capture stderr, post diagnostic comment, exit gracefully
+- Public IP lookup failure: fall back to `localhost`; live preview link may not be useful, but screenshots still run
 
 ## 3. Initial Review
 
@@ -73,24 +90,43 @@ This document describes the exact step-by-step workflow an agent follows when pr
 
 1. Get the PR code diff:
    - `GET /repos/{owner}/{repo}/pulls/{pr_number}` with `Accept: application/vnd.github.v3.diff`
-2. Launch headless Chromium via Playwright
-3. For each configured viewport width (`[375, 768, 1280, 1920]`):
+2. Discover frontend package from the diff and repository structure
+3. Route inference LLM analyzes:
+   - filtered frontend diff
+   - full changed frontend file contents
+   - reverse dependencies
+   - repo tree
+4. Route inference returns:
+   - affected routes
+   - required interactions
+   - mock API response data
+5. Agent writes temporary server-side mock API routes for inferred mocks:
+   - `/api/users` → `src/app/api/users/route.ts`
+   - existing files are backed up as `*.renderpr.bak`
+6. Launch headless Chromium via Playwright
+7. Register Playwright network mocks as fallback
+8. For each inferred route and configured viewport width (`[375, 768, 1280, 1920]`):
    a. Set browser viewport size
-   b. Navigate to `http://localhost:3000`
-   c. Wait for network idle
-   d. Capture full-page screenshot
-   e. Collect console errors and network failures
-4. Send review request to OpenRouter:
+   b. Navigate to `http://localhost:3000/<route>`
+   c. Wait for network idle and settle delay
+   d. Execute inferred actions, if any
+   e. Capture full-page screenshot
+   f. Collect console errors and network failures
+9. Upload screenshots to S3
+10. Send review request to OpenRouter:
    - System prompt with review instructions
    - User message containing the diff text and screenshots as base64 images
-5. Parse LLM response into structured markdown
-6. Post review comment via `POST /repos/{owner}/{repo}/issues/{pr_number}/comments`
-7. Store `last_interaction_time = now()`
+11. Parse LLM response into structured markdown
+12. Append live preview link: `http://<public-ip>:3000`
+13. Post review comment via `POST /repos/{owner}/{repo}/issues/{pr_number}/comments`
+14. Start command server on `0.0.0.0:3001`
+15. Enter idle wait loop
 
 **Error handling:**
 
 - Playwright launch fails: log, exit with status 1
 - Screenshot fails: capture what's visible, note in review
+- Mock route write fails: log warning; Playwright fallback mocks may still serve screenshot data
 - OpenRouter 429: exponential backoff with jitter, 3 retries over 30s
 - OpenRouter 5xx: retry once after 5s
 - All retries exhausted: post "Review paused: LLM unavailable" notification
@@ -106,51 +142,56 @@ LLM_RETRY_MAX_DELAY = 30
 LLM_RETRY_JITTER = 0.1
 ```
 
-## 4. Polling Loop
+## 4. Conversational Command Loop
 
-**Trigger:** Initial review posted. Agent enters conversational mode.
+**Trigger:** Initial review posted. Agent starts the command server and waits for Lambda-dispatched commands.
 
 **Steps:**
 
-1. Loop:
-   a. Wait `POLL_INTERVAL` seconds (default: 10)
-   b. Fetch PR comments: `GET /repos/{owner}/{repo}/issues/{pr_number}/comments`
-   c. Filter comments newer than `last_seen_comment_id`
-   d. For each new comment containing `@renderpr`:
-      i. Update `last_interaction_time = now()`
-      ii. Parse command from the comment text (strip `@renderpr` prefix)
-      iii. Execute command:
-           - `review` or no command → full re-review
-           - `render [viewports]` → specific viewport screenshots
-           - `dark mode` → enable `prefers-color-scheme: dark`
-           - `accessibility` or `a11y` → run accessibility scan
-           - `help` → post available commands
-           - unknown → post "unknown command" response
-      iv. Re-run Playwright with the specified parameters
-      v. Send new screenshots to LLM (include previous context)
-      vi. Post follow-up comment
-   e. Check idle timeout:
-      ```python
-      if now() - last_interaction_time > IDLE_TIMEOUT:
-          break
-      ```
-2. Exit loop
+1. Command server listens on `0.0.0.0:3001`.
+2. Lambda POSTs commands to `/__renderpr/command` with `X-RenderPR-Token`.
+3. Server validates the token against `RENDERPR_COMMAND_TOKEN`.
+4. Server accepts command, returns immediately, and executes work in a background thread.
+5. Supported commands:
+   - `change` — LLM selects files, generates edit, applies it to the cloned repo, validates dev server health, re-screenshots, uploads screenshots, and posts a preview comment.
+   - `apply` — stages and commits only user-edited files, pushes to the PR branch, and clears pending user edits.
+   - `reject` — reverts pending user-edited files and clears pending user edits.
+6. If the task was cold-started with `COMMAND`, it executes that command after boot and then waits for more commands.
+7. If no command arrives before idle timeout, the task exits.
 
 **State management:**
 
-- `last_interaction_time`: updated on every `@renderpr` command
-- `last_seen_comment_id`: tracks which comments have been processed
-- `conversation_history`: list of (command, review) pairs for LLM context
-- `browser_context`: reused across commands for performance, refreshed if corrupted
+- `ChangeSession.edited_files`: user-edited files that may be committed on `apply`
+- `ChangeSession.runtime_generated_files`: temporary mock/config files that must never be committed
+- Command server idle timer: reset on accepted commands
+- Dev server process: kept alive for live preview and command edits
 
 **Error handling:**
 
-- Network error during poll: retry on next iteration (10s acceptable delay)
+- Lambda cannot reach command server: Lambda cold-starts a new task for the command
 - Dev server crashed: attempt restart once, post notification, exit if failed
 - Playwright crash: re-launch browser, retry command
-- LLM error during follow-up: post error message, continue polling
+- LLM error during follow-up: post error message, keep command server alive
 
-## 5. Shutdown
+## 5. Runtime-Generated File Safety
+
+RenderPR may create or patch files inside the disposable clone to make previews realistic:
+
+- temporary API routes such as `src/app/api/users/route.ts`
+- backup files such as `src/app/api/users/route.ts.renderpr.bak`
+- temporary Next config changes for `allowedDevOrigins`
+
+These files are runtime infrastructure, not user-requested code changes.
+
+Rules:
+
+1. Runtime-generated files are tracked separately from user edits.
+2. `@renderpr apply` uses `ChangeSession.stageable_edits()` and stages only user-edited files.
+3. Runtime-generated files and `*.renderpr.bak` files are never staged.
+4. If a user edit touches the same file as a runtime-generated file, the runtime-generated file is excluded from apply by default.
+5. The workspace is disposable; generated files disappear when the Fargate task stops.
+
+## 6. Shutdown
 
 **Trigger:** Idle timeout reached or shutdown command received.
 
@@ -159,9 +200,9 @@ LLM_RETRY_JITTER = 0.1
 1. Post closing summary comment:
    - "RenderPR review session ended. Re-invoke with @renderpr to start a new session."
 2. Cleanup:
-   - Close Playwright browser
-   - Kill dev server process
-   - Clear temporary workspace
+    - Close Playwright browser
+    - Kill dev server process
+    - Clear temporary workspace, including runtime-generated mock/config files
 3. Exit with status 0
 
 **Error handling:**

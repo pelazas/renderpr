@@ -38,6 +38,8 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+    monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
+    monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
     if posted_body is not None:
@@ -248,6 +250,44 @@ class TestStartDevServer:
 
         _start_dev_server()
 
+    def test_dev_server_binds_all_interfaces_but_polls_localhost(self, monkeypatch: MonkeyPatch):
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        popen_calls = []
+
+        def mock_popen(*a, **kw):
+            popen_calls.append((a, kw))
+            return _mock_process()
+
+        import subprocess
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+        requested_urls = []
+
+        import httpx
+
+        class MockClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def get(self, url):
+                requested_urls.append(url)
+                return httpx.Response(200)
+
+        monkeypatch.setattr(httpx, "Client", MockClient)
+
+        _start_dev_server()
+
+        dev_server_call = popen_calls[1][1]
+        assert dev_server_call["env"]["HOST"] == "0.0.0.0"
+        assert requested_urls == ["http://localhost:3000/"]
+
     def test_dev_server_timeout(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("src.agent.main.DEV_SERVER_START_TIMEOUT", 1)
         monkeypatch.setattr("src.agent.main.DEV_SERVER_POLL_INTERVAL", 0.1)
@@ -349,7 +389,8 @@ class _MockS3Miss:
 
     def head_object(self, Bucket=None, Key=None):
         from botocore.exceptions import ClientError
-        raise ClientError({"Error": {"Code": "NotFound", "Message": "Not Found"}}, "head_object")
+        # Real S3 surfaces a missing key on head_object as code "404".
+        raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "head_object")
 
     def download_file(self, bucket, key, path):
         pass
@@ -876,8 +917,58 @@ class TestCaptureScreenshotsMockWiring:
             "api.example.com": {"/api/users": {"body": {"ok": True}}},
         }
 
+    def test_server_mocks_written_before_capture(self, monkeypatch):
+        captured = {"generated": None, "capture_called": False}
+
+        def fake_infer_routes(diff, tree, key):
+            return (
+                [{"path": "/users", "reason": "test", "actions": []}],
+                {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+            )
+
+        def fake_write(repo_dir, mocks):
+            captured["generated"] = (str(repo_dir), mocks)
+            return ["src/app/api/users/route.ts"]
+
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+            captured["capture_called"] = True
+            return []
+
+        monkeypatch.setattr("src.agent.routes.infer_routes", fake_infer_routes)
+        monkeypatch.setattr("src.agent.main.write_server_mocks", fake_write)
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+        monkeypatch.setattr("src.agent.main.REPO_DIR", "/app/repo")
+
+        from src.agent.main import _capture_screenshots, _runtime_generated_files
+        _runtime_generated_files.clear()
+
+        _capture_screenshots("diff content", {"openrouter_api_key": "sk-or-fake"})
+
+        assert captured["generated"] == (
+            "/app/repo",
+            {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+        )
+        assert captured["capture_called"] is True
+        assert "src/app/api/users/route.ts" in _runtime_generated_files
+
 
 class TestPostComment:
+    def test_append_live_preview_link(self):
+        from src.agent.main import _append_live_preview_link
+
+        body = _append_live_preview_link("## Review\n\nLooks good.", "54.1.2.3")
+
+        assert body == "## Review\n\nLooks good.\n\n---\n\nLive app: http://54.1.2.3:3000"
+
+    def test_append_live_preview_link_skips_missing_ip(self):
+        from src.agent.main import _append_live_preview_link
+
+        body = _append_live_preview_link("## Review\n\nLooks good.", "")
+
+        assert body == "## Review\n\nLooks good."
+
     def test_post_comment_success(self, monkeypatch):
         import httpx
         mock_resp = httpx.Response(201, json={"id": 1})
@@ -961,6 +1052,8 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._start_dev_server", track_start)
 
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
+        monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, body, **kw: posted.append(body))
