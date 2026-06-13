@@ -49,6 +49,7 @@ Rules for screenshot references:
 - Always show the Desktop viewport as the main image. Do NOT include multiple inline images per change.
 - Only reference Mobile XS, Tablet, or Desktop XL inline if you have a specific, important reason (e.g., "the modal overflows the viewport on Mobile XS"). Always explain why you're showing a non-desktop viewport.
 - Use [Desktop - /route] format for the main image.
+- Some routes also have an "after interaction" screenshot (e.g. "Desktop - /route after interaction") captured after clicking a trigger to reveal hidden content such as an opened modal or dropdown. When a change is about content that is revealed by interaction, use the Desktop variant — [Desktop - /route after interaction] — as that section's main image, and [All views: /route after interaction] at the end. Always prefer the Desktop variant; only fall back to another viewport's "after interaction" image if no Desktop one is available.
 
 Additional rules:
 - If there are any major security vulnerabilities, point them out in their own subsection.
