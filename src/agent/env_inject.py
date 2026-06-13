@@ -73,12 +73,17 @@ def build_injected_env(
 ) -> tuple[dict[str, str], list[str]]:
     """Return ``(injected_env, missing_required)``.
 
-    Every stored secret is injected. ``missing_required`` lists declared vars that
-    have no provided value (logged as a warning; surfaced for the progress comment).
+    Only secrets the app *declares* it needs — via ``.env.example`` and/or
+    ``.renderpr.yml``'s ``env.vars`` — are injected into the app/dev-server env.
+    Provider/auth secrets that renderpr loads purely for the auth layer (e.g.
+    ``SUPABASE_SERVICE_ROLE_KEY``, ``*_JWT_SECRET``, ``CLERK_SECRET_KEY``) are
+    intentionally NOT handed to the app process. ``missing_required`` lists
+    declared vars that have no provided value (logged as a warning; surfaced for
+    the progress comment).
     """
-    injected = dict(secrets)
     required = required_env_keys(frontend_dir, config_env)
-    missing = [k for k in required if k not in injected]
+    injected = {key: secrets[key] for key in required if key in secrets}
+    missing = [k for k in required if k not in secrets]
     if missing:
         logger.warning("Declared env vars without a provided value: %s", missing)
     if injected:

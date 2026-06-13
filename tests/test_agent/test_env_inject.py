@@ -42,6 +42,26 @@ def test_build_injected_env_reports_missing(tmp_path):
     assert missing == ["B"]
 
 
+def test_build_injected_env_excludes_undeclared_secrets(tmp_path):
+    """Provider/auth secrets not declared by the app must NOT be injected into
+    the app env (only declared .env.example / env.vars are)."""
+    (tmp_path / ".env.example").write_text("PUBLIC_SUPABASE_URL=\nPUBLIC_SUPABASE_ANON_KEY=\n")
+    secrets = {
+        "PUBLIC_SUPABASE_URL": "https://x.supabase.co",
+        "PUBLIC_SUPABASE_ANON_KEY": "anon",
+        "SUPABASE_SERVICE_ROLE_KEY": "service-role-secret",
+        "SUPABASE_URL": "https://x.supabase.co",
+    }
+    injected, missing = build_injected_env(tmp_path, {}, secrets)
+    assert injected == {
+        "PUBLIC_SUPABASE_URL": "https://x.supabase.co",
+        "PUBLIC_SUPABASE_ANON_KEY": "anon",
+    }
+    assert "SUPABASE_SERVICE_ROLE_KEY" not in injected
+    assert "SUPABASE_URL" not in injected
+    assert missing == []
+
+
 def test_write_env_local_quotes_and_returns_relative_path(tmp_path):
     repo = tmp_path
     frontend = tmp_path / "packages" / "web"
