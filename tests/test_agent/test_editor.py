@@ -55,14 +55,8 @@ class TestWaitForDevServer:
         assert not wait_for_dev_server("http://localhost:3000", timeout=0.5, interval=0.1)
 
     def test_returns_false_on_error_overlay(self, monkeypatch):
-        responses = iter([
-            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
-            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
-            type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})(),
-        ])
-
         def mock_get(*a, **kw):
-            return next(responses)
+            return type("R", (), {"status_code": 200, "text": "<html>nextjs__container_errors</html>"})()
 
         monkeypatch.setattr("httpx.get", mock_get)
         assert not wait_for_dev_server("http://localhost:3000", timeout=0.3, interval=0.05)
