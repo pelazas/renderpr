@@ -16,12 +16,14 @@ def mock_playwright(monkeypatch):
             self.init_scripts: list[str] = []
             self.evaluate_calls: list[tuple] = []
             self.ready_state: str = "complete"
+            self.url: str = ""
 
         def set_viewport_size(self, size):
             self.viewport_size = size
 
         def goto(self, url, **kw):
             self.goto_url = url
+            self.url = url
 
         def screenshot(self, path, **kw):
             self.screenshot_path = path
@@ -64,7 +66,7 @@ def mock_playwright(monkeypatch):
         def launch(self):
             return self
 
-        def new_context(self):
+        def new_context(self, **kwargs):
             return MockContext()
 
         def close(self):
@@ -610,3 +612,37 @@ class TestUploadScreenshots:
 
         pairs = upload_screenshots("my-bucket", "42", [(png, "Mobile XS")])
         assert pairs == []
+
+
+class TestLoginWallDetection:
+    def test_url_is_login_wall(self):
+        from src.agent.visual import _url_is_login_wall
+
+        assert _url_is_login_wall("http://localhost:3000/login?callbackUrl=/x")
+        assert _url_is_login_wall("http://localhost:3000/sign-in")
+        assert not _url_is_login_wall("http://localhost:3000/")
+        assert not _url_is_login_wall("http://localhost:3000/dashboard")
+
+    def test_login_wall_recorded_in_signals(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        signals: list[dict] = []
+        capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/login", "actions": [], "reason": "x"}],
+            login_signals=signals,
+        )
+        assert signals and signals[0]["path"] == "/login"
+
+    def test_normal_route_not_flagged(self, tmp_path):
+        from src.agent.visual import capture_screenshots
+
+        signals: list[dict] = []
+        capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "home"}],
+            login_signals=signals,
+        )
+        assert signals == []

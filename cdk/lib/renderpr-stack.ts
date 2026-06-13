@@ -101,6 +101,12 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks/*` },
       this,
     );
+    // Per-repo user secrets (env vars, auth signing secrets, provider keys),
+    // one parameter per secret under /{appName}/secrets/{installation}/{repo}/{KEY}.
+    const secretsParamArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/secrets/*` },
+      this,
+    );
 
     // IAM: Lambda execution role
     const lambdaRole = new iam.Role(this, "LambdaRole", {
@@ -145,6 +151,14 @@ export class RenderprStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ["ssm:PutParameter", "ssm:DeleteParameter"],
         resources: [tasksParamArn],
+      }),
+    );
+
+    // Read per-repo user secrets for env/auth injection (fork PRs are gated in code).
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParametersByPath", "ssm:GetParameter", "ssm:GetParameters"],
+        resources: [secretsParamArn],
       }),
     );
 

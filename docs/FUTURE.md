@@ -109,3 +109,13 @@ Implementation: around 20 lines in _start_dev_server + reuse the existing screen
 - **Layered override, not replacement:** schema-validate, then merge over auto-detected defaults so zero-config keeps working and config only overrides what's set.
 - **Split where it's consumed:** most is read by the agent after clone, but `runOn`/`paths.ignore` ("only run when `src/**` changes") should be read in the Lambda webhook handler via the GitHub contents API *before* paying to boot a Fargate task — a direct unit-economics win.
 - **Surface errors through the progress comment:** an invalid `.renderpr.yml` edits the comment to "config error on line N" instead of failing silently. Version the schema so it can evolve.
+
+### 5. Hosted SaaS Offering
+
+**Problem:** RenderPR is BYOC today — every user deploys the stack into their own AWS and stores secrets in their own SSM (written by a CLI, mirroring `setup-secrets.sh`). That's the right v1 for the auth/env-injection feature, but it's a high barrier for non-AWS users who'd rather pay for a managed product.
+
+**Approach:**
+- Standard SaaS funnel: landing page → payment → account → connect the RenderPR GitHub App → per-repo **settings UI** for env vars and the auth method.
+- Secrets/auth material live in **our** encrypted store instead of the user's SSM; the Fargate agent reads from there.
+- Crucially, because the auth strategy is **session forging / provider admin-API** (not `storageState` capture), the settings UI only needs to collect *secrets* — plain text fields (`NEXTAUTH_SECRET`, `service_role` key, etc.). There is **no cookie/session-capture step**, so the SaaS build stays small: no hosted remote-browser, no record-your-login flow.
+- Inherits the same fork-PR secret gate and redaction guarantees as the BYOC path.

@@ -32,8 +32,11 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
+from src.agent.env_inject import build_injected_env, write_env_local
 from src.agent.mock_server import BACKUP_SUFFIX, write_dev_origin_allowlist, write_server_mocks
 from src.agent.polling import ChangeSession
+from src.agent.renderpr_config import ConfigError, load_config
+from src.agent.secrets import load_repo_secrets
 from src.agent.stack import LaunchProfile
 
 _DEV_URL_RE = re.compile(DEV_SERVER_URL_REGEX)
@@ -359,6 +362,7 @@ def _start_dev_server(
     profile: LaunchProfile,
     package_dir: str | None = None,
     install_dir: str | None = None,
+    injected_env: dict[str, str] | None = None,
 ) -> None:
     global _dev_server_proc, _dev_server_url, _dev_server_port, _framework
 
@@ -390,7 +394,9 @@ def _start_dev_server(
         _run_install(profile.install_command, install_cwd)
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
-    dev_env = {**os.environ, **profile.dev_env}
+    # Layer precedence: ambient env, then user-provided secrets/vars, then the
+    # framework launch profile's env (host flags etc.) which must win for a correct boot.
+    dev_env = {**os.environ, **(injected_env or {}), **profile.dev_env}
     _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env)
 
     port = _resolve_ready_port(_dev_server_proc, sniffed, profile.default_port)
@@ -517,7 +523,8 @@ def _parse_diff_summary(diff: str) -> str:
 def _capture_screenshots(
     diff: str,
     secrets: dict,
-) -> tuple[list[Path], list[tuple[str, str]]]:
+    auth_session=None,
+) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
     from src.agent.routes import build_repo_tree, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
@@ -530,7 +537,13 @@ def _capture_screenshots(
         _runtime_generated_files.update(generated)
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
+    login_signals: list[dict] = []
+    results = capture_screenshots(
+        _dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks,
+        storage_state=auth_session.storage_state if auth_session else None,
+        entry_url=auth_session.entry_url if auth_session else None,
+        login_signals=login_signals,
+    )
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     pr_number = os.environ.get("PR_NUMBER", "0")
@@ -540,7 +553,7 @@ def _capture_screenshots(
         logger.warning("SCREENSHOT_BUCKET not set, skipping upload")
         pairs = []
 
-    return [p for p, _ in results], pairs
+    return [p for p, _ in results], pairs, login_signals
 
 
 def _build_screenshot_grid(pairs: list[tuple[str, str]]) -> str:
@@ -735,6 +748,29 @@ def run() -> None:
             logger.info("Cannot start dev server. Exiting gracefully.")
             return
 
+        # Fork status gates env/secret injection (secrets never touch fork PRs).
+        # Fetched once here, before the dev server starts, and reused for apply.
+        pr_meta = _fetch_pr_meta(token=token, repo_full_name=repo_full_name, pr_number=pr_number)
+        is_fork = pr_meta["is_fork"]
+
+        try:
+            repo_config = load_config(REPO_DIR)
+        except ConfigError as exc:
+            finalize(
+                "## RenderPR\n\n"
+                f"Invalid `.renderpr.yml`: {exc}\n\n"
+                "Fix the config and comment `@renderpr review` to retry."
+            )
+            logger.error("Invalid .renderpr.yml: %s", exc)
+            return
+
+        repo_secrets = load_repo_secrets(installation_id, repo_full_name, is_fork)
+        frontend_root = str(Path(discovery["package_json_path"]).parent)
+        injected_env, missing_env = build_injected_env(frontend_root, repo_config["env"], repo_secrets)
+        env_local_rel = write_env_local(frontend_root, injected_env, REPO_DIR)
+        if env_local_rel:
+            _runtime_generated_files.add(env_local_rel)
+
         from src.agent.network import get_public_ip, get_task_arn
         from src.agent.registration import register_task, deregister_task
         public_ip = get_public_ip()
@@ -759,9 +795,15 @@ def run() -> None:
             profile=discovery["launch_profile"],
             package_dir=discovery["package_json_path"],
             install_dir=discovery.get("workspace_root"),
+            injected_env=injected_env,
         )
 
         logger.info("Dev server ready. Proceeding to review...")
+
+        # Build a synthetic auth session (forged/minted) to get past login walls.
+        # On forks repo_secrets is empty, so this is None and nothing is injected.
+        from src.agent.auth import build_session
+        auth_session = build_session(repo_config["auth"], repo_secrets, _dev_server_url)
 
         def do_review(use_progress: bool = False) -> None:
             from src.agent.review import ReviewError, run_review
@@ -771,12 +813,31 @@ def run() -> None:
 
             if pid is not None:
                 update_progress(2)
-            screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
+            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(diff, secrets, auth_session)
             logger.info(
                 "Captured %d screenshots: %s",
                 len(screenshot_paths),
                 ", ".join(p.name for p in screenshot_paths),
             )
+
+            # Don't review a login screen: if pages redirected to a login wall and no
+            # auth was configured, degrade with guidance instead of a bogus review.
+            if login_walls and auth_session is None:
+                walled = ", ".join(sorted({w["path"] for w in login_walls}))
+                guidance = (
+                    "## RenderPR\n\n"
+                    f"This app appears to require **login** (redirected to a login page on: {walled}).\n\n"
+                    "Configure auth in `.renderpr.yml` (and store the secret) so RenderPR can "
+                    "preview it as a signed-in user — see the `auth` block in the docs. "
+                    "Skipping the review rather than capturing a login screen."
+                )
+                if pid is not None and _update_comment(token, repo_full_name, pid, body=guidance):
+                    return
+                _post_comment(token, repo_full_name, pr_number, body=guidance)
+                return
+            if login_walls:
+                logger.warning("Login wall hit despite configured auth on: %s",
+                               [w["path"] for w in login_walls])
 
             if pid is not None:
                 update_progress(3)
@@ -817,13 +878,8 @@ def run() -> None:
             )
         raise
 
-    pr_meta = _fetch_pr_meta(
-        token=token,
-        repo_full_name=repo_full_name,
-        pr_number=pr_number,
-    )
+    # pr_meta / is_fork were fetched before the dev server started (for the fork gate).
     head_ref = pr_meta["head_ref"]
-    is_fork = pr_meta["is_fork"]
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     change_session = ChangeSession()
     for runtime_file in _runtime_generated_files:

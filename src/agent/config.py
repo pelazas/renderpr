@@ -86,3 +86,38 @@ SETTLE_AFTER_NAVIGATION_MS: int = 1000
 REPO_DIR: str = "/app/repo"
 LLM_MODEL: str = "google/gemini-2.5-flash"
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+
+# --- Env/secret injection & auth-gated apps ---
+
+# Per-repo user secrets live in SSM SecureString, one parameter per secret under
+# this prefix: /renderpr/secrets/{installation_id}/{repo_full_name}/{KEY}
+SECRETS_SSM_PREFIX: str = "/renderpr/secrets"
+
+# Repo-level config file (layered over auto-detection) and dotenv conventions.
+RENDERPR_CONFIG_NAMES: Final[tuple[str, ...]] = (".renderpr.yml", ".renderpr.yaml")
+ENV_EXAMPLE_NAMES: Final[tuple[str, ...]] = (".env.example", ".env.sample", ".env.template")
+ENV_LOCAL_FILENAME: str = ".env.local"
+
+# Auth strategies recognised in `.renderpr.yml` `auth.type`.
+AUTH_TYPES: Final[tuple[str, ...]] = (
+    "nextauth", "jwt", "supabase", "clerk", "auth0", "firebase",
+)
+
+# Synthetic user minted into forged/provider sessions when config omits one.
+SYNTHETIC_USER_EMAIL: str = "preview@renderpr.dev"
+SYNTHETIC_USER_NAME: str = "RenderPR Preview"
+
+# Session lifetime baked into forged tokens (seconds).
+SYNTHETIC_SESSION_TTL_SECONDS: int = 60 * 60 * 24 * 7
+
+# Timeout for provider admin/token API calls (Supabase/Clerk/Firebase).
+AUTH_PROVIDER_TIMEOUT: int = 30
+
+# Login-wall detection: if, after navigation, the URL matches one of these markers
+# (and no auth was configured), the page is treated as an auth wall and the review
+# is degraded rather than run against a login screen.
+LOGIN_WALL_URL_MARKERS: Final[tuple[str, ...]] = (
+    "/login", "/signin", "/sign-in", "/auth/login", "/account/login", "/users/sign_in",
+)
+# A rendered body shorter than this (chars of visible text) also reads as a wall/blank.
+LOGIN_WALL_MIN_BODY_CHARS: int = 64

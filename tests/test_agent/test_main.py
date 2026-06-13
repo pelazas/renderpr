@@ -51,7 +51,8 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
     monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
-    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+    monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **kw: {})
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
     monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
@@ -936,7 +937,7 @@ class TestCaptureScreenshotsMockWiring:
                 {"api.example.com": {"/api/users": {"body": {"ok": True}}}},
             )
 
-        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None, **kw):
             captured_kwargs["mocks"] = mocks
             return [("/tmp/test.png", "Desktop - /")]
 
@@ -967,7 +968,7 @@ class TestCaptureScreenshotsMockWiring:
             captured["generated"] = (str(repo_dir), mocks)
             return ["src/app/api/users/route.ts"]
 
-        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None):
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None, **kw):
             captured["capture_called"] = True
             return []
 
@@ -1109,7 +1110,7 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
         monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
 
         run()
 
@@ -1128,7 +1129,7 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
         monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
 
         run()
 
@@ -1154,7 +1155,7 @@ class TestDiscoveryIntegration:
             started_with["install_dir"] = install_dir
         monkeypatch.setattr("src.agent.main._start_dev_server", track_start)
 
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
         monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
         monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
@@ -1168,10 +1169,121 @@ class TestDiscoveryIntegration:
         assert any("## Review" in body for body in posted)
 
 
-class TestNpmCacheStore:
+def test_env_injection_writes_dotenv_and_passes_injected_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("INSTALLATION_ID", "999")
+    monkeypatch.setenv("REPO_FULL_NAME", "test-owner/test-repo")
+    monkeypatch.setenv("PR_NUMBER", "42")
+    _mock_all_deps(monkeypatch)
+
+    # Point the repo + frontend at a writable tmp dir.
+    monkeypatch.setattr("src.agent.main.REPO_DIR", str(tmp_path))
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / ".env.example").write_text("NEXT_PUBLIC_X=\nMISSING_ONE=\n")
+    monkeypatch.setattr(
+        "src.agent.main.discover_frontend",
+        lambda *a, **k: {
+            "has_frontend": True,
+            "package_json_path": str(tmp_path / "package.json"),
+            "workspace_root": None,
+            "dev_command": "npm run dev",
+            "launch_profile": _default_profile(),
+            "reason": None,
+        },
+    )
+    monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **k: {"NEXT_PUBLIC_X": "hello"})
+
+    captured = {}
+    monkeypatch.setattr("src.agent.main._start_dev_server", lambda **kw: captured.update(kw))
+
+    run()
+
+    assert captured["injected_env"] == {"NEXT_PUBLIC_X": "hello"}
+    assert (tmp_path / ".env.local").read_text().strip() == 'NEXT_PUBLIC_X="hello"'
+
+
+def test_invalid_renderpr_yml_degrades(tmp_path, monkeypatch):
+    monkeypatch.setenv("INSTALLATION_ID", "999")
+    monkeypatch.setenv("REPO_FULL_NAME", "test-owner/test-repo")
+    monkeypatch.setenv("PR_NUMBER", "42")
+    posted = []
+    _mock_all_deps(monkeypatch, posted_body=posted)
+    monkeypatch.setattr("src.agent.main.REPO_DIR", str(tmp_path))
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / ".renderpr.yml").write_text("auth:\n  type: not-a-real-provider\n")
+    monkeypatch.setattr(
+        "src.agent.main.discover_frontend",
+        lambda *a, **k: {
+            "has_frontend": True,
+            "package_json_path": str(tmp_path / "package.json"),
+            "workspace_root": None,
+            "dev_command": "npm run dev",
+            "launch_profile": _default_profile(),
+            "reason": None,
+        },
+    )
+    started = []
+    monkeypatch.setattr("src.agent.main._start_dev_server", lambda **kw: started.append(kw))
+
+    run()
+
+    assert not started  # never boots the dev server on a config error
+    assert any("Invalid `.renderpr.yml`" in body for body in posted)
+
+
+def test_login_wall_without_auth_degrades(tmp_path, monkeypatch):
+    monkeypatch.setenv("INSTALLATION_ID", "999")
+    monkeypatch.setenv("REPO_FULL_NAME", "test-owner/test-repo")
+    monkeypatch.setenv("PR_NUMBER", "42")
+    posted = []
+    _mock_all_deps(monkeypatch, posted_body=posted)
+    # Simulate screenshots landing on a login wall, with no auth configured.
+    monkeypatch.setattr(
+        "src.agent.main._capture_screenshots",
+        lambda *a, **kw: ([], [], [{"path": "/", "url": "http://localhost:3000/login"}]),
+    )
+
+    run()
+
+    assert any("appears to require **login**" in body for body in posted)
+    # The degraded run must not post an actual review.
+    assert not any("Looks good." in body for body in posted)
+
+
+def test_auth_session_storage_state_forwarded(monkeypatch):
+    from src.agent.auth import AuthSession
+
+    monkeypatch.setattr("src.agent.routes.build_repo_tree", lambda *a, **k: {})
+    monkeypatch.setattr("src.agent.routes.infer_routes",
+                        lambda *a, **k: ([{"path": "/", "actions": [], "reason": "t"}], None))
+    monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+    monkeypatch.setattr("src.agent.main.REPO_DIR", "/tmp")
+    monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **k: [])
+
+    captured = {}
+
+    def fake_capture(url, screenshot_dir=None, routes=None, mocks=None, **kw):
+        captured.update(kw)
+        return []
+
+    monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+
+    from src.agent.main import _capture_screenshots
+    session = AuthSession(storage_state={"cookies": [{"name": "x"}], "origins": []}, entry_url="http://e")
+    _capture_screenshots("diff", {"openrouter_api_key": "k"}, session)
+
+    assert captured["storage_state"] == {"cookies": [{"name": "x"}], "origins": []}
+    assert captured["entry_url"] == "http://e"
+    assert captured["login_signals"] == []
+
+
+class TestNpmCacheStoreTarExit:
     """The cache store must work for every package manager. bun/yarn/npm all
     produced a non-fatal `tar` exit 1 (node_modules churning, e.g. Vite's dep
-    cache) which the old check=True turned into a hard 'no cache stored'."""
+    cache) which the old check=True turned into a hard 'no cache stored'.
+
+    NOTE: split out from TestNpmCacheStore — origin/main defined that class name
+    twice, so the second definition silently shadowed the first and dropped its
+    tests. Renaming here lets both sets run."""
 
     def _patch(self, tmp_path, monkeypatch, returncode):
         from src.agent import main as m
