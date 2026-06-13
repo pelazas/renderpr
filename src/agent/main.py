@@ -32,7 +32,7 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
-from src.agent.mock_server import BACKUP_SUFFIX, write_next_allowed_origin, write_server_mocks
+from src.agent.mock_server import BACKUP_SUFFIX, write_dev_origin_allowlist, write_server_mocks
 from src.agent.polling import ChangeSession
 from src.agent.stack import LaunchProfile
 
@@ -227,6 +227,7 @@ def _try_npm_cache_store(install_cwd: Path, cache_key: str | None) -> None:
 _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
 _dev_server_port: int = DEV_SERVER_PORT
+_framework: str = "next"
 _runtime_generated_files: set[str] = set()
 
 
@@ -359,8 +360,9 @@ def _start_dev_server(
     package_dir: str | None = None,
     install_dir: str | None = None,
 ) -> None:
-    global _dev_server_proc, _dev_server_url, _dev_server_port
+    global _dev_server_proc, _dev_server_url, _dev_server_port, _framework
 
+    _framework = profile.framework
     dev_cwd = Path(package_dir).parent if package_dir else Path(REPO_DIR)
     install_cwd = Path(install_dir).parent if install_dir else dev_cwd
 
@@ -520,11 +522,11 @@ def _capture_screenshots(
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     repo_tree = build_repo_tree()
-    routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"])
+    routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"], _framework)
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
-        generated = write_server_mocks(Path(REPO_DIR), mocks)
+        generated = write_server_mocks(Path(REPO_DIR), mocks, _framework)
         _runtime_generated_files.update(generated)
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -748,7 +750,9 @@ def run() -> None:
         signal.signal(signal.SIGTERM, _shutdown)
         signal.signal(signal.SIGINT, _shutdown)
 
-        _runtime_generated_files.update(write_next_allowed_origin(Path(REPO_DIR), public_ip))
+        _runtime_generated_files.update(
+            write_dev_origin_allowlist(Path(REPO_DIR), public_ip, discovery["launch_profile"].framework)
+        )
 
         update_progress(1)
         _start_dev_server(
@@ -841,6 +845,7 @@ def run() -> None:
             bucket=bucket,
             pr_number=pr_number,
             frontend_root=frontend_root,
+            framework=discovery["launch_profile"].framework,
         )
 
         if result["status"] == "success":

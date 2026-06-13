@@ -53,7 +53,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
-    monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
+    monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
     # The review flow posts a placeholder comment (returns an id), then edits it via
@@ -930,7 +930,7 @@ class TestCaptureScreenshotsMockWiring:
     def test_mocks_passed_to_capture_screenshots(self, monkeypatch):
 
         captured_kwargs = {}
-        def fake_infer_routes(diff, tree, key):
+        def fake_infer_routes(diff, tree, key, framework="next"):
             return (
                 [{"path": "/", "reason": "test", "actions": []}],
                 {"api.example.com": {"/api/users": {"body": {"ok": True}}}},
@@ -957,13 +957,13 @@ class TestCaptureScreenshotsMockWiring:
     def test_server_mocks_written_before_capture(self, monkeypatch):
         captured = {"generated": None, "capture_called": False}
 
-        def fake_infer_routes(diff, tree, key):
+        def fake_infer_routes(diff, tree, key, framework="next"):
             return (
                 [{"path": "/users", "reason": "test", "actions": []}],
                 {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
             )
 
-        def fake_write(repo_dir, mocks):
+        def fake_write(repo_dir, mocks, framework="next"):
             captured["generated"] = (str(repo_dir), mocks)
             return ["src/app/api/users/route.ts"]
 
@@ -1156,7 +1156,7 @@ class TestDiscoveryIntegration:
 
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], []))
         monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
-        monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 456)
