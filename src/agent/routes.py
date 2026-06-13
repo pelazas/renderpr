@@ -18,8 +18,19 @@ from src.agent.config import (
     REPO_DIR,
     RETRY_MAX_ATTEMPTS,
 )
+from src.agent.routing import (
+    EXCLUDED_DIRS,
+    SOURCE_EXTENSIONS,
+    NextAppRouterStrategy,
+    RoutingStrategy,
+    get_strategy,
+)
 
 logger = logging.getLogger(__name__)
+
+# Default strategy backing the module-level helpers and the zero-arg call sites
+# that historically assumed Next.js App Router.
+_NEXT_APP = NextAppRouterStrategy()
 
 
 ROUTE_AUGMENT_PROMPT = """You are a frontend routing analyzer. A PR changed some files and a deterministic analysis already identified these routes as affected:
@@ -30,14 +41,14 @@ Given the git diff and full file contents below, identify any ADDITIONAL routes 
 
 Route rules:
 - Only return routes that are genuinely affected. False positives are worse than false negatives here — deterministic already covers the obvious cases.
-- A route file change (e.g., app/dashboard/page.tsx) -> direct route (/dashboard) — but these are already in the list.
+- A route file change (e.g., {route_example_file}) -> its direct route — but these are already in the list.
 - A shared component change -> routes that use it — check if the list above already captures them. Only add if missing.
 - A global stylesheet or config change -> all routes — already in the list if the deterministic analyzer handled it.
-- ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
+- ALWAYS include ALL routes that have changed route files ({route_file_examples})
 - If uncertain about a route, include it anyway (false positive > false negative)
-- The project uses file-system based routing (Next.js App Router style)
+- {routing_description}
 - Strip query parameters from routes — just return the path
-- Do NOT include routes that are API routes (route.ts, api/) in the "routes" list — those belong in "mocks".
+- Do NOT include API/endpoint routes in the "routes" list — those belong in "mocks".
 
 Interaction (action) rules:
 - A route's "actions" drive Playwright to reveal content that is HIDDEN by default, BEFORE screenshotting. The capture takes a baseline screenshot, then runs the actions, then captures a second "after interaction" screenshot — so a modal/dropdown introduced by the PR is actually visible in the review.
@@ -67,71 +78,29 @@ class RouteInferenceError(Exception):
     pass
 
 
-EXCLUDED_DIRS: Final[set[str]] = {".git", "node_modules", ".next", "__pycache__", ".venv", "dist", "build", ".cache"}
-SOURCE_EXTENSIONS: Final[tuple[str, ...]] = (".ts", ".tsx", ".js", ".jsx")
-
 _MAX_REVERSE_DEPS: Final[int] = 5
 _MAX_BFS_DEPTH: Final[int] = 5
-_GLOBAL_FILES: Final[frozenset[str]] = frozenset({
-    "src/app/globals.css",
-    "app/globals.css",
-    "next.config.js",
-    "next.config.mjs",
-    "next.config.ts",
-    "src/middleware.ts",
-    "middleware.ts",
-})
 
 
 def file_to_route(file_path: str) -> str | None:
-    """Map a source file path to its Next.js App Router route, if any.
+    """Map a source file to its Next.js App Router route (the historical default).
 
-    Returns "/" for app/page.tsx, "/users" for app/users/page.tsx, etc.
-    Returns None for shared components, layouts, or files outside the app/ tree.
-
-    Handles paths with or without a leading "/" and with or without a "src/" prefix.
+    Kept as a module-level helper for callers that predate per-framework
+    strategies; other frameworks go through get_strategy(...).file_to_route.
     """
-    normalized = file_path.replace("\\", "/")
-    match = re.search(r"(?:^|/)app((?:/[^/]+)*)/page\.(?:tsx|jsx|ts|js)$", normalized)
-    if match:
-        sub = match.group(1)
-        return sub if sub else "/"
-    if re.search(r"(?:^|/)app/page\.(?:tsx|jsx|ts|js)$", normalized):
-        return "/"
-    return None
+    return _NEXT_APP.file_to_route(file_path)
 
 
 def _is_layout_file(file_path: str) -> tuple[bool, str]:
-    """Return (is_layout, route_prefix). For app/dashboard/layout.tsx -> (True, "/dashboard")."""
-    normalized = file_path.replace("\\", "/")
-    match = re.search(r"(?:^|/)app((?:/[^/]+)*)/layout\.(?:tsx|jsx|ts|js)$", normalized)
-    if match:
-        sub = match.group(1)
-        return True, sub if sub else "/"
-    if re.search(r"(?:^|/)app/layout\.(?:tsx|jsx|ts|js)$", normalized):
-        return True, "/"
-    return False, ""
+    return _NEXT_APP.is_layout_file(file_path)
 
 
 def _is_global_file(file_path: str) -> bool:
-    return file_path in _GLOBAL_FILES
+    return _NEXT_APP.is_global_file(file_path)
 
 
 def _discover_all_routes(repo_path: Path) -> list[str]:
-    """Enumerate every Next.js App Router route in the repo by walking app/**/page.*"""
-    routes: set[str] = set()
-    if not (repo_path / "app").exists() and not (repo_path / "src" / "app").exists():
-        return []
-    for page in repo_path.rglob("page.*"):
-        if not re.search(r"page\.(?:tsx|jsx|ts|js)$", page.name):
-            continue
-        if any(part in EXCLUDED_DIRS for part in page.relative_to(repo_path).parts):
-            continue
-        rel = str(page.relative_to(repo_path))
-        route = file_to_route(rel)
-        if route:
-            routes.add(route)
-    return sorted(routes)
+    return _NEXT_APP.discover_all_routes(repo_path)
 
 
 def _routes_under_prefix(prefix: str, all_routes: list[str]) -> list[str]:
@@ -170,12 +139,18 @@ def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
     return importers[:_MAX_REVERSE_DEPS]
 
 
-def _bfs_to_pages(start_file: str, repo_path: Path, max_depth: int = _MAX_BFS_DEPTH) -> set[str]:
-    """Walk the import graph from start_file until we hit page.tsx files.
+def _bfs_to_pages(
+    start_file: str,
+    repo_path: Path,
+    strategy: RoutingStrategy | None = None,
+    max_depth: int = _MAX_BFS_DEPTH,
+) -> set[str]:
+    """Walk the import graph from start_file until we hit the framework's page files.
 
-    Returns the set of page.tsx file paths (relative) that import the changed file
+    Returns the set of page file paths (relative) that import the changed file
     (transitively, up to max_depth hops).
     """
+    strategy = strategy or _NEXT_APP
     found_pages: set[str] = set()
     visited: set[str] = set()
     current_layer: list[str] = [start_file]
@@ -187,7 +162,7 @@ def _bfs_to_pages(start_file: str, repo_path: Path, max_depth: int = _MAX_BFS_DE
                 continue
             visited.add(src)
 
-            if re.search(r"(?:^|/)app(?:/[^/]+)*/page\.(?:tsx|jsx|ts|js)$", src):
+            if strategy.is_page_file(src):
                 found_pages.add(src)
                 continue
 
@@ -244,43 +219,50 @@ def build_repo_tree() -> str:
     return "\n".join(paths)
 
 
-def _classify_file(file_path: str, repo_path: Path, all_routes: list[str]) -> list[str]:
+def _classify_file(
+    file_path: str,
+    repo_path: Path,
+    all_routes: list[str],
+    strategy: RoutingStrategy | None = None,
+) -> list[str]:
     """Deterministically compute which routes are affected by a change to this file.
 
     Order of classification:
-    1. page.tsx -> its own route
-    2. globals.css / next.config.* / middleware.ts -> all routes
-    3. layout.tsx -> all routes under its directory
+    1. a route/page file -> its own route
+    2. a global stylesheet/config -> all routes
+    3. a layout -> all routes under its directory
     4. anything else (shared component, util, etc.) -> BFS import graph to find pages
     """
-    route = file_to_route(file_path)
+    strategy = strategy or _NEXT_APP
+    route = strategy.file_to_route(file_path)
     if route is not None:
         return [route]
 
-    if _is_global_file(file_path):
+    if strategy.is_global_file(file_path):
         return list(all_routes) if all_routes else ["/"]
 
-    is_layout, prefix = _is_layout_file(file_path)
+    is_layout, prefix = strategy.is_layout_file(file_path)
     if is_layout:
         scoped = _routes_under_prefix(prefix, all_routes)
         return scoped if scoped else [prefix]
 
-    page_files = _bfs_to_pages(file_path, repo_path)
+    page_files = _bfs_to_pages(file_path, repo_path, strategy)
     routes: list[str] = []
     for page in page_files:
-        r = file_to_route(page)
+        r = strategy.file_to_route(page)
         if r and r not in routes:
             routes.append(r)
     return routes
 
 
-def _deterministic_routes(changed_files: list[str]) -> list[str]:
+def _deterministic_routes(changed_files: list[str], strategy: RoutingStrategy | None = None) -> list[str]:
     """Compute the deterministic set of routes affected by the given changed files."""
+    strategy = strategy or _NEXT_APP
     repo_path = Path(REPO_DIR)
-    all_routes = _discover_all_routes(repo_path)
+    all_routes = strategy.discover_all_routes(repo_path)
     routes: list[str] = []
     for f in changed_files:
-        for r in _classify_file(f, repo_path, all_routes):
+        for r in _classify_file(f, repo_path, all_routes, strategy):
             if r not in routes:
                 routes.append(r)
     return routes
@@ -473,12 +455,14 @@ def _llm_augment_routes(
     diff: str,
     file_contents: dict[str, str],
     api_key: str,
+    strategy: RoutingStrategy | None = None,
 ) -> tuple[list[dict], dict]:
     """Ask the LLM for additional routes the deterministic pass may have missed.
 
     Returns (validated_routes, validated_mocks). Returns ([], {}) on any failure
     — the deterministic set is still correct on its own.
     """
+    strategy = strategy or _NEXT_APP
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -500,7 +484,7 @@ def _llm_augment_routes(
     body = {
         "model": LLM_MODEL,
         "messages": [
-            {"role": "system", "content": ROUTE_AUGMENT_PROMPT.format(deterministic_routes=det_str)},
+            {"role": "system", "content": ROUTE_AUGMENT_PROMPT.format(deterministic_routes=det_str, **strategy.prompt_context())},
             {"role": "user", "content": user_content},
         ],
     }
@@ -590,14 +574,18 @@ def infer_routes(
     diff: str,
     repo_tree: str,
     openrouter_api_key: str,
+    framework: str = "next",
 ) -> tuple[list[dict], dict]:
+    strategy = get_strategy(framework, Path(REPO_DIR))
+    logger.info("Route inference using %s strategy (framework=%s)", strategy.name, framework)
+
     changed_files = _get_changed_files(diff)
     if not changed_files:
         logger.warning("No changed files in diff, falling back to homepage")
         return _fallback_routes(), {}
 
     logger.info("Deterministic route inference for %d file(s): %s", len(changed_files), changed_files)
-    deterministic = _deterministic_routes(changed_files)
+    deterministic = _deterministic_routes(changed_files, strategy)
     logger.info("Deterministic routes: %s", deterministic)
 
     file_contents = _read_full_files(changed_files)
@@ -605,7 +593,7 @@ def infer_routes(
     if file_contents:
         logger.info("Sending full contents for %d frontend file(s): %s", len(file_contents), list(file_contents.keys()))
 
-    llm_routes, llm_mocks = _llm_augment_routes(deterministic, diff, file_contents, openrouter_api_key)
+    llm_routes, llm_mocks = _llm_augment_routes(deterministic, diff, file_contents, openrouter_api_key, strategy)
     if llm_routes:
         logger.info("LLM augment added %d additional route(s): %s", len(llm_routes), [r["path"] for r in llm_routes])
     if llm_mocks:
@@ -617,9 +605,6 @@ def infer_routes(
         return _fallback_routes(), llm_mocks
 
     return merged, llm_mocks
-
-    logger.info("Final routes: %s", [r["path"] for r in merged])
-    return merged, {}
 
 
 def _fallback_routes() -> list[dict]:

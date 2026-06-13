@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.agent.config import FRONTEND_EXTENSIONS, MAX_PACKAGE_SCAN_DEPTH, REPO_DIR
 from src.agent.routes import _get_changed_files
+from src.agent.stack import build_launch_profile
 
 logger = logging.getLogger(__name__)
 
@@ -117,10 +118,14 @@ def discover_frontend(diff: str) -> dict:
 
     workspace_root = find_workspace_root(package_json_path)
 
+    install_dir = Path(workspace_root).parent if workspace_root else Path(package_json_path).parent
+    profile = build_launch_profile(install_dir, package_json_path)
+
     return {
         "has_frontend": True,
         "package_json_path": package_json_path,
         "workspace_root": workspace_root,
-        "dev_command": "npm run dev",
+        "dev_command": " ".join(profile.dev_command),
+        "launch_profile": profile,
         "reason": None,
     }

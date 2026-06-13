@@ -62,6 +62,24 @@ class TestWaitForDevServer:
         assert not wait_for_dev_server("http://localhost:3000", timeout=0.3, interval=0.05)
 
 
+class TestErrorOverlayMarkers:
+    def test_vite_overlay_detected_only_for_vite(self):
+        from src.agent.editor import _has_dev_error_overlay
+        body = "<vite-error-overlay>boom</vite-error-overlay>"
+        assert _has_dev_error_overlay(body, "vite") is True
+        # Vite-specific marker shouldn't trip the Next profile.
+        assert _has_dev_error_overlay(body, "next") is False
+
+    def test_generic_markers_apply_to_all_frameworks(self):
+        from src.agent.editor import _has_dev_error_overlay
+        assert _has_dev_error_overlay("Failed to compile", "sveltekit") is True
+        assert _has_dev_error_overlay("Failed to compile", "vite") is True
+
+    def test_next_marker_for_next(self):
+        from src.agent.editor import _has_dev_error_overlay
+        assert _has_dev_error_overlay("__next_error__", "next") is True
+
+
 class TestRevertEdit:
     def test_calls_git_checkout(self, monkeypatch):
         calls = []

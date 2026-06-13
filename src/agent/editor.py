@@ -7,9 +7,30 @@ from src.agent.config import (
     DEV_SERVER_HEALTH_TIMEOUT,
     REPO_DIR,
 )
-from src.agent.routes import file_to_route
+from src.agent.routing import get_strategy
 
 logger = logging.getLogger(__name__)
+
+# Build-error overlay markers by framework family. The dev server returns HTTP
+# 200 with one of these in the body when a hot edit fails to compile, so we
+# treat that as "not ready" instead of screenshotting a broken page.
+_OVERLAY_MARKERS: dict[str, tuple[str, ...]] = {
+    "next": (
+        "nextjs__container_errors",
+        "__next_error__",
+        "__nextjs_original-stack-frame",
+    ),
+    "vite": (
+        "vite-error-overlay",
+        "[plugin:vite",
+    ),
+}
+_GENERIC_OVERLAY_MARKERS: tuple[str, ...] = (
+    "Application error",
+    "Build Error",
+    "Failed to compile",
+    "Internal Server Error",
+)
 
 
 def _find_occurrence(content: str, old_string: str, line_hint: int | None) -> int | None:
@@ -52,7 +73,12 @@ def apply_edit(edit: dict) -> bool:
     return True
 
 
-def wait_for_dev_server(url: str, timeout: int | None = None, interval: float | None = None) -> bool:
+def wait_for_dev_server(
+    url: str,
+    timeout: int | None = None,
+    interval: float | None = None,
+    framework: str = "next",
+) -> bool:
     import httpx
 
     timeout = timeout or DEV_SERVER_HEALTH_TIMEOUT
@@ -63,7 +89,7 @@ def wait_for_dev_server(url: str, timeout: int | None = None, interval: float | 
             resp = httpx.get(url, timeout=5)
             if resp.status_code == 200:
                 body = resp.text
-                if _has_dev_error_overlay(body):
+                if _has_dev_error_overlay(body, framework):
                     logger.warning("Dev server returned 200 but contains error overlay")
                     time.sleep(interval)
                     continue
@@ -74,15 +100,8 @@ def wait_for_dev_server(url: str, timeout: int | None = None, interval: float | 
     return False
 
 
-def _has_dev_error_overlay(body: str) -> bool:
-    markers = (
-        "nextjs__container_errors",
-        "__next_error__",
-        "Application error",
-        "Build Error",
-        "Failed to compile",
-        "__nextjs_original-stack-frame",
-    )
+def _has_dev_error_overlay(body: str, framework: str = "next") -> bool:
+    markers = _GENERIC_OVERLAY_MARKERS + _OVERLAY_MARKERS.get(framework, ())
     return any(m in body for m in markers)
 
 
@@ -105,6 +124,7 @@ def execute_change(
     bucket: str,
     pr_number: str,
     frontend_root: str | None = None,
+    framework: str = "next",
 ) -> dict:
     from src.agent.code_edit import EditGenerationError, request_edit, validate_edit
     from src.agent.routes import build_repo_tree, infer_routes, _validate_routes
@@ -121,13 +141,13 @@ def execute_change(
     if not apply_edit(edit):
         return {"status": "error", "message": f"Could not apply edit to {edit['file']}."}
 
-    if not wait_for_dev_server(dev_server_url):
+    if not wait_for_dev_server(dev_server_url, framework=framework):
         revert_edit(edit)
         return {"status": "error", "message": "The edit broke the build and was reverted. Try rephrasing your request."}
 
     try:
         repo_tree = build_repo_tree()
-        routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key)
+        routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
     except Exception:
         routes = [{"path": "/", "actions": [], "reason": "fallback"}]
         mocks = {}
@@ -146,7 +166,7 @@ def execute_change(
             [route.get("actions", []) for route in routes],
         )
 
-    edit_route = file_to_route(edit["file"])
+    edit_route = get_strategy(framework, Path(REPO_DIR)).file_to_route(edit["file"])
     logger.info("Edit route for %s: %s", edit["file"], edit_route)
 
     if edit_route and not any(r["path"] == edit_route for r in routes):

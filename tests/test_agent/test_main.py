@@ -7,9 +7,22 @@ import pytest
 from pytest import MonkeyPatch
 
 from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _render_progress, _start_dev_server, _update_comment, run
+from src.agent.stack import LaunchProfile
 
 
 _FRONTEND_DIFF = "diff --git a/src/page.tsx b/src/page.tsx\n--- a/src/page.tsx\n+++ b/src/page.tsx\n@@ -1 +1 @@\n-old\n+new"
+
+
+def _default_profile(package_manager="npm", framework="next", install_command=None):
+    return LaunchProfile(
+        package_manager=package_manager,
+        framework=framework,
+        install_command=install_command or ["npm", "ci"],
+        dev_command=["npm", "run", "dev"],
+        dev_env={"HOST": "0.0.0.0"} if framework == "next" else {},
+        default_port=3000,
+    )
+
 
 def _successful_discovery(*a, **kw):
     return {
@@ -17,6 +30,7 @@ def _successful_discovery(*a, **kw):
         "package_json_path": "/app/repo/package.json",
         "workspace_root": None,
         "dev_command": "npm run dev",
+        "launch_profile": _default_profile(),
         "reason": None,
     }
 
@@ -40,7 +54,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **kw: {})
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
-    monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
+    monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
     monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
     # The review flow posts a placeholder comment (returns an id), then edits it via
@@ -94,6 +108,7 @@ def _mock_process(**attrs):
     proc = type("MockProc", (), {
         "stdout": type("MockStream", (), {"readline": lambda self: ""})(),
         "wait": lambda self, timeout=None: 0,
+        "poll": lambda self: None,
         "returncode": 0,
         "kill": lambda self: None,
         "pid": 123,
@@ -232,7 +247,7 @@ class TestStartDevServer:
         monkeypatch.setattr("os.path.exists", lambda p: False)
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_npm_ci_fails(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -244,7 +259,7 @@ class TestStartDevServer:
         monkeypatch.setattr(subprocess, "Popen", mock_popen)
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_dev_server_ready_on_first_poll(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -256,7 +271,7 @@ class TestStartDevServer:
         mock_resp = httpx.Response(200)
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
     def test_dev_server_binds_all_interfaces_but_polls_localhost(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -290,7 +305,7 @@ class TestStartDevServer:
 
         monkeypatch.setattr(httpx, "Client", MockClient)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         dev_server_call = popen_calls[1][1]
         assert dev_server_call["env"]["HOST"] == "0.0.0.0"
@@ -314,7 +329,7 @@ class TestStartDevServer:
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(fail_get))
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_start_dev_server_with_package_dir(self, monkeypatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -327,6 +342,7 @@ class TestStartDevServer:
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
         _start_dev_server(
+            _default_profile(),
             package_dir="/app/repo/packages/web/package.json",
             install_dir="/app/repo/package.json",
         )
@@ -354,7 +370,7 @@ class _PopenSpy:
         return self.returncode
 
     def poll(self):
-        return self.returncode
+        return None
 
     def communicate(self, input=None, timeout=None):
         return ("", "")
@@ -437,7 +453,7 @@ class TestNpmCache:
     def test_cache_hit_skips_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
 
         # Create a real, valid tarball that the mock will "download"
         real_tarball = tmp_path / "real_tarball.tar.gz"
@@ -494,7 +510,7 @@ class TestNpmCache:
             def poll(self):
                 if not self._mocked:
                     return self._real.poll()
-                return 0
+                return None
             def communicate(self, input=None, timeout=None):
                 if not self._mocked:
                     return self._real.communicate(input, timeout=timeout)
@@ -511,7 +527,7 @@ class TestNpmCache:
         monkeypatch.setattr(sp_module, "Popen", PopenPassthrough)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in npm_calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 0, f"npm ci should be skipped, got {npm_ci_calls}"
@@ -521,7 +537,7 @@ class TestNpmCache:
     def test_cache_miss_runs_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
         monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3Miss())
 
         spy = _PopenSpy()
@@ -529,7 +545,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 1
@@ -537,7 +553,7 @@ class TestNpmCache:
     def test_cache_generic_error_falls_back_to_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
         monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3GenericError())
 
         spy = _PopenSpy()
@@ -545,7 +561,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 1
@@ -561,7 +577,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         assert len(boto3_calls) == 0, "Should not call S3 without a lockfile"
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
@@ -578,7 +594,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         assert len(boto3_calls) == 0
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
@@ -591,13 +607,26 @@ class TestNpmCacheKey:
         lockfile = tmp_path / "package-lock.json"
         lockfile.write_text("test content")
         result = _npm_cache_key(tmp_path)
-        expected = hashlib.sha256(b"test content").hexdigest()
+        expected = "npm-" + hashlib.sha256(b"test content").hexdigest()
         assert result == expected
 
     def test_returns_none_if_no_lockfile(self, tmp_path):
         from src.agent.main import _npm_cache_key
         result = _npm_cache_key(tmp_path)
         assert result is None
+
+    def test_keys_on_the_pnpm_lockfile(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        (tmp_path / "pnpm-lock.yaml").write_text("test content")
+        result = _npm_cache_key(tmp_path, "pnpm")
+        expected = "pnpm-" + hashlib.sha256(b"test content").hexdigest()
+        assert result == expected
+
+    def test_returns_none_when_pm_lockfile_absent(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        (tmp_path / "package-lock.json").write_text("x")
+        # Asking for pnpm's key when only npm's lockfile exists -> no key.
+        assert _npm_cache_key(tmp_path, "pnpm") is None
 
 
 class TestNpmCacheStore:
@@ -902,7 +931,7 @@ class TestCaptureScreenshotsMockWiring:
     def test_mocks_passed_to_capture_screenshots(self, monkeypatch):
 
         captured_kwargs = {}
-        def fake_infer_routes(diff, tree, key):
+        def fake_infer_routes(diff, tree, key, framework="next"):
             return (
                 [{"path": "/", "reason": "test", "actions": []}],
                 {"api.example.com": {"/api/users": {"body": {"ok": True}}}},
@@ -929,13 +958,13 @@ class TestCaptureScreenshotsMockWiring:
     def test_server_mocks_written_before_capture(self, monkeypatch):
         captured = {"generated": None, "capture_called": False}
 
-        def fake_infer_routes(diff, tree, key):
+        def fake_infer_routes(diff, tree, key, framework="next"):
             return (
                 [{"path": "/users", "reason": "test", "actions": []}],
                 {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
             )
 
-        def fake_write(repo_dir, mocks):
+        def fake_write(repo_dir, mocks, framework="next"):
             captured["generated"] = (str(repo_dir), mocks)
             return ["src/app/api/users/route.ts"]
 
@@ -1128,7 +1157,7 @@ class TestDiscoveryIntegration:
 
         monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
         monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
-        monkeypatch.setattr("src.agent.main.write_next_allowed_origin", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
         posted = []
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 456)
@@ -1157,6 +1186,7 @@ def test_env_injection_writes_dotenv_and_passes_injected_env(tmp_path, monkeypat
             "package_json_path": str(tmp_path / "package.json"),
             "workspace_root": None,
             "dev_command": "npm run dev",
+            "launch_profile": _default_profile(),
             "reason": None,
         },
     )
@@ -1187,6 +1217,7 @@ def test_invalid_renderpr_yml_degrades(tmp_path, monkeypatch):
             "package_json_path": str(tmp_path / "package.json"),
             "workspace_root": None,
             "dev_command": "npm run dev",
+            "launch_profile": _default_profile(),
             "reason": None,
         },
     )
@@ -1243,3 +1274,58 @@ def test_auth_session_storage_state_forwarded(monkeypatch):
     assert captured["storage_state"] == {"cookies": [{"name": "x"}], "origins": []}
     assert captured["entry_url"] == "http://e"
     assert captured["login_signals"] == []
+
+
+class TestNpmCacheStoreTarExit:
+    """The cache store must work for every package manager. bun/yarn/npm all
+    produced a non-fatal `tar` exit 1 (node_modules churning, e.g. Vite's dep
+    cache) which the old check=True turned into a hard 'no cache stored'.
+
+    NOTE: split out from TestNpmCacheStore — origin/main defined that class name
+    twice, so the second definition silently shadowed the first and dropped its
+    tests. Renaming here lets both sets run."""
+
+    def _patch(self, tmp_path, monkeypatch, returncode):
+        from src.agent import main as m
+
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        (tmp_path / "node_modules").mkdir()
+        uploaded = []
+
+        class _FakeS3:
+            def upload_file(self, path, bucket, key):
+                uploaded.append(key)
+
+        monkeypatch.setattr(m.boto3, "client", lambda svc: _FakeS3())
+
+        class _Res:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stderr = "tar: file changed as we read it"
+
+        monkeypatch.setattr(m.subprocess, "run", lambda *a, **kw: _Res(returncode))
+        return m, uploaded
+
+    def test_tar_warning_exit1_still_stores(self, tmp_path, monkeypatch):
+        m, uploaded = self._patch(tmp_path, monkeypatch, 1)
+        m._try_npm_cache_store(tmp_path, "bun-abc123def456")
+        assert uploaded == ["npm-cache/bun-abc123def456.tar.gz"]
+
+    def test_tar_fatal_exit2_skips_store(self, tmp_path, monkeypatch):
+        m, uploaded = self._patch(tmp_path, monkeypatch, 2)
+        m._try_npm_cache_store(tmp_path, "yarn-abc123def456")
+        assert uploaded == []
+
+    def test_missing_node_modules_skips_store(self, tmp_path, monkeypatch):
+        from src.agent import main as m
+
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        uploaded = []
+
+        class _FakeS3:
+            def upload_file(self, path, bucket, key):
+                uploaded.append(key)
+
+        monkeypatch.setattr(m.boto3, "client", lambda svc: _FakeS3())
+        m._try_npm_cache_store(tmp_path, "npm-abc123def456")  # no node_modules
+        assert uploaded == []

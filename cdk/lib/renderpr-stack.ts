@@ -39,11 +39,17 @@ export class RenderprStack extends cdk.Stack {
       description: "Allows outbound traffic and dev server preview on port 3000. For RenderPR Fargate tasks.",
     });
 
-    fargateSg.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(3000),
-      "Allow live preview access to dev server",
-    );
+    // Live-preview dev-server ports, one per framework family. Keep in sync with
+    // FRAMEWORK_DEFAULT_PORTS in src/agent/config.py: 3000 (next/cra/remix/spa),
+    // 5173 (vite/sveltekit), 4321 (astro). Without the right port open, the
+    // public preview link is unreachable even though the dev server is running.
+    for (const previewPort of [3000, 4321, 5173]) {
+      fargateSg.addIngressRule(
+        ec2.Peer.anyIpv4(),
+        ec2.Port.tcp(previewPort),
+        `Allow live preview access to dev server on :${previewPort}`,
+      );
+    }
 
     fargateSg.addIngressRule(
       ec2.Peer.anyIpv4(),
