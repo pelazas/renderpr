@@ -23,6 +23,7 @@ renderpr/
 │       ├── polling.py            # GitHub PR comment polling
 │       ├── visual.py             # Playwright browser automation
 │       ├── review.py             # LLM review execution
+│       ├── stack.py              # Package-manager & framework detection (LaunchProfile)
 │       └── config.py             # System constants (timeouts, retries, viewports)
 ├── .renderpr/
 │                                 # (ephemeral screenshot output dir)
@@ -54,7 +55,8 @@ Before writing any code, read the following documents **in order**. They are not
 | Layer | Technology |
 |-------|-----------|
 | Router | AWS API Gateway + Lambda (Python 3.12) |
-| Sandbox | AWS Fargate (ECS, Python + Node base image) |
+| Sandbox | AWS Fargate (ECS, Python + Node base image; npm/pnpm/yarn/bun) |
+| Frontend frameworks | Next.js, Vite, Astro, SvelteKit, CRA, Remix (detected per repo) |
 | Visual Automation | Playwright (Python) |
 | LLM Gateway | OpenRouter |
 | Infrastructure | AWS CDK v2 (TypeScript) |

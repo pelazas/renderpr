@@ -84,6 +84,8 @@ Implementation: around 20 lines in _start_dev_server + reuse the existing screen
 
 ### 3. Framework & Package-Manager Breadth
 
+> **Status:** Phase 1 shipped (package manager + dev-command + port detection — see `src/agent/stack.py`). Phase 2 (per-framework routing + the `page.route()` mock rewrite) is still pending; the remaining work is the **Route/mock model** bullet below.
+
 **Problem:** Discovery is hardcoded to npm + Next.js + port 3000. On a non-npm or non-Next repo, RenderPR doesn't degrade — it *hard-fails* in three independent places, so every unsupported stack is silent churn:
 - **Install:** `_start_dev_server` runs a literal `npm ci`, and the S3 cache key is hashed only from `package-lock.json`. `npm ci` requires that lockfile, so pnpm/yarn repos fail before anything else and never hit the cache.
 - **Boot/readiness:** the ready-check polls `localhost:3000` for a 200, but Vite (5173), Astro (4321), and SvelteKit (5173) never answer there, so even a good install dead-ends in a 60s timeout. `dev_command` is the hardcoded string `"npm run dev"`.
