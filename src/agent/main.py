@@ -238,6 +238,7 @@ def _run_install(install_command: list[str], install_cwd: Path) -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
+        assert proc.stdout is not None
         out_lines: list[str] = []
         for line in iter(proc.stdout.readline, ""):
             out_lines.append(line)
@@ -284,9 +285,11 @@ def _start_dev_process(
         stderr=subprocess.STDOUT,
         text=True,
     )
+    assert proc.stdout is not None
     sniffed: dict = {"port": None}
 
     def _drain() -> None:
+        assert proc.stdout is not None
         for line in iter(proc.stdout.readline, ""):
             logger.info("dev server: %s", line.rstrip()[:200])
             if sniffed["port"] is None:
