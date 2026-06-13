@@ -148,9 +148,6 @@ def _parse_renderpr_command(comment_body: str) -> dict | None:
     if after == "apply":
         return {"command": "apply"}
 
-    if after == "reject":
-        return {"command": "reject"}
-
     return {"command": "review"}
 
 
@@ -204,7 +201,7 @@ def handler(event: dict, context: object) -> dict:
         cmd = _parse_renderpr_command(comment_body)
         logger.info("Parsed command: %s", cmd)
 
-        if cmd and cmd["command"] in ("change", "apply", "reject", "review"):
+        if cmd and cmd["command"] in ("change", "apply", "review"):
             public_ip = _lookup_running_task(pr_number)
             if public_ip:
                 success = _dispatch_to_task(public_ip, cmd["command"], cmd.get("query"))
@@ -214,7 +211,7 @@ def handler(event: dict, context: object) -> dict:
             else:
                 logger.info("No running task found for PR #%s", pr_number)
 
-            if cmd["command"] in ("apply", "reject"):
+            if cmd["command"] == "apply":
                 return {
                     "statusCode": 409,
                     "body": json.dumps({
