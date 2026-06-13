@@ -36,6 +36,34 @@ FRONTEND_EXTENSIONS: Final[tuple[str, ...]] = (
 # Package.json discovery
 MAX_PACKAGE_SCAN_DEPTH: Final[int] = 5
 
+# Package-manager detection: lockfile -> package manager, in precedence order.
+LOCKFILES: Final[dict[str, str]] = {
+    "pnpm-lock.yaml": "pnpm",
+    "yarn.lock": "yarn",
+    "bun.lockb": "bun",
+    "bun.lock": "bun",
+    "package-lock.json": "npm",
+}
+DEFAULT_PACKAGE_MANAGER: str = "npm"
+
+# Framework dev-server default ports, used as a fallback when the printed URL
+# can't be sniffed from the dev server's stdout.
+FRAMEWORK_DEFAULT_PORTS: Final[dict[str, int]] = {
+    "next": 3000,
+    "cra": 3000,
+    "remix": 3000,
+    "vite": 5173,
+    "sveltekit": 5173,
+    "astro": 4321,
+    "spa": 3000,
+}
+
+# Ports probed (in order) when the dev server's URL can't be sniffed.
+DEV_SERVER_CANDIDATE_PORTS: Final[tuple[int, ...]] = (3000, 5173, 4321, 8080, 4200)
+
+# Matches the "Local: http://localhost:PORT" banner dev servers print on boot.
+DEV_SERVER_URL_REGEX: str = r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d+)"
+
 # S3 npm cache
 NPM_CACHE_ENABLED: bool = True
 NPM_CACHE_PREFIX: str = "npm-cache"

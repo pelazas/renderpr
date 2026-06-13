@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import logging
+import re
 import signal
 from pathlib import Path
 import shutil
@@ -16,6 +17,9 @@ import httpx
 import jwt
 
 from src.agent.config import (
+    DEV_SERVER_CANDIDATE_PORTS,
+    DEV_SERVER_URL_REGEX,
+    LOCKFILES,
     NPM_CACHE_ENABLED,
     NPM_CACHE_HASH_ALGO,
     NPM_CACHE_PREFIX,
@@ -28,8 +32,11 @@ from src.agent.config import (
     RETRY_MAX_ATTEMPTS,
 )
 from src.agent.discovery import discover_frontend
-from src.agent.mock_server import write_next_allowed_origin, write_server_mocks
+from src.agent.mock_server import BACKUP_SUFFIX, write_next_allowed_origin, write_server_mocks
 from src.agent.polling import ChangeSession
+from src.agent.stack import LaunchProfile
+
+_DEV_URL_RE = re.compile(DEV_SERVER_URL_REGEX)
 
 logger = logging.getLogger(__name__)
 
@@ -104,14 +111,23 @@ def _clone_repo(repo_full_name: str, pr_number: str, token: str) -> None:
                 logger.warning("git %s failed (attempt %d/%d), retrying...", cmd_name, attempt + 1, RETRY_MAX_ATTEMPTS)
 
 
-def _npm_cache_key(install_cwd: Path) -> str | None:
+def _npm_cache_key(install_cwd: Path, package_manager: str = "npm") -> str | None:
+    """Cache key from whichever lockfile this package manager uses.
+
+    Keyed as ``{pm}-{lockfile-hash}`` so different dependency trees — and
+    different package managers — never collide. Returns None when there's no
+    lockfile (nothing stable to key on).
+    """
     try:
         if not install_cwd:
             return None
-        lockfile = install_cwd / "package-lock.json"
-        if not lockfile.exists():
-            return None
-        return hashlib.new(NPM_CACHE_HASH_ALGO, lockfile.read_bytes()).hexdigest()
+        lockfiles = [name for name, pm in LOCKFILES.items() if pm == package_manager]
+        for name in lockfiles:
+            lockfile = install_cwd / name
+            if lockfile.exists():
+                digest = hashlib.new(NPM_CACHE_HASH_ALGO, lockfile.read_bytes()).hexdigest()
+                return f"{package_manager}-{digest}"
+        return None
     except OSError:
         return None
 
@@ -178,14 +194,140 @@ def _try_npm_cache_store(install_cwd: Path, cache_key: str | None) -> None:
 
 _dev_server_proc: subprocess.Popen | None = None
 _dev_server_url: str = ""
+_dev_server_port: int = DEV_SERVER_PORT
 _runtime_generated_files: set[str] = set()
 
 
+def _ensure_pnpm_hoisted(install_cwd: Path) -> list[str]:
+    """Force pnpm into a flat (hoisted) node_modules so the tar-to-S3 cache
+    captures real files, not dangling symlinks into pnpm's global store.
+
+    Returns the runtime-generated paths (relative to REPO_DIR) to exclude from
+    any later apply commit.
+    """
+    npmrc = install_cwd / ".npmrc"
+    repo_path = Path(REPO_DIR)
+    generated: list[str] = []
+    try:
+        if npmrc.exists():
+            content = npmrc.read_text()
+            if "node-linker" in content:
+                return []
+            backup = npmrc.with_name(f".npmrc{BACKUP_SUFFIX}")
+            if not backup.exists():
+                shutil.copy2(npmrc, backup)
+                generated.append(str(backup.relative_to(repo_path)))
+            npmrc.write_text(content.rstrip() + "\nnode-linker=hoisted\n")
+        else:
+            npmrc.write_text("node-linker=hoisted\n")
+        generated.append(str(npmrc.relative_to(repo_path)))
+        logger.info("Forced pnpm node-linker=hoisted in %s", npmrc)
+    except (OSError, ValueError):
+        logger.warning("Could not write pnpm .npmrc in %s", install_cwd, exc_info=True)
+        return []
+    return generated
+
+
+def _run_install(install_command: list[str], install_cwd: Path) -> None:
+    label = " ".join(install_command)
+    try:
+        proc = subprocess.Popen(
+            install_command,
+            cwd=str(install_cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout is not None
+        out_lines: list[str] = []
+        for line in iter(proc.stdout.readline, ""):
+            out_lines.append(line)
+            if len(out_lines) % 50 == 0:
+                logger.info("%s progress: ... %s", label, line.rstrip()[:200])
+        proc.wait(timeout=NPM_CI_TIMEOUT_SECONDS)
+        if proc.returncode != 0:
+            logger.error("%s failed (exit %d) in %s", label, proc.returncode, install_cwd)
+            logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
+            sys.exit(1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        logger.error("%s timed out after %ds in %s. Last 20 lines:\n%s", label, NPM_CI_TIMEOUT_SECONDS, install_cwd, "\n".join(out_lines[-20:]))
+        sys.exit(1)
+    except Exception:
+        logger.exception("%s failed unexpectedly", label)
+        sys.exit(1)
+
+
+def _http_ok(port: int) -> bool:
+    url = f"http://{DEV_SERVER_HOST}:{port}/"
+    try:
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url)
+        logger.info("Dev server responded on port %d (status %d)", port, resp.status_code)
+        return True
+    except httpx.HTTPError:
+        return False
+
+
+def _start_dev_process(
+    dev_command: list[str],
+    dev_cwd: Path,
+    dev_env: dict[str, str],
+) -> tuple[subprocess.Popen, dict]:
+    """Launch the dev server and drain its stdout in a thread, sniffing the
+    first printed "http://...:PORT" banner into the returned holder.
+    """
+    proc = subprocess.Popen(
+        dev_command,
+        cwd=str(dev_cwd),
+        env=dev_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert proc.stdout is not None
+    sniffed: dict = {"port": None}
+
+    def _drain() -> None:
+        assert proc.stdout is not None
+        for line in iter(proc.stdout.readline, ""):
+            logger.info("dev server: %s", line.rstrip()[:200])
+            if sniffed["port"] is None:
+                match = _DEV_URL_RE.search(line)
+                if match:
+                    sniffed["port"] = int(match.group(1))
+                    logger.info("Sniffed dev server port: %d", sniffed["port"])
+
+    threading.Thread(target=_drain, daemon=True).start()
+    return proc, sniffed
+
+
+def _resolve_ready_port(proc: subprocess.Popen, sniffed: dict, default_port: int) -> int | None:
+    """Poll until the dev server answers HTTP. Prefer the sniffed port once
+    known; otherwise probe the framework default and candidate ports.
+    """
+    deadline = time.time() + DEV_SERVER_START_TIMEOUT
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            logger.error("Dev server exited early (code %s) before becoming ready", proc.returncode)
+            return None
+        if sniffed["port"] is not None:
+            if _http_ok(sniffed["port"]):
+                return sniffed["port"]
+        else:
+            for port in (default_port, *DEV_SERVER_CANDIDATE_PORTS):
+                if _http_ok(port):
+                    return port
+        time.sleep(DEV_SERVER_POLL_INTERVAL)
+    return None
+
+
 def _start_dev_server(
+    profile: LaunchProfile,
     package_dir: str | None = None,
     install_dir: str | None = None,
 ) -> None:
-    global _dev_server_proc, _dev_server_url
+    global _dev_server_proc, _dev_server_url, _dev_server_port
 
     dev_cwd = Path(package_dir).parent if package_dir else Path(REPO_DIR)
     install_cwd = Path(install_dir).parent if install_dir else dev_cwd
@@ -198,67 +340,35 @@ def _start_dev_server(
         logger.error("No package.json found at %s", pkg_json)
         sys.exit(1)
 
+    if profile.package_manager == "pnpm":
+        _runtime_generated_files.update(_ensure_pnpm_hoisted(install_cwd))
+
     cache_restored = False
-    cache_key = _npm_cache_key(install_cwd) if NPM_CACHE_ENABLED else None
+    cache_key = _npm_cache_key(install_cwd, profile.package_manager) if NPM_CACHE_ENABLED else None
     if cache_key is not None:
         try:
             s3 = boto3.client("s3")
             cache_restored = _try_npm_cache_restore(install_cwd, cache_key, s3)
         except Exception:
-            logger.warning("npm cache check failed", exc_info=True)
+            logger.warning("dependency cache check failed", exc_info=True)
 
     if not cache_restored:
-        try:
-            proc = subprocess.Popen(
-                ["npm", "ci"],
-                cwd=str(install_cwd),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            out_lines: list[str] = []
-            for line in iter(proc.stdout.readline, ""):
-                out_lines.append(line)
-                if len(out_lines) % 50 == 0:
-                    logger.info("npm ci progress: ... %s", line.rstrip()[:200])
-            proc.wait(timeout=NPM_CI_TIMEOUT_SECONDS)
-            if proc.returncode != 0:
-                logger.error("npm ci failed (exit %d) in %s", proc.returncode, install_cwd)
-                logger.error("Last 20 lines:\n%s", "\n".join(out_lines[-20:]))
-                sys.exit(1)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            logger.error("npm ci timed out after %ds in %s. Last 20 lines:\n%s", NPM_CI_TIMEOUT_SECONDS, install_cwd, "\n".join(out_lines[-20:]))
-            sys.exit(1)
-        except Exception:
-            logger.exception("npm ci failed unexpectedly")
-            sys.exit(1)
-
+        _run_install(profile.install_command, install_cwd)
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
-    _dev_server_env = {**os.environ, "HOST": "0.0.0.0"}
-    _dev_server_proc = subprocess.Popen(
-        ["npm", "run", "dev"],
-        cwd=str(dev_cwd),
-        env=_dev_server_env,
-    )
+    dev_env = {**os.environ, **profile.dev_env}
+    _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env)
 
-    _dev_server_url = f"http://{DEV_SERVER_HOST}:{DEV_SERVER_PORT}/"
-    url = _dev_server_url
-    deadline = time.time() + DEV_SERVER_START_TIMEOUT
-    while time.time() < deadline:
-        try:
-            with httpx.Client(timeout=30) as client:
-                resp = client.get(url)
-            logger.info("Dev server ready (status %d)", resp.status_code)
-            return
-        except httpx.HTTPError:
-            time.sleep(DEV_SERVER_POLL_INTERVAL)
+    port = _resolve_ready_port(_dev_server_proc, sniffed, profile.default_port)
+    if port is None:
+        logger.error("Dev server did not start within %ds", DEV_SERVER_START_TIMEOUT)
+        if _dev_server_proc:
+            _dev_server_proc.kill()
+        sys.exit(1)
 
-    logger.error("Dev server did not start within %ds", DEV_SERVER_START_TIMEOUT)
-    if _dev_server_proc:
-        _dev_server_proc.kill()
-    sys.exit(1)
+    _dev_server_port = port
+    _dev_server_url = f"http://{DEV_SERVER_HOST}:{port}/"
+    logger.info("Dev server ready at %s", _dev_server_url)
 
 
 def _get_installation_token(installation_id: str, app_id: str, private_key: str) -> str:
@@ -515,7 +625,7 @@ def _render_progress(current: int, failed_at: int | None = None) -> str:
 def _append_live_preview_link(body: str, public_ip: str) -> str:
     if not public_ip:
         return body
-    return f"{body}\n\n---\n\nLive app: http://{public_ip}:{DEV_SERVER_PORT}"
+    return f"{body}\n\n---\n\nLive app: http://{public_ip}:{_dev_server_port}"
 
 
 def run() -> None:
@@ -610,6 +720,7 @@ def run() -> None:
 
         update_progress(1)
         _start_dev_server(
+            profile=discovery["launch_profile"],
             package_dir=discovery["package_json_path"],
             install_dir=discovery.get("workspace_root"),
         )
@@ -726,7 +837,7 @@ def run() -> None:
 
 <img width="400" src="{screenshot_url}" alt="After change">
 
-Live app: http://{public_ip}:3000
+Live app: http://{public_ip}:{_dev_server_port}
 
 *Type @renderpr apply to accept the change, or leave it uncommitted to discard it.*"""
             _post_comment(

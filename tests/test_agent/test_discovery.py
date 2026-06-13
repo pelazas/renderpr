@@ -334,3 +334,24 @@ class TestDiscoverFrontend:
         from src.agent.discovery import discover_frontend
         result = discover_frontend("")
         assert result["has_frontend"] is False
+
+    def test_launch_profile_reflects_detected_stack(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        (tmp_path / "pnpm-lock.yaml").write_text("")
+        pkg = tmp_path / "package.json"
+        pkg.write_text('{"dependencies": {"vite": "5.0.0"}, "scripts": {"dev": "vite"}}')
+
+        diff = """diff --git a/src/App.tsx b/src/App.tsx
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -1 +1 @@
+-old
++new"""
+
+        from src.agent.discovery import discover_frontend
+        result = discover_frontend(diff)
+        profile = result["launch_profile"]
+        assert profile.package_manager == "pnpm"
+        assert profile.framework == "vite"
+        assert result["dev_command"] == "pnpm run dev --host"
+        assert profile.default_port == 5173
