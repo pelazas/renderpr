@@ -542,7 +542,7 @@ def run() -> None:
 
     # Post an immediate placeholder so the PR shows the review is underway, then edit
     # this same comment as stages complete (and into the final review or an error).
-    # Conversational re-runs (change/apply/reject) set SKIP_REVIEW and get no placeholder.
+    # Conversational re-runs (change/apply) set SKIP_REVIEW and get no placeholder.
     progress_comment_id = (
         None
         if skip_review
