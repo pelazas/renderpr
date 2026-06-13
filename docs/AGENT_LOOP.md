@@ -142,7 +142,7 @@ aws logs tail "RenderprStack-ReviewTaskDefReviewContainerLogGroupB702639E-MY5bIm
 
 **Per-step timing budget (default):**
 
-- expected end-to-end (boot → comment posted): **2–5 min** typical, 8 min worst case for `review`; **30–90s** for `apply`/`reject` since the dev server and Playwright are already warm
+- expected end-to-end (boot → comment posted): **2–5 min** typical, 8 min worst case for `review`; **30–90s** for `apply` since the dev server and Playwright are already warm
 - poll the bot for a new comment every **45s**, starting 60s after the step's trigger time
 - give up waiting for a comment after **10 min** and treat as "no comment posted" failure (still inspect logs)
 
@@ -260,7 +260,7 @@ Each check has a `step` field tying it to one step of the scenario (default `1` 
 
 ## Section 6 [Scenarios — multi-step `@renderpr` flows]
 
-A scenario is an ordered list of `@renderpr` interactions that exercise more of the bot's command surface than a single review. Use scenarios when the goal involves verifying `code change`, `apply`, `reject`, or any flow where one step depends on the previous one succeeding.
+A scenario is an ordered list of `@renderpr` interactions that exercise more of the bot's command surface than a single review. Use scenarios when the goal involves verifying `code change`, `apply`, or any flow where one step depends on the previous one succeeding.
 
 ### Step shape
 
@@ -281,7 +281,7 @@ A scenario is an ordered list of `@renderpr` interactions that exercise more of 
 `wait_for` values:
 - `bot-comment` *(default)* — wait until a new `@renderpr` comment appears.
 - `bot-commit` — wait until a new commit by the bot appears on the PR branch (used after `apply`).
-- `no-comment` — wait `timeout_minutes` then assert *no* bot comment was posted (used to verify a `reject` is silent or that an invalid command is ignored).
+- `no-comment` — wait `timeout_minutes` then assert *no* bot comment was posted (used to verify an unrecognized or ignored command, such as `@renderpr reject`, produces no response).
 
 ### Example: full `review → code change → apply` flow
 

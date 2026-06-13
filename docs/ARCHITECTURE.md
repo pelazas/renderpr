@@ -73,7 +73,7 @@ renderpr/
   - Validates HMAC-SHA256 signature using the webhook secret
   - Parses `installation.id`, `repository.full_name`, `pull_request.number` from payload
   - Starts an ECS Fargate task for PR `opened`, `synchronize`, or `@renderpr review`
-  - Dispatches `@renderpr code change`, `@renderpr apply`, and `@renderpr reject` to the existing task when one is still running
+  - Dispatches `@renderpr code change` and `@renderpr apply` to the existing task when one is still running
   - Cold-starts a task with a `COMMAND` environment variable when no running task exists
   - Returns 200 OK immediately to GitHub
 - **State:** Stateless, single-request lifespan
@@ -131,7 +131,7 @@ Server-side mocks make screenshots and the live preview consistent. A human open
 - **Responsibilities:**
   - Listens on `0.0.0.0:3001`
   - Receives authenticated JSON commands from Lambda
-  - Executes code-change/apply/reject handlers asynchronously
+  - Executes code-change/apply handlers asynchronously
   - Tracks idle timeout (15 min since last interaction)
 - **State:** In-memory `ChangeSession`, tracking user-edited files separately from runtime-generated files
 
@@ -140,7 +140,6 @@ Supported commands:
 - `@renderpr review` — start a full review task
 - `@renderpr code change: <request>` — generate and apply a temporary code edit, then post updated screenshots/live preview
 - `@renderpr apply` — commit and push only the user-edited files
-- `@renderpr reject` — revert pending user edits
 
 ### 6. Multimodal Review Agent (LLM)
 
@@ -196,10 +195,10 @@ Supported commands:
 ```
 [21] GitHub sends issue_comment.created webhook for @renderpr command
 [22] Lambda parses command
-[23] If command is change/apply/reject, Lambda looks for a running task tagged with the PR number
+[23] If command is change/apply, Lambda looks for a running task tagged with the PR number
 [24] Lambda POSTs command to http://<task-public-ip>:3001/__renderpr/command
 [25] If no running task exists, Lambda cold-starts Fargate with COMMAND env var
-[26] Command server executes code change, apply, or reject
+[26] Command server executes code change or apply
 [27] For code changes, agent applies edit, re-screenshots, and posts updated comment
 [28] For apply, agent stages only user-edited files, excluding runtime-generated mocks/config
 [29] If idle > 15 min, task exits and the live preview URL stops working
