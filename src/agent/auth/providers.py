@@ -12,7 +12,6 @@ artifact into the browser is the session builder's job. They take an optional
 import json
 import logging
 import time
-from typing import Any
 
 import httpx
 import jwt as pyjwt
@@ -143,9 +142,8 @@ def mint_firebase_id_token(
 ) -> dict:
     """Mint a Firebase custom token (RS256, service account) and exchange it for an
     ID token via the Identity Toolkit REST API."""
-    if isinstance(service_account, str):
-        service_account = json.loads(service_account)
-    custom_token = _firebase_custom_token(service_account, uid)
+    sa: dict = json.loads(service_account) if isinstance(service_account, str) else service_account
+    custom_token = _firebase_custom_token(sa, uid)
     resp = _post(
         client, timeout,
         f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key={api_key}",

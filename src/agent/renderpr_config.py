@@ -19,7 +19,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import yaml
+import yaml  # type: ignore[import-untyped]
 
 from src.agent.config import AUTH_TYPES, RENDERPR_CONFIG_NAMES
 

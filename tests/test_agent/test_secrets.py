@@ -1,5 +1,4 @@
 import boto3
-import pytest
 from moto import mock_aws
 
 from src.agent.secrets import load_repo_secrets, redact, secret_path_prefix

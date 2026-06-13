@@ -166,7 +166,7 @@ def capture_screenshots(
             browser = p.chromium.launch()
             # A synthetic auth session (forged cookies / localStorage) is loaded into
             # the context so the app treats the preview user as logged in.
-            context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()
+            context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()  # type: ignore[arg-type]
 
             mock_entries = _flatten_mocks(mocks)
             if mock_entries:
