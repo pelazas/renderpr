@@ -62,6 +62,15 @@ Ideas scoped out for RenderPR. Implemented items are kept here briefly as produc
 - Patch temporary Next config with `allowedDevOrigins` for the public IP
 - Keep internal RenderPR browsing on `localhost` for reliable screenshots
 
+### 6. Framework & Package-Manager Breadth
+
+**Problem:** Discovery was hardcoded to npm + Next.js + port 3000 and hard-failed on any other stack (install, boot/readiness, and route/mock inference all assumed it).
+
+**Approach (shipped in two phases):**
+- **Package manager** (`stack.py`): detect by lockfile (`pnpm-lock.yaml`/`yarn.lock`/`bun.lockb`/`package-lock.json`) → pick the install command and key the S3 cache as `{pm}-{lockfile-hash}`. pnpm is forced to `node-linker=hoisted` so the tar-to-S3 cache captures real files, not symlinks into the store.
+- **Boot** (`stack.py` + `main.py`): derive the dev command from the framework, pass the right host flag (Vite/Astro/SvelteKit `--host`, CRA `DANGEROUSLY_DISABLE_HOST_CHECK`, Next `HOST=0.0.0.0`), and sniff the printed `http://…:PORT` line from stdout (falling back to candidate ports) instead of polling a fixed 3000.
+- **Route/mock model** (`routing.py` + `mock_server.py`): routing is a per-framework strategy (Next app/pages router, Astro, SvelteKit, Remix; SPAs degrade to home + LLM-found routes), and the LLM prompt is framework-parameterized. Server-side mock route files are written only for Next; everything else relies on the browser-layer `page.route()` interception. The dev-origin allowlist is per-framework (Next `allowedDevOrigins`, Vite `server.allowedHosts` best-effort).
+
 ## Pending
 
 ### 1. Launch
@@ -82,23 +91,7 @@ It's not only possible — it's a well-known pattern. Here's how it would work:
 The cache is keyed by the lockfile hash, so it's safe — different dependency trees never collide. Across multiple PRs on the same repo, only the first one pays npm ci; the rest download in seconds.
 Implementation: around 20 lines in _start_dev_server + reuse the existing screenshots bucket (or a new one) + an S3 IAM permission.
 
-### 3. Framework & Package-Manager Breadth
-
-> **Status:** Phase 1 shipped (package manager + dev-command + port detection — see `src/agent/stack.py`). Phase 2 (per-framework routing + the `page.route()` mock rewrite) is still pending; the remaining work is the **Route/mock model** bullet below.
-
-**Problem:** Discovery is hardcoded to npm + Next.js + port 3000. On a non-npm or non-Next repo, RenderPR doesn't degrade — it *hard-fails* in three independent places, so every unsupported stack is silent churn:
-- **Install:** `_start_dev_server` runs a literal `npm ci`, and the S3 cache key is hashed only from `package-lock.json`. `npm ci` requires that lockfile, so pnpm/yarn repos fail before anything else and never hit the cache.
-- **Boot/readiness:** the ready-check polls `localhost:3000` for a 200, but Vite (5173), Astro (4321), and SvelteKit (5173) never answer there, so even a good install dead-ends in a 60s timeout. `dev_command` is the hardcoded string `"npm run dev"`.
-- **Route/mock model:** inference is Next App-Router-specific (`app/**/page.tsx` → URL, mocks written as `app/api/**/route.ts`). None of it maps to Vite SPAs, Remix, Astro, or SvelteKit.
-
-**Approach:**
-- **Package manager:** detect by lockfile (`pnpm-lock.yaml`/`yarn.lock`/`package-lock.json`/`bun.lockb`) → pick the install command and generalize the cache key. Watch the pnpm subtlety: its `node_modules` is symlinks into a global store, so the existing tar-to-S3 approach captures dangling links — cache the pnpm store dir or force `node-linker=hoisted`.
-- **Boot:** derive the dev script from `package.json`; detect framework from deps to pass the right host flag (Vite/Astro `--host`, CRA `DANGEROUSLY_DISABLE_HOST_CHECK`, Next `HOST=0.0.0.0`); replace the fixed-port poll by sniffing the dev server's stdout for the printed "Local: http://…:PORT" line. Note `write_next_allowed_origin` is one instance of a general "dev-origin allowlist" quirk each framework has (Vite `server.allowedHosts`, CRA host check).
-- **Route/mock model:** make routing a per-framework strategy; degrade SPAs to home + LLM-found routes. Higher-leverage: stop writing Next route-handler files and intercept mocks at the browser layer with Playwright `page.route()` — removes the Next coupling, works everywhere, and covers third-party API domains.
-
-Sequencing: package manager + dev-command/port first (unblocks the most repos), then per-framework routing + the `page.route()` mock rewrite.
-
-### 4. Auth-Gated Apps & Env/Secret Injection
+### 3. Auth-Gated Apps & Env/Secret Injection
 
 **Problem:** The dev server launches with `{**os.environ, "HOST": "0.0.0.0"}` — it injects *nothing* from the repo. No `.env` reading, no credentials. The mock system only fakes outbound calls that already exist in source. So the moment an app needs a `NEXT_PUBLIC_*`/`VITE_*` var or sits behind a login, it renders blank or throws — and the AI then confidently reviews a broken page, which is worse than not running. This is the single biggest "it doesn't work on my app" wall.
 
@@ -107,9 +100,9 @@ Sequencing: package manager + dev-command/port first (unblocks the most repos), 
 - **Auth bypass (medium):** ship Playwright `storageState` injection first — user records cookies+localStorage from a logged-in session once, loaded into the browser context before navigating (`newContext({ storageState })`). The 80/20 for skipping login walls without the app cooperating. Config-driven login recipe (visit /login, fill, submit) as fallback; provider-specific session forging (NextAuth/Clerk/Auth0) is the brittle long tail to avoid early.
 - **Real backend + seeded data (hardest):** lean into mocks rather than booting databases — user-declared fixtures in config, POST/PUT support, `page.route()` interception for external domains. "Bring-your-own staging API URL" is the escape hatch for teams that need a real backend (later, security-sensitive).
 
-### 5. Repo Config File (`.renderpr.yml`)
+### 4. Repo Config File (`.renderpr.yml`)
 
-**Problem:** There is zero repo-level configuration today — everything is auto-inferred or a constant in `config.py`. Beyond being an escape hatch, a config file is the *delivery vehicle* for features 3 and 4: env var declarations, the login recipe / storageState ref, framework and dev-command overrides, custom viewports, and explicit fixtures all need somewhere to live. Build the config loader first/alongside, not last.
+**Problem:** There is zero repo-level configuration today — everything is auto-inferred or a constant in `config.py`. Beyond being an escape hatch, a config file is the *delivery vehicle* for the framework-breadth and auth/env-injection features: env var declarations, the login recipe / storageState ref, framework and dev-command overrides, custom viewports, and explicit fixtures all need somewhere to live. Build the config loader first/alongside, not last.
 
 **Approach:**
 - Fields map to current hardcodes they override: `install`/`dev`/`build` + `packageManager` (over discovery), `port` (over `DEV_SERVER_PORT`), `framework` (over detection), `viewports` (over `config.py` `VIEWPORTS`), `routes` + per-route actions, `env`/`.env` selection, `auth`, `mocks`/`fixtures`, `paths`/`runOn`.

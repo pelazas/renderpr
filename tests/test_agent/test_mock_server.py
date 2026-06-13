@@ -1,6 +1,53 @@
 import json
 
-from src.agent.mock_server import restore_runtime_files, write_next_allowed_origin, write_server_mocks
+from src.agent.mock_server import (
+    restore_runtime_files,
+    write_dev_origin_allowlist,
+    write_next_allowed_origin,
+    write_server_mocks,
+    write_vite_allowed_hosts,
+)
+
+
+def test_write_server_mocks_skipped_for_non_next_framework(tmp_path):
+    generated = write_server_mocks(
+        tmp_path,
+        {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+        framework="vite",
+    )
+    assert generated == []
+    assert not (tmp_path / "src/app/api/users/route.ts").exists()
+
+
+def test_write_server_mocks_writes_for_next(tmp_path):
+    generated = write_server_mocks(
+        tmp_path,
+        {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
+        framework="next",
+    )
+    assert "src/app/api/users/route.ts" in generated
+
+
+def test_write_vite_allowed_hosts_patches_define_config(tmp_path):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    generated = write_vite_allowed_hosts(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "allowedHosts: ['54.1.2.3']" in content
+    assert "plugins: []" in content
+    assert "vite.config.ts" in generated
+
+
+def test_write_vite_allowed_hosts_skips_when_no_config(tmp_path):
+    assert write_vite_allowed_hosts(tmp_path, "54.1.2.3") == []
+
+
+def test_write_dev_origin_allowlist_dispatches_by_framework(tmp_path):
+    # Non-next/vite frameworks degrade to a no-op.
+    assert write_dev_origin_allowlist(tmp_path, "54.1.2.3", "sveltekit") == []
+    # Next creates a config.
+    generated = write_dev_origin_allowlist(tmp_path, "54.1.2.3", "next")
+    assert any("next.config" in g for g in generated)
 
 
 def test_write_server_mocks_creates_next_api_route(tmp_path):

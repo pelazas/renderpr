@@ -24,6 +24,7 @@ renderpr/
 │       ├── visual.py             # Playwright browser automation
 │       ├── review.py             # LLM review execution
 │       ├── stack.py              # Package-manager & framework detection (LaunchProfile)
+│       ├── routing.py            # Per-framework route inference strategies
 │       └── config.py             # System constants (timeouts, retries, viewports)
 ├── .renderpr/
 │                                 # (ephemeral screenshot output dir)

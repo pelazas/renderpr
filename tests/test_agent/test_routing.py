@@ -1,0 +1,140 @@
+import pytest
+
+from src.agent.routing import (
+    AstroStrategy,
+    NextAppRouterStrategy,
+    NextPagesRouterStrategy,
+    RemixStrategy,
+    RoutingStrategy,
+    SvelteKitStrategy,
+    get_strategy,
+)
+
+
+class TestNextAppRouter:
+    def test_page_to_route(self):
+        s = NextAppRouterStrategy()
+        assert s.file_to_route("app/page.tsx") == "/"
+        assert s.file_to_route("src/app/dashboard/page.tsx") == "/dashboard"
+        assert s.file_to_route("components/Button.tsx") is None
+
+    def test_layout_and_global(self):
+        s = NextAppRouterStrategy()
+        assert s.is_layout_file("app/dashboard/layout.tsx") == (True, "/dashboard")
+        assert s.is_global_file("app/globals.css") is True
+
+    def test_discover(self, tmp_path):
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "page.tsx").write_text("x")
+        (tmp_path / "app" / "about").mkdir()
+        (tmp_path / "app" / "about" / "page.tsx").write_text("x")
+        assert NextAppRouterStrategy().discover_all_routes(tmp_path) == ["/", "/about"]
+
+
+class TestNextPagesRouter:
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("pages/index.tsx", "/"),
+            ("src/pages/about.tsx", "/about"),
+            ("pages/blog/index.tsx", "/blog"),
+            ("pages/_app.tsx", None),
+            ("pages/api/users.ts", None),
+            ("pages/blog/[slug].tsx", None),  # dynamic, skipped
+        ],
+    )
+    def test_file_to_route(self, path, expected):
+        assert NextPagesRouterStrategy().file_to_route(path) == expected
+
+    def test_app_and_config_are_global(self):
+        s = NextPagesRouterStrategy()
+        assert s.is_global_file("pages/_app.tsx") is True
+        assert s.is_global_file("next.config.js") is True
+
+
+class TestAstro:
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("src/pages/index.astro", "/"),
+            ("src/pages/about.astro", "/about"),
+            ("src/pages/blog/index.md", "/blog"),
+            ("src/pages/[id].astro", None),
+            ("src/components/Card.astro", None),
+        ],
+    )
+    def test_file_to_route(self, path, expected):
+        assert AstroStrategy().file_to_route(path) == expected
+
+
+class TestSvelteKit:
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("src/routes/+page.svelte", "/"),
+            ("src/routes/about/+page.svelte", "/about"),
+            ("src/routes/(app)/dash/+page.svelte", "/dash"),  # route group dropped
+            ("src/routes/blog/[slug]/+page.svelte", None),  # dynamic
+        ],
+    )
+    def test_file_to_route(self, path, expected):
+        assert SvelteKitStrategy().file_to_route(path) == expected
+
+    def test_layout(self):
+        assert SvelteKitStrategy().is_layout_file("src/routes/about/+layout.svelte") == (True, "/about")
+
+
+class TestRemix:
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("app/routes/_index.tsx", "/"),
+            ("app/routes/about.tsx", "/about"),
+            ("app/routes/blog.post.tsx", "/blog/post"),
+            ("app/routes/users/route.tsx", "/users"),
+            ("app/routes/users.$id.tsx", None),  # dynamic
+        ],
+    )
+    def test_file_to_route(self, path, expected):
+        assert RemixStrategy().file_to_route(path) == expected
+
+
+class TestSpaFallback:
+    def test_yields_nothing(self, tmp_path):
+        s = RoutingStrategy()
+        assert s.file_to_route("src/App.tsx") is None
+        assert s.discover_all_routes(tmp_path) == []
+        assert s.is_page_file("src/App.tsx") is False
+
+
+class TestGetStrategy:
+    def test_next_app_when_app_dir_present(self, tmp_path):
+        (tmp_path / "app").mkdir()
+        assert get_strategy("next", tmp_path).name == "next-app"
+
+    def test_next_pages_when_only_pages_dir(self, tmp_path):
+        (tmp_path / "pages").mkdir()
+        assert get_strategy("next", tmp_path).name == "next-pages"
+
+    def test_next_defaults_to_app(self, tmp_path):
+        assert get_strategy("next", tmp_path).name == "next-app"
+
+    @pytest.mark.parametrize(
+        "framework,expected",
+        [
+            ("astro", "astro"),
+            ("sveltekit", "sveltekit"),
+            ("remix", "remix"),
+            ("vite", "spa"),
+            ("cra", "spa"),
+            ("spa", "spa"),
+            ("unknown", "spa"),
+        ],
+    )
+    def test_dispatch(self, framework, expected):
+        assert get_strategy(framework).name == expected
+
+    def test_prompt_context_has_required_keys(self):
+        for fw in ["next", "astro", "sveltekit", "remix", "vite"]:
+            ctx = get_strategy(fw).prompt_context()
+            assert {"routing_description", "route_example_file", "route_file_examples"} <= ctx.keys()
