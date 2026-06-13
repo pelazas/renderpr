@@ -34,13 +34,20 @@ Route rules:
 - A shared component change -> routes that use it — check if the list above already captures them. Only add if missing.
 - A global stylesheet or config change -> all routes — already in the list if the deterministic analyzer handled it.
 - ALWAYS include ALL routes that have changed route files (page.tsx, layout.tsx, etc.)
-- ONLY include actions if the change is inside a modal, dropdown, overlay, or toggle that is hidden by default and requires a click to reveal. Do NOT guess or assume — look at the source code for useState toggles or conditional rendering tied to a button.
-- If you include an action, derive the selector from the exact button text in the source code. For a button with text "Open", use "text=Open".
 - If uncertain about a route, include it anyway (false positive > false negative)
 - The project uses file-system based routing (Next.js App Router style)
 - Strip query parameters from routes — just return the path
 - Do NOT include routes that are API routes (route.ts, api/) in the "routes" list — those belong in "mocks".
-- Each action object: {{"type": "click" | "wait", "selector"?: "css-selector", "ms"?: number}}. If no interaction needed, actions should be an empty list.
+
+Interaction (action) rules:
+- A route's "actions" drive Playwright to reveal content that is HIDDEN by default, BEFORE screenshotting. The capture takes a baseline screenshot, then runs the actions, then captures a second "after interaction" screenshot — so a modal/dropdown introduced by the PR is actually visible in the review.
+- ONLY add a click action when the PR adds or changes content inside a modal, dialog, dropdown, popover, drawer, sheet, accordion, overlay, or toggle that is hidden by default and requires a click to reveal. Look at the source for a useState toggle (e.g. `setIsModalOpen(true)`), a `<dialog>` opened via `showModal()`, or conditional rendering tied to a trigger button. Do NOT guess — if nothing is hidden behind a click, use an empty actions list.
+- A click action MUST include ALL of these fields, or it will be discarded:
+  - "type": "click"
+  - "sourceText": the EXACT, COMPLETE visible text of the trigger element, copied verbatim from the source (e.g. "+ Add user"). Make it specific enough to match ONLY the trigger — do not shorten it, since a substring like "Add user" can also match a heading inside the revealed modal and break the click.
+  - "selector": MUST be exactly "text=<sourceText>" using that same text (e.g. "text=+ Add user"). If the trigger has no visible text, use "[aria-label='<sourceText>']" with its aria-label as the sourceText instead.
+  - "reason": a short explanation that NAMES what gets revealed using one of these words: modal, dialog, dropdown, popover, drawer, sheet, accordion, overlay, toggle, menu (e.g. "Clicking opens the add-user modal").
+- A wait action is {{"type": "wait", "ms": <integer>}}. If no interaction is needed for a route, its "actions" must be an empty list.
 
 Mock rules:
 - The pages run in an ephemeral environment with NO database or backend. Any page that fetches data from an internal API route at runtime will error (e.g. "x.map is not a function") unless that endpoint is mocked.
@@ -50,8 +57,8 @@ Mock rules:
 - Only mock endpoints you can see an actual fetch/axios call for in the provided file contents. Do not invent endpoints.
 - If there are no internal API data-fetches, use an empty object: "mocks": {{}}.
 
-Output ONLY valid JSON with this exact schema:
-{{"routes": [{{"path": "/...", "reason": "...", "actions": []}}], "mocks": {{"local": {{"/api/...": {{"body": [], "status": 200}}}}}}}}
+Output ONLY valid JSON with this exact schema (actions is usually [] — only fill it for click-to-reveal cases per the Interaction rules):
+{{"routes": [{{"path": "/...", "reason": "...", "actions": [{{"type": "click", "sourceText": "+ Add user", "selector": "text=+ Add user", "reason": "Clicking opens the add-user modal"}}]}}], "mocks": {{"local": {{"/api/...": {{"body": [], "status": 200}}}}}}}}
 
 If no additional routes are affected and nothing needs mocking, output: {{"routes": [], "mocks": {{}}}}"""
 
