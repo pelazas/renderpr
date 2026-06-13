@@ -27,9 +27,6 @@ def parse_command(text: str) -> dict | None:
     if after == "apply":
         return {"action": "apply", "query": None}
 
-    if after == "reject":
-        return {"action": "reject", "query": None}
-
     return {"action": "review", "query": None}
 
 
