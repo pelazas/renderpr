@@ -1166,3 +1166,54 @@ class TestDiscoveryIntegration:
 
         # The review is delivered by editing the placeholder comment, not a fresh post.
         assert any("## Review" in body for body in posted)
+
+
+class TestNpmCacheStore:
+    """The cache store must work for every package manager. bun/yarn/npm all
+    produced a non-fatal `tar` exit 1 (node_modules churning, e.g. Vite's dep
+    cache) which the old check=True turned into a hard 'no cache stored'."""
+
+    def _patch(self, tmp_path, monkeypatch, returncode):
+        from src.agent import main as m
+
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        (tmp_path / "node_modules").mkdir()
+        uploaded = []
+
+        class _FakeS3:
+            def upload_file(self, path, bucket, key):
+                uploaded.append(key)
+
+        monkeypatch.setattr(m.boto3, "client", lambda svc: _FakeS3())
+
+        class _Res:
+            def __init__(self, rc):
+                self.returncode = rc
+                self.stderr = "tar: file changed as we read it"
+
+        monkeypatch.setattr(m.subprocess, "run", lambda *a, **kw: _Res(returncode))
+        return m, uploaded
+
+    def test_tar_warning_exit1_still_stores(self, tmp_path, monkeypatch):
+        m, uploaded = self._patch(tmp_path, monkeypatch, 1)
+        m._try_npm_cache_store(tmp_path, "bun-abc123def456")
+        assert uploaded == ["npm-cache/bun-abc123def456.tar.gz"]
+
+    def test_tar_fatal_exit2_skips_store(self, tmp_path, monkeypatch):
+        m, uploaded = self._patch(tmp_path, monkeypatch, 2)
+        m._try_npm_cache_store(tmp_path, "yarn-abc123def456")
+        assert uploaded == []
+
+    def test_missing_node_modules_skips_store(self, tmp_path, monkeypatch):
+        from src.agent import main as m
+
+        monkeypatch.setenv("SCREENSHOT_BUCKET", "test-bucket")
+        uploaded = []
+
+        class _FakeS3:
+            def upload_file(self, path, bucket, key):
+                uploaded.append(key)
+
+        monkeypatch.setattr(m.boto3, "client", lambda svc: _FakeS3())
+        m._try_npm_cache_store(tmp_path, "npm-abc123def456")  # no node_modules
+        assert uploaded == []

@@ -180,16 +180,48 @@ def _try_npm_cache_store(install_cwd: Path, cache_key: str | None) -> None:
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     if not bucket:
         return
+    if not (install_cwd / "node_modules").is_dir():
+        logger.warning("npm cache store skipped: no node_modules in %s", install_cwd)
+        return
     key = f"{NPM_CACHE_PREFIX}/{cache_key}.tar.gz"
+    tarball = Path("/tmp") / f"{cache_key}.tar.gz"
     try:
-        tarball = Path("/tmp") / f"{cache_key}.tar.gz"
-        subprocess.run(["tar", "czf", str(tarball), "-C", str(install_cwd), "node_modules"], check=True)
+        # Archive node_modules for any package manager (npm, yarn, pnpm, bun).
+        # Exclude derived/volatile dirs (e.g. Vite's dep cache) that the dev
+        # server rewrites concurrently — they regenerate on startup and are the
+        # usual cause of "file changed as we read it" churn. tar's exit codes:
+        # 0 = ok, 1 = non-fatal warnings (changed/vanished files), 2 = fatal.
+        # bun/yarn/npm all produced exit 1 here when node_modules churned, which
+        # the old check=True turned into a hard failure (no cache stored).
+        result = subprocess.run(
+            [
+                "tar",
+                "--ignore-failed-read",
+                "--warning=no-file-changed",
+                "--exclude=node_modules/.vite",
+                "--exclude=node_modules/.cache",
+                "-czf", str(tarball),
+                "-C", str(install_cwd),
+                "node_modules",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode >= 2:
+            logger.warning(
+                "npm cache store: tar failed (exit %d) for %s: %s",
+                result.returncode, cache_key[:12], (result.stderr or "")[-500:],
+            )
+            return
+        if result.returncode == 1:
+            logger.info("npm cache store: tar reported non-fatal warnings; archive still usable")
         s3 = boto3.client("s3")
         s3.upload_file(str(tarball), bucket, key)
-        tarball.unlink()
         logger.info("npm cache stored for %s", cache_key[:12])
     except Exception:
         logger.warning("npm cache upload failed", exc_info=True)
+    finally:
+        tarball.unlink(missing_ok=True)
 
 
 _dev_server_proc: subprocess.Popen | None = None
