@@ -7,9 +7,22 @@ import pytest
 from pytest import MonkeyPatch
 
 from src.agent.main import _clone_repo, _fetch_diff, _fetch_secrets, _get_installation_token, _post_comment, _render_progress, _start_dev_server, _update_comment, run
+from src.agent.stack import LaunchProfile
 
 
 _FRONTEND_DIFF = "diff --git a/src/page.tsx b/src/page.tsx\n--- a/src/page.tsx\n+++ b/src/page.tsx\n@@ -1 +1 @@\n-old\n+new"
+
+
+def _default_profile(package_manager="npm", framework="next", install_command=None):
+    return LaunchProfile(
+        package_manager=package_manager,
+        framework=framework,
+        install_command=install_command or ["npm", "ci"],
+        dev_command=["npm", "run", "dev"],
+        dev_env={"HOST": "0.0.0.0"} if framework == "next" else {},
+        default_port=3000,
+    )
+
 
 def _successful_discovery(*a, **kw):
     return {
@@ -17,6 +30,7 @@ def _successful_discovery(*a, **kw):
         "package_json_path": "/app/repo/package.json",
         "workspace_root": None,
         "dev_command": "npm run dev",
+        "launch_profile": _default_profile(),
         "reason": None,
     }
 
@@ -93,6 +107,7 @@ def _mock_process(**attrs):
     proc = type("MockProc", (), {
         "stdout": type("MockStream", (), {"readline": lambda self: ""})(),
         "wait": lambda self, timeout=None: 0,
+        "poll": lambda self: None,
         "returncode": 0,
         "kill": lambda self: None,
         "pid": 123,
@@ -231,7 +246,7 @@ class TestStartDevServer:
         monkeypatch.setattr("os.path.exists", lambda p: False)
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_npm_ci_fails(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -243,7 +258,7 @@ class TestStartDevServer:
         monkeypatch.setattr(subprocess, "Popen", mock_popen)
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_dev_server_ready_on_first_poll(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -255,7 +270,7 @@ class TestStartDevServer:
         mock_resp = httpx.Response(200)
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
     def test_dev_server_binds_all_interfaces_but_polls_localhost(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -289,7 +304,7 @@ class TestStartDevServer:
 
         monkeypatch.setattr(httpx, "Client", MockClient)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         dev_server_call = popen_calls[1][1]
         assert dev_server_call["env"]["HOST"] == "0.0.0.0"
@@ -313,7 +328,7 @@ class TestStartDevServer:
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(fail_get))
 
         with pytest.raises(SystemExit):
-            _start_dev_server()
+            _start_dev_server(_default_profile())
 
     def test_start_dev_server_with_package_dir(self, monkeypatch):
         monkeypatch.setattr("os.path.exists", lambda p: True)
@@ -326,6 +341,7 @@ class TestStartDevServer:
         monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(mock_resp))
 
         _start_dev_server(
+            _default_profile(),
             package_dir="/app/repo/packages/web/package.json",
             install_dir="/app/repo/package.json",
         )
@@ -353,7 +369,7 @@ class _PopenSpy:
         return self.returncode
 
     def poll(self):
-        return self.returncode
+        return None
 
     def communicate(self, input=None, timeout=None):
         return ("", "")
@@ -436,7 +452,7 @@ class TestNpmCache:
     def test_cache_hit_skips_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
 
         # Create a real, valid tarball that the mock will "download"
         real_tarball = tmp_path / "real_tarball.tar.gz"
@@ -493,7 +509,7 @@ class TestNpmCache:
             def poll(self):
                 if not self._mocked:
                     return self._real.poll()
-                return 0
+                return None
             def communicate(self, input=None, timeout=None):
                 if not self._mocked:
                     return self._real.communicate(input, timeout=timeout)
@@ -510,7 +526,7 @@ class TestNpmCache:
         monkeypatch.setattr(sp_module, "Popen", PopenPassthrough)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in npm_calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 0, f"npm ci should be skipped, got {npm_ci_calls}"
@@ -520,7 +536,7 @@ class TestNpmCache:
     def test_cache_miss_runs_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
         monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3Miss())
 
         spy = _PopenSpy()
@@ -528,7 +544,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 1
@@ -536,7 +552,7 @@ class TestNpmCache:
     def test_cache_generic_error_falls_back_to_npm_ci(self, monkeypatch, tmp_path):
         _set_up_dev_server_test(monkeypatch, tmp_path)
         monkeypatch.setattr("src.agent.main.NPM_CACHE_ENABLED", True)
-        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda p: "fakehash")
+        monkeypatch.setattr("src.agent.main._npm_cache_key", lambda *a, **kw: "npm-fakehash")
         monkeypatch.setattr("boto3.client", lambda *a, **kw: _MockS3GenericError())
 
         spy = _PopenSpy()
@@ -544,7 +560,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
         assert len(npm_ci_calls) == 1
@@ -560,7 +576,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         assert len(boto3_calls) == 0, "Should not call S3 without a lockfile"
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
@@ -577,7 +593,7 @@ class TestNpmCache:
         monkeypatch.setattr(subprocess, "Popen", spy)
         _setup_health_check(monkeypatch)
 
-        _start_dev_server()
+        _start_dev_server(_default_profile())
 
         assert len(boto3_calls) == 0
         npm_ci_calls = [c for c in spy.calls if c["cmd"][:2] == ["npm", "ci"]]
@@ -590,13 +606,26 @@ class TestNpmCacheKey:
         lockfile = tmp_path / "package-lock.json"
         lockfile.write_text("test content")
         result = _npm_cache_key(tmp_path)
-        expected = hashlib.sha256(b"test content").hexdigest()
+        expected = "npm-" + hashlib.sha256(b"test content").hexdigest()
         assert result == expected
 
     def test_returns_none_if_no_lockfile(self, tmp_path):
         from src.agent.main import _npm_cache_key
         result = _npm_cache_key(tmp_path)
         assert result is None
+
+    def test_keys_on_the_pnpm_lockfile(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        (tmp_path / "pnpm-lock.yaml").write_text("test content")
+        result = _npm_cache_key(tmp_path, "pnpm")
+        expected = "pnpm-" + hashlib.sha256(b"test content").hexdigest()
+        assert result == expected
+
+    def test_returns_none_when_pm_lockfile_absent(self, tmp_path):
+        from src.agent.main import _npm_cache_key
+        (tmp_path / "package-lock.json").write_text("x")
+        # Asking for pnpm's key when only npm's lockfile exists -> no key.
+        assert _npm_cache_key(tmp_path, "pnpm") is None
 
 
 class TestNpmCacheStore:
