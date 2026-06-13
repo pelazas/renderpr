@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
@@ -37,11 +37,17 @@ def _flatten_mocks(mocks: dict | None) -> dict[str, dict]:
     return flattened
 
 
+def _url_is_login_wall(url: str) -> bool:
+    parsed_path = urlparse(url).path or ""
+    return any(parsed_path.startswith(marker) for marker in LOGIN_WALL_URL_MARKERS)
+
+
 def _screenshot_route(
     page: "Page",
     base_url: str,
     route: dict,
     screenshot_dir: Path,
+    login_signals: list | None = None,
 ) -> list[tuple[Path, str]]:
     results: list[tuple[Path, str]] = []
     path = route["path"]
@@ -59,6 +65,10 @@ def _screenshot_route(
         except TimeoutError:
             logger.warning("Navigation timeout for %s at viewport %d, skipping", path, width)
             continue
+
+        if login_signals is not None and width == VIEWPORT_ORDER[0] and _url_is_login_wall(page.url):
+            login_signals.append({"path": path, "url": page.url})
+            logger.info("Login wall detected at %s -> %s", path, page.url)
 
         try:
             ready_state = page.evaluate("document.readyState")
@@ -138,6 +148,9 @@ def capture_screenshots(
     screenshot_dir: Path | None = None,
     routes: list[dict] | None = None,
     mocks: dict | None = None,
+    storage_state: dict | None = None,
+    entry_url: str | None = None,
+    login_signals: list | None = None,
 ) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -151,7 +164,9 @@ def capture_screenshots(
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
-            context = browser.new_context()
+            # A synthetic auth session (forged cookies / localStorage) is loaded into
+            # the context so the app treats the preview user as logged in.
+            context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()
 
             mock_entries = _flatten_mocks(mocks)
             if mock_entries:
@@ -179,8 +194,17 @@ def capture_screenshots(
             page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
             page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
 
+            # Some providers (e.g. Clerk) establish the session by consuming a ticket
+            # at an entry URL before the app is browsed.
+            if entry_url:
+                try:
+                    page.goto(entry_url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+                    logger.info("Loaded auth entry URL")
+                except Exception:
+                    logger.warning("Failed to load auth entry URL", exc_info=True)
+
             for route in routes:
-                route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir)
+                route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir, login_signals)
                 results.extend(route_results)
 
             browser.close()

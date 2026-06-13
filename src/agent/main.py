@@ -379,7 +379,8 @@ def _parse_diff_summary(diff: str) -> str:
 def _capture_screenshots(
     diff: str,
     secrets: dict,
-) -> tuple[list[Path], list[tuple[str, str]]]:
+    auth_session=None,
+) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
     from src.agent.routes import build_repo_tree, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
@@ -392,7 +393,13 @@ def _capture_screenshots(
         _runtime_generated_files.update(generated)
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    results = capture_screenshots(_dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
+    login_signals: list[dict] = []
+    results = capture_screenshots(
+        _dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks,
+        storage_state=auth_session.storage_state if auth_session else None,
+        entry_url=auth_session.entry_url if auth_session else None,
+        login_signals=login_signals,
+    )
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
     pr_number = os.environ.get("PR_NUMBER", "0")
@@ -402,7 +409,7 @@ def _capture_screenshots(
         logger.warning("SCREENSHOT_BUCKET not set, skipping upload")
         pairs = []
 
-    return [p for p, _ in results], pairs
+    return [p for p, _ in results], pairs, login_signals
 
 
 def _build_screenshot_grid(pairs: list[tuple[str, str]]) -> str:
@@ -646,6 +653,11 @@ def run() -> None:
 
         logger.info("Dev server ready. Proceeding to review...")
 
+        # Build a synthetic auth session (forged/minted) to get past login walls.
+        # On forks repo_secrets is empty, so this is None and nothing is injected.
+        from src.agent.auth import build_session
+        auth_session = build_session(repo_config["auth"], repo_secrets, _dev_server_url)
+
         def do_review(use_progress: bool = False) -> None:
             from src.agent.review import ReviewError, run_review
 
@@ -654,12 +666,31 @@ def run() -> None:
 
             if pid is not None:
                 update_progress(2)
-            screenshot_paths, screenshot_urls = _capture_screenshots(diff, secrets)
+            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(diff, secrets, auth_session)
             logger.info(
                 "Captured %d screenshots: %s",
                 len(screenshot_paths),
                 ", ".join(p.name for p in screenshot_paths),
             )
+
+            # Don't review a login screen: if pages redirected to a login wall and no
+            # auth was configured, degrade with guidance instead of a bogus review.
+            if login_walls and auth_session is None:
+                walled = ", ".join(sorted({w["path"] for w in login_walls}))
+                guidance = (
+                    "## RenderPR\n\n"
+                    f"This app appears to require **login** (redirected to a login page on: {walled}).\n\n"
+                    "Configure auth in `.renderpr.yml` (and store the secret) so RenderPR can "
+                    "preview it as a signed-in user — see the `auth` block in the docs. "
+                    "Skipping the review rather than capturing a login screen."
+                )
+                if pid is not None and _update_comment(token, repo_full_name, pid, body=guidance):
+                    return
+                _post_comment(token, repo_full_name, pr_number, body=guidance)
+                return
+            if login_walls:
+                logger.warning("Login wall hit despite configured auth on: %s",
+                               [w["path"] for w in login_walls])
 
             if pid is not None:
                 update_progress(3)
