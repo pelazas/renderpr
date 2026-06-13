@@ -71,6 +71,30 @@ Ideas scoped out for RenderPR. Implemented items are kept here briefly as produc
 - **Boot** (`stack.py` + `main.py`): derive the dev command from the framework, pass the right host flag (Vite/Astro/SvelteKit `--host`, CRA `DANGEROUSLY_DISABLE_HOST_CHECK`, Next `HOST=0.0.0.0`), and sniff the printed `http://…:PORT` line from stdout (falling back to candidate ports) instead of polling a fixed 3000.
 - **Route/mock model** (`routing.py` + `mock_server.py`): routing is a per-framework strategy (Next app/pages router, Astro, SvelteKit, Remix; SPAs degrade to home + LLM-found routes), and the LLM prompt is framework-parameterized. Server-side mock route files are written only for Next; everything else relies on the browser-layer `page.route()` interception. The dev-origin allowlist is per-framework (Next `allowedDevOrigins`, Vite `server.allowedHosts` best-effort).
 
+### 7. npm Cache
+
+**Problem:** Every review re-ran a full dependency install (e.g. `npm ci` ~4–5 min) even when the lockfile was unchanged across PRs on the same repo.
+
+**Approach:**
+- Key an S3 tarball of `node_modules` by `{package-manager}-{lockfile-hash}` (in the screenshots bucket). On a hit, download + extract and skip install (~15s vs ~4–5 min); on a miss, install then upload in the background so later runs benefit.
+- Works across npm/yarn/pnpm/bun: the store tolerates `tar`'s non-fatal exit 1 (files changing mid-archive) and excludes volatile/derived dirs (e.g. Vite's `node_modules/.vite`) so concurrent dev-server churn doesn't break it. (Generalises the per-PM cache key noted in #6.)
+
+### 8. Auth-Gated Apps & Env/Secret Injection
+
+**Problem:** The dev server injected nothing from the repo, so any app needing a `NEXT_PUBLIC_*`/`VITE_*` var or sitting behind a login rendered blank/threw — and the AI confidently reviewed a broken page.
+
+**Approach:**
+- **Env injection:** read `.env.example` (and `.renderpr.yml` `env`) to learn declared vars, then inject per-repo secrets (SSM, `get_parameters_by_path`) as an ephemeral `.env.local` + dev-server env *before* boot. Injection is scoped to the app's declared vars (provider/admin secrets used only by the auth layer stay out of the app env); secrets are never injected on fork PRs and never logged.
+- **Synthetic-session auth:** mint a session for a *synthetic* user by forging from the app's own signing secret or calling the provider's admin API — NextAuth v4/v5 (JWE), generic JWT, Supabase (forge or GoTrue admin), Clerk, Firebase. OAuth (Google/GitHub/SSO) "just works" because the app/provider self-issues the minted session; the real login is never scripted. A login-wall guard degrades the progress comment with guidance when an unconfigured app still lands on a login page.
+
+### 9. Repo Config File (`.renderpr.yml`)
+
+**Problem:** There was zero repo-level configuration — everything was auto-inferred or a `config.py` constant — and no home for env/auth declarations.
+
+**Approach:**
+- Optional `.renderpr.yml`, **layered over auto-detection** (merge, not replace), so zero-config keeps working and config only overrides what's set: `env` (`from`/`vars`), `auth` (`type` + synthetic `user`).
+- Schema-validated; an invalid file surfaces through the progress comment instead of failing silently. Secret *values* always live in SSM, never in the file.
+
 ## Pending
 
 ### 1. Launch
@@ -81,36 +105,7 @@ Ideas scoped out for RenderPR. Implemented items are kept here briefly as produc
 - Tweet / X thread
 - Product Hunt launch
 
-### 2. npm Cache
-
-It's not only possible — it's a well-known pattern. Here's how it would work:
-1. Before npm ci, compute a SHA256 hash of the repo's package-lock.json
-2. Check if s3://renderpr-cache-{account}/npm/{hash}.tar.gz exists
-3. If cache hit: download the tarball (~5s) and extract it into the repo's node_modules/ — skip npm ci entirely
-4. If cache miss: run npm ci, then tar up node_modules and upload to S3 in the background (future runs benefit)
-The cache is keyed by the lockfile hash, so it's safe — different dependency trees never collide. Across multiple PRs on the same repo, only the first one pays npm ci; the rest download in seconds.
-Implementation: around 20 lines in _start_dev_server + reuse the existing screenshots bucket (or a new one) + an S3 IAM permission.
-
-### 3. Auth-Gated Apps & Env/Secret Injection
-
-**Problem:** The dev server launches with `{**os.environ, "HOST": "0.0.0.0"}` — it injects *nothing* from the repo. No `.env` reading, no credentials. The mock system only fakes outbound calls that already exist in source. So the moment an app needs a `NEXT_PUBLIC_*`/`VITE_*` var or sits behind a login, it renders blank or throws — and the AI then confidently reviews a broken page, which is worse than not running. This is the single biggest "it doesn't work on my app" wall.
-
-**Approach** (three needs, increasing difficulty, each unblocks a class of apps):
-- **Env var injection (highest ROI):** read `.env.example` to learn required vars, and inject user-provided secrets stored per-installation/repo (encrypted in SSM/Secrets Manager). Public/build-time vars must be present *before* dev/build starts. Security gate: never inject secrets on fork PRs (ties to untrusted-code isolation).
-- **Auth bypass (medium):** ship Playwright `storageState` injection first — user records cookies+localStorage from a logged-in session once, loaded into the browser context before navigating (`newContext({ storageState })`). The 80/20 for skipping login walls without the app cooperating. Config-driven login recipe (visit /login, fill, submit) as fallback; provider-specific session forging (NextAuth/Clerk/Auth0) is the brittle long tail to avoid early.
-- **Real backend + seeded data (hardest):** lean into mocks rather than booting databases — user-declared fixtures in config, POST/PUT support, `page.route()` interception for external domains. "Bring-your-own staging API URL" is the escape hatch for teams that need a real backend (later, security-sensitive).
-
-### 4. Repo Config File (`.renderpr.yml`)
-
-**Problem:** There is zero repo-level configuration today — everything is auto-inferred or a constant in `config.py`. Beyond being an escape hatch, a config file is the *delivery vehicle* for the framework-breadth and auth/env-injection features: env var declarations, the login recipe / storageState ref, framework and dev-command overrides, custom viewports, and explicit fixtures all need somewhere to live. Build the config loader first/alongside, not last.
-
-**Approach:**
-- Fields map to current hardcodes they override: `install`/`dev`/`build` + `packageManager` (over discovery), `port` (over `DEV_SERVER_PORT`), `framework` (over detection), `viewports` (over `config.py` `VIEWPORTS`), `routes` + per-route actions, `env`/`.env` selection, `auth`, `mocks`/`fixtures`, `paths`/`runOn`.
-- **Layered override, not replacement:** schema-validate, then merge over auto-detected defaults so zero-config keeps working and config only overrides what's set.
-- **Split where it's consumed:** most is read by the agent after clone, but `runOn`/`paths.ignore` ("only run when `src/**` changes") should be read in the Lambda webhook handler via the GitHub contents API *before* paying to boot a Fargate task — a direct unit-economics win.
-- **Surface errors through the progress comment:** an invalid `.renderpr.yml` edits the comment to "config error on line N" instead of failing silently. Version the schema so it can evolve.
-
-### 5. Hosted SaaS Offering
+### 2. Hosted SaaS Offering
 
 **Problem:** RenderPR is BYOC today — every user deploys the stack into their own AWS and stores secrets in their own SSM (written by a CLI, mirroring `setup-secrets.sh`). That's the right v1 for the auth/env-injection feature, but it's a high barrier for non-AWS users who'd rather pay for a managed product.
 
