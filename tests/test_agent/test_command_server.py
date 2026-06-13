@@ -16,7 +16,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=on_change,
             handle_apply_fn=lambda: {"status": "ok"},
-            handle_reject_fn=lambda: {"status": "ok"},
             host="127.0.0.1",
             port=0,
             token=b"test-token",
@@ -52,7 +51,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=on_apply,
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"test-token",
@@ -76,45 +74,10 @@ class TestCommandServer:
         assert called["apply"]
         server._httpd.shutdown()
 
-    def test_dispatch_reject_async(self):
-        called = {"reject": False}
-
-        def on_reject():
-            called["reject"] = True
-            return {"status": "ok"}
-
-        server = CommandServer(
-            handle_change_fn=lambda q: {},
-            handle_apply_fn=lambda: {},
-            handle_reject_fn=on_reject,
-            host="127.0.0.1",
-            port=0,
-            token=b"test-token",
-        )
-        server.start()
-        port = server._httpd.server_port
-
-        conn = HTTPConnection("127.0.0.1", port, timeout=5)
-        conn.request(
-            "POST",
-            "/__renderpr/command",
-            json.dumps({"command": "reject"}),
-            {"Content-Type": "application/json", "X-RenderPR-Token": "test-token"},
-        )
-        resp = conn.getresponse()
-        assert resp.status == 202
-        resp.read()
-        conn.close()
-
-        time.sleep(0.1)
-        assert called["reject"]
-        server._httpd.shutdown()
-
     def test_missing_token_returns_401(self):
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"secret-token",
@@ -139,7 +102,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"secret-token",
@@ -164,7 +126,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"",
@@ -189,7 +150,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"test-token",
@@ -214,7 +174,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
             host="127.0.0.1",
             port=0,
             token=b"test-token",
@@ -239,7 +198,6 @@ class TestCommandServer:
         server = CommandServer(
             handle_change_fn=lambda q: {},
             handle_apply_fn=lambda: {},
-            handle_reject_fn=lambda: {},
         )
         old = server._last_interaction
         time.sleep(0.01)

@@ -42,8 +42,8 @@ class TestParseCommand:
     def test_apply_command(self):
         assert parse_command("@renderpr apply") == {"action": "apply", "query": None}
 
-    def test_reject_command(self):
-        assert parse_command("@renderpr reject") == {"action": "reject", "query": None}
+    def test_reject_is_ignored(self):
+        assert parse_command("@renderpr reject") is None
 
     def test_unknown_falls_back_to_review(self):
         assert parse_command("@renderpr something random") == {"action": "review", "query": None}
