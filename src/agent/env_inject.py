@@ -1,0 +1,113 @@
+"""Inject user-provided env vars/secrets so real-config apps render.
+
+Reads `.env.example` (and/or `.renderpr.yml`'s `env` block) to learn which vars
+an app expects, then materialises the user's stored secret values two ways so
+every framework sees them:
+
+  * an ephemeral ``.env.local`` written into the frontend dir (build-time
+    ``NEXT_PUBLIC_*`` / ``VITE_*`` inlining, and frameworks that only read
+    dotenv files), and
+  * a process-env dict merged into the dev server's environment.
+
+The ``.env.local`` is tracked as runtime-generated so it is excluded from
+``@renderpr apply`` commits and cleaned up afterwards.
+"""
+import logging
+import re
+from pathlib import Path
+
+from src.agent.config import ENV_EXAMPLE_NAMES, ENV_LOCAL_FILENAME
+
+logger = logging.getLogger(__name__)
+
+_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def find_env_example(frontend_dir: Path | str, override: str | None = None) -> Path | None:
+    directory = Path(frontend_dir)
+    names = (override,) if override else ENV_EXAMPLE_NAMES
+    for name in names:
+        if not name:
+            continue
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def parse_env_keys(env_example_path: Path | str) -> list[str]:
+    """Return the variable names declared in a dotenv-style example file."""
+    keys: list[str] = []
+    try:
+        text = Path(env_example_path).read_text()
+    except OSError:
+        return keys
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        key = line.split("=", 1)[0].strip()
+        if _KEY_RE.match(key) and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def required_env_keys(frontend_dir: Path | str, config_env: dict) -> list[str]:
+    """Union of vars declared in the example file and `.renderpr.yml`'s `env.vars`."""
+    example = find_env_example(frontend_dir, config_env.get("from"))
+    keys = parse_env_keys(example) if example else []
+    for var in config_env.get("vars", []) or []:
+        if var not in keys:
+            keys.append(var)
+    return keys
+
+
+def build_injected_env(
+    frontend_dir: Path | str,
+    config_env: dict,
+    secrets: dict[str, str],
+) -> tuple[dict[str, str], list[str]]:
+    """Return ``(injected_env, missing_required)``.
+
+    Every stored secret is injected. ``missing_required`` lists declared vars that
+    have no provided value (logged as a warning; surfaced for the progress comment).
+    """
+    injected = dict(secrets)
+    required = required_env_keys(frontend_dir, config_env)
+    missing = [k for k in required if k not in injected]
+    if missing:
+        logger.warning("Declared env vars without a provided value: %s", missing)
+    if injected:
+        logger.info("Injecting %d env var(s): %s", len(injected), sorted(injected.keys()))
+    return injected, missing
+
+
+def _dotenv_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
+def write_env_local(
+    frontend_dir: Path | str,
+    injected: dict[str, str],
+    repo_dir: Path | str,
+) -> str | None:
+    """Write an ephemeral ``.env.local`` into ``frontend_dir``.
+
+    Returns its path **relative to ``repo_dir``** (for runtime-file tracking), or
+    ``None`` when there is nothing to inject. Values are double-quoted and escaped
+    so multi-line secrets (e.g. a Firebase service-account JSON) survive.
+    """
+    if not injected:
+        return None
+    frontend = Path(frontend_dir)
+    target = frontend / ENV_LOCAL_FILENAME
+    body = "".join(f"{key}={_dotenv_quote(value)}\n" for key, value in injected.items())
+    target.write_text(body)
+    rel = str(target.relative_to(repo_dir))
+    logger.info("Wrote ephemeral %s with %d var(s)", rel, len(injected))
+    return rel
