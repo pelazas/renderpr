@@ -195,6 +195,7 @@ def handler(event: dict, context: object) -> dict:
     comment_body = body.get("comment", {}).get("body", "")
     comment_author = body.get("comment", {}).get("user", {}).get("login", "")
     sender_type = body.get("sender", {}).get("type", "")
+    sender_login = body.get("sender", {}).get("login", "")
 
     if action == "created" and "@renderpr" in comment_body:
         if comment_author.endswith("[bot]") or sender_type == "Bot":
@@ -244,6 +245,13 @@ def handler(event: dict, context: object) -> dict:
     elif action not in ("opened", "synchronize"):
         logger.info("Ignoring non-trigger action: %s", action)
         return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": True})}
+
+    # Skip events caused by the bot itself (e.g. an `apply` commit pushed to the
+    # PR branch fires a `synchronize` event whose sender is renderpr[bot]).
+    # Without this, every apply would recursively trigger a fresh review.
+    if sender_login.endswith("[bot]") or sender_type == "Bot":
+        logger.info("Ignoring %s event from bot account: %s", action, sender_login or sender_type)
+        return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": "self"})}
 
     _run_fargate_task(base_env, pr_number)
     return {"statusCode": 200, "body": json.dumps({"ok": True})}

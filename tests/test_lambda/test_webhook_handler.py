@@ -205,6 +205,33 @@ def test_synchronize_action_triggers():
     assert len(tasks["taskArns"]) > 0
 
 
+def test_synchronize_from_bot_ignored():
+    """The bot's own apply commit pushes a synchronize event; it must not self-trigger a review."""
+    from src.lambda_handler.webhook_handler import handler
+
+    body = json.dumps(
+        {
+            "action": "synchronize",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "pull_request": {"number": 99},
+            "sender": {"login": "renderpr[bot]", "type": "Bot"},
+        }
+    )
+    event = {
+        "headers": {"x-hub-signature-256": _sign(body)},
+        "body": body,
+    }
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+    data = json.loads(result["body"])
+    assert data.get("ignored") == "self"
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    tasks = ecs.list_tasks(cluster=CLUSTER_ARN)
+    assert len(tasks["taskArns"]) == 0
+
+
 def test_non_trigger_action_ignored():
     from src.lambda_handler.webhook_handler import handler
 
