@@ -530,7 +530,7 @@ def _capture_screenshots(
     diff: str,
     secrets: dict,
     auth_session=None,
-) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
+) -> tuple[list[Path], list[tuple[str, str]], list[dict], bool]:
     from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
@@ -566,7 +566,7 @@ def _capture_screenshots(
         logger.warning("SCREENSHOT_BUCKET not set, skipping upload")
         pairs = []
 
-    return [p for p, _ in results], pairs, login_signals
+    return [p for p, _ in results], pairs, login_signals, bool(changed_selector)
 
 
 def _build_screenshot_grid(pairs: list[tuple[str, str]]) -> str:
@@ -832,7 +832,7 @@ def run() -> None:
 
             if pid is not None:
                 update_progress(2)
-            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(diff, secrets, auth_session)
+            screenshot_paths, screenshot_urls, login_walls, cropped = _capture_screenshots(diff, secrets, auth_session)
             logger.info(
                 "Captured %d screenshots: %s",
                 len(screenshot_paths),
@@ -866,6 +866,7 @@ def run() -> None:
                     screenshot_paths=screenshot_paths,
                     openrouter_api_key=secrets["openrouter_api_key"],
                     screenshot_urls=screenshot_urls,
+                    cropped=cropped,
                 )
             except ReviewError:
                 logger.exception("Review failed")
