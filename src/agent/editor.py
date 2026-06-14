@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -73,6 +74,49 @@ def apply_edit(edit: dict) -> bool:
     return True
 
 
+def apply_edits(edits: list[dict]) -> bool:
+    """Apply every edit atomically. If any edit fails to apply, restore all
+    touched files to their pre-edit contents and return False.
+    """
+    snapshots: dict[Path, str] = {}
+    for edit in edits:
+        fp = Path(REPO_DIR) / edit["file"]
+        if fp not in snapshots and fp.exists():
+            snapshots[fp] = fp.read_text()
+
+    for edit in edits:
+        if not apply_edit(edit):
+            for fp, original in snapshots.items():
+                fp.write_text(original)
+            return False
+    return True
+
+
+def revert_edits(edits: list[dict]) -> None:
+    for file_path in {edit["file"] for edit in edits}:
+        revert_edit({"file": file_path})
+
+
+def _screenshots_identical(
+    before: list[tuple[Path, str]],
+    after: list[tuple[Path, str]],
+) -> bool:
+    """True when the after-edit screenshots are pixel-for-pixel identical to the
+    before-edit ones (same labels, same bytes) — i.e. the edit changed nothing
+    visible. Empty input is treated as "not identical" so a capture failure never
+    masquerades as a no-op.
+    """
+    def by_label(results: list[tuple[Path, str]]) -> dict[str, str]:
+        digests: dict[str, str] = {}
+        for path, label in results:
+            digests[label] = hashlib.md5(Path(path).read_bytes()).hexdigest()
+        return digests
+
+    before_digests = by_label(before)
+    after_digests = by_label(after)
+    return bool(before_digests) and before_digests == after_digests
+
+
 def wait_for_dev_server(
     url: str,
     timeout: int | None = None,
@@ -131,20 +175,18 @@ def execute_change(
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     try:
-        edit = request_edit(query, openrouter_api_key, frontend_root)
+        change = request_edit(query, openrouter_api_key, frontend_root)
     except EditGenerationError as e:
         return {"status": "error", "message": str(e)}
 
-    if not validate_edit(edit):
-        return {"status": "error", "message": "Could not validate the generated edit."}
+    edits = change["edits"]
+    actions = change.get("actions", [])
 
-    if not apply_edit(edit):
-        return {"status": "error", "message": f"Could not apply edit to {edit['file']}."}
+    if not all(validate_edit(edit) for edit in edits):
+        return {"status": "error", "message": "Could not validate the generated edit(s)."}
 
-    if not wait_for_dev_server(dev_server_url, framework=framework):
-        revert_edit(edit)
-        return {"status": "error", "message": "The edit broke the build and was reverted. Try rephrasing your request."}
-
+    # Resolve the routes to screenshot. This is independent of whether the edits
+    # are applied, so it can be computed once and reused for the before/after pass.
     try:
         repo_tree = build_repo_tree()
         routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
@@ -152,40 +194,55 @@ def execute_change(
         routes = [{"path": "/", "actions": [], "reason": "fallback"}]
         mocks = {}
 
-    edit_actions = edit.get("actions", [])
-    if edit_actions:
-        source_path = Path(REPO_DIR) / edit["file"]
-        source_contents = {edit["file"]: source_path.read_text(errors="replace")} if source_path.exists() else {}
-        routes_with_actions = [
-            {**route, "actions": edit_actions}
-            for route in routes
-        ]
-        routes = _validate_routes(routes_with_actions, source_contents)
+    if actions:
+        source_contents = {
+            edit["file"]: (Path(REPO_DIR) / edit["file"]).read_text(errors="replace")
+            for edit in edits
+            if (Path(REPO_DIR) / edit["file"]).exists()
+        }
+        routes = _validate_routes([{**route, "actions": actions} for route in routes], source_contents)
         logger.info(
             "Using validated edit-provided actions for all routes: %s",
             [route.get("actions", []) for route in routes],
         )
 
-    edit_route = get_strategy(framework, Path(REPO_DIR)).file_to_route(edit["file"])
-    logger.info("Edit route for %s: %s", edit["file"], edit_route)
-
-    if edit_route and not any(r["path"] == edit_route for r in routes):
-        routes.append({"path": edit_route, "actions": [], "reason": "edit-target"})
-        logger.info("Added edit route %s to capture list (was missing from inferred routes)", edit_route)
+    strategy = get_strategy(framework, Path(REPO_DIR))
+    edit_route: str | None = None
+    for edit in edits:
+        route = strategy.file_to_route(edit["file"])
+        if route and not any(r["path"] == route for r in routes):
+            routes.append({"path": route, "actions": [], "reason": "edit-target"})
+            logger.info("Added edit route %s to capture list (was missing from inferred routes)", route)
+        if route and edit_route is None:
+            edit_route = route
+    logger.info("Edit route: %s (from %d edit(s))", edit_route, len(edits))
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-    results = capture_screenshots(
-        dev_server_url,
-        screenshot_dir=screenshot_dir,
-        routes=routes,
-        mocks=mocks,
-    )
-    screenshot_urls = upload_screenshots(bucket, pr_number, results) if bucket else []
+
+    # Capture the current state first so we can prove the edit actually changes
+    # something visible — a no-op edit must not be reported as a success.
+    before = capture_screenshots(dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
+
+    if not apply_edits(edits):
+        return {"status": "error", "message": "Could not apply the generated edit(s)."}
+
+    if not wait_for_dev_server(dev_server_url, framework=framework):
+        revert_edits(edits)
+        return {"status": "error", "message": "The edit broke the build and was reverted. Try rephrasing your request."}
+
+    after = capture_screenshots(dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
+
+    if _screenshots_identical(before, after):
+        revert_edits(edits)
+        logger.info("Edit produced no visible change across %d route(s); reverted", len(routes))
+        return {"status": "no_visible_change", "edits": edits, "edit_route": edit_route}
+
+    screenshot_urls = upload_screenshots(bucket, pr_number, after) if bucket else []
 
     return {
         "status": "success",
-        "edit": edit,
+        "edits": edits,
         "edit_route": edit_route,
-        "screenshot_paths": [p for p, _ in results],
+        "screenshot_paths": [p for p, _ in after],
         "screenshot_urls": screenshot_urls,
     }

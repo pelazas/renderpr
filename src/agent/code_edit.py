@@ -26,21 +26,27 @@ Respond with a JSON array of file paths, like:
 Return ONLY the JSON array, no explanation. Include 1-3 files at most."""
 
 CODE_EDIT_PROMPT = """You generate code edits for a frontend Pull Request.
-Given the user request and the full file contents below, output a JSON edit.
+Given the user request and the full file contents below, output every edit needed to fully satisfy it.
 
 RULES:
 - You may ONLY modify CSS classes, HTML structure, or text content.
 - Do NOT add or modify JavaScript/TypeScript logic, event handlers, state, imports, or API calls.
 - Target Tailwind classes where possible.
+- The user describes what they SEE — map their words to the implementation:
+  - A colour word covers the whole Tailwind family: "purple" may be `purple`, `violet`, `indigo`, or `fuchsia`; "orange" may be `orange` or `amber`. Match on the visible colour, not on the literal word.
+  - Text colour is often produced by a GRADIENT, not a `text-*` class: look for `bg-gradient-to-*` with `from-*` / `via-*` / `to-*` colour stops combined with `bg-clip-text text-transparent`. To recolour such text you MUST change EVERY gradient stop (`from-`, `via-`, AND `to-`), not just one.
+- Output ALL edits required. One visual change often needs several class edits — return one entry per class you change.
 - Output valid JSON only. No explanation, no markdown.
 
 OUTPUT FORMAT:
 {
-  "file": "relative/path/to/file.tsx",
-  "line": <line number of the change>,
-  "oldString": "<exact existing string to replace>",
-  "newString": "<replacement string>"
+  "edits": [
+    {"file": "relative/path/to/file.tsx", "line": <line number>, "oldString": "<exact existing string to replace>", "newString": "<replacement string>"}
+  ],
+  "actions": []
 }
+
+Each oldString must match the file EXACTLY (including whitespace) and be specific enough to locate — prefer a single className token (e.g. "via-indigo-700") over a long line.
 
 Optionally, if the change is inside hidden UI such as a modal, overlay, dropdown, popover, drawer, accordion, or toggle that requires a click to reveal,
 include an "actions" array only when the source contains a real interactive trigger. Use the exact trigger text and include source evidence:
@@ -197,7 +203,30 @@ def request_edit(
         except json.JSONDecodeError:
             raise EditGenerationError(f"LLM returned invalid JSON after retry: {response[:200]}")
 
-    if not isinstance(edit, dict):
-        raise EditGenerationError(f"Edit is not a dict: {edit}")
+    return _normalize_edits(edit)
 
-    return edit
+
+def _normalize_edits(parsed: object) -> dict:
+    """Coerce the LLM response into {"edits": [...], "actions": [...]}.
+
+    Accepts the canonical {"edits": [...], "actions": [...]} object, a bare list
+    of edits, or a single legacy {"file", ...} edit dict.
+    """
+    if isinstance(parsed, list):
+        edits, actions = parsed, []
+    elif isinstance(parsed, dict) and "edits" in parsed:
+        edits = parsed["edits"]
+        actions = parsed.get("actions", [])
+    elif isinstance(parsed, dict) and "file" in parsed:
+        # Legacy single-edit shape; carry any inline actions up to the top level.
+        edits = [parsed]
+        actions = parsed.get("actions", [])
+    else:
+        raise EditGenerationError(f"Unexpected edit shape: {str(parsed)[:200]}")
+
+    if not isinstance(edits, list) or not edits:
+        raise EditGenerationError(f"No edits in response: {str(parsed)[:200]}")
+    if not all(isinstance(e, dict) for e in edits):
+        raise EditGenerationError(f"Edit entries must be objects: {str(edits)[:200]}")
+
+    return {"edits": edits, "actions": actions if isinstance(actions, list) else []}

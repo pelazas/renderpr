@@ -904,9 +904,32 @@ def run() -> None:
             framework=discovery["launch_profile"].framework,
         )
 
+        if result["status"] == "no_visible_change":
+            _post_comment(
+                token=token,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                body=(
+                    "I made an edit, but it produced **no visible change** in the screenshots, "
+                    "so I reverted it. Could you point me to the specific element and the change "
+                    "you want? (e.g. _\"make the main headline orange\"_)."
+                ),
+            )
+            return result
+
+        if result["status"] == "error":
+            _post_comment(
+                token=token,
+                repo_full_name=repo_full_name,
+                pr_number=pr_number,
+                body=f"⚠️ I couldn't make that change: {result.get('message', 'unknown error')}",
+            )
+            return result
+
         if result["status"] == "success":
-            edit = result.get("edit", {})
-            change_session.add_edit(edit.get("file", ""))
+            edits = result.get("edits", [])
+            for edit in edits:
+                change_session.add_edit(edit.get("file", ""))
             edit_route = result.get("edit_route")
             screenshot_urls = result.get("screenshot_urls", [])
 

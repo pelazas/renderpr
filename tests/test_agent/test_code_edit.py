@@ -1,8 +1,39 @@
+import pytest
 
 from src.agent.code_edit import (
+    EditGenerationError,
     _build_directory_tree,
+    _normalize_edits,
     validate_edit,
 )
+
+
+class TestNormalizeEdits:
+    def test_canonical_edits_object(self):
+        parsed = {"edits": [{"file": "a.tsx", "line": 1, "oldString": "x", "newString": "y"}], "actions": []}
+        out = _normalize_edits(parsed)
+        assert out["edits"] == parsed["edits"]
+        assert out["actions"] == []
+
+    def test_bare_list_of_edits(self):
+        parsed = [{"file": "a.tsx", "line": 1, "oldString": "x", "newString": "y"}]
+        out = _normalize_edits(parsed)
+        assert out["edits"] == parsed
+        assert out["actions"] == []
+
+    def test_legacy_single_edit_with_actions(self):
+        parsed = {"file": "a.tsx", "line": 1, "oldString": "x", "newString": "y", "actions": [{"type": "click"}]}
+        out = _normalize_edits(parsed)
+        assert out["edits"] == [parsed]
+        assert out["actions"] == [{"type": "click"}]
+
+    def test_empty_edits_raises(self):
+        with pytest.raises(EditGenerationError):
+            _normalize_edits({"edits": []})
+
+    def test_unexpected_shape_raises(self):
+        with pytest.raises(EditGenerationError):
+            _normalize_edits({"nonsense": True})
 
 
 class TestBuildDirectoryTree:
