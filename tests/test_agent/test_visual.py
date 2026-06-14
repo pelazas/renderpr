@@ -618,6 +618,71 @@ class TestCaptureScreenshotsWithMocks:
         assert captured["fulfilled"]["body"] == "[]"
         assert captured["fulfilled"]["headers"]["x-renderpr-unmocked"] == "/api/orders"
 
+    def test_changed_api_path_bypasses_catch_all(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        captured = {"handler": None, "fulfilled": None, "continued": False}
+
+        class MockRequest:
+            url = "http://127.0.0.1:3000/api/orders"
+            method = "GET"
+
+        class MockRoute:
+            request = MockRequest()
+
+            def fulfill(self, **kw):
+                captured["fulfilled"] = kw
+
+            def continue_(self):
+                captured["continued"] = True
+
+        class MockPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+            def add_init_script(self, script): pass
+
+        class MockContext:
+            def route(self, pattern, handler):
+                captured["handler"] = handler
+
+            def new_page(self):
+                return MockPage()
+
+        class MockBrowser:
+            def new_context(self): return MockContext()
+            def close(self): pass
+
+        class MockPlaywright:
+            class chromium:
+                @staticmethod
+                def launch(): return MockBrowser()
+
+        class MockSyncPlaywright:
+            def __enter__(self): return MockPlaywright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: MockSyncPlaywright())
+
+        # /api/orders is a PR-changed route, so the catch-all must let it reach
+        # the real handler instead of stubbing it with [].
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "test"}],
+            changed_paths={"/api/orders"},
+        )
+
+        assert captured["handler"] is not None
+        captured["handler"](MockRoute())
+
+        assert captured["continued"] is True
+        assert captured["fulfilled"] is None
+
     def test_hydration_diagnostics_registered(self, tmp_path):
         """capture_screenshots must register a pageerror handler and
         call page.evaluate to inspect document.readyState after navigation,
