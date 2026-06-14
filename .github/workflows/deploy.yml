@@ -13,6 +13,13 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # boto3 needs a region to construct clients, and dummy creds keep moto-backed
+    # tests hermetic (never reaching real AWS). Locally these come from the dev's
+    # AWS config; CI must set them explicitly.
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
     steps:
       - uses: actions/checkout@v4
 
