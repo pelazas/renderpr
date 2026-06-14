@@ -41,6 +41,23 @@ def test_register_and_lookup_task():
     assert lookup_task("42") == "1.2.3.4"
 
 
+def test_register_stores_head_sha_in_record():
+    from src.agent.registration import register_task, lookup_task_record
+
+    register_task("42", "arn:abc", "1.2.3.4", head_sha="deadbeef")
+    record = lookup_task_record("42")
+    assert record is not None
+    assert record["head_sha"] == "deadbeef"
+    assert record["public_ip"] == "1.2.3.4"
+    assert record["task_arn"] == "arn:abc"
+
+
+def test_lookup_task_record_returns_none_when_missing():
+    from src.agent.registration import lookup_task_record
+
+    assert lookup_task_record("nope") is None
+
+
 def test_lookup_task_returns_none_when_not_registered():
     from src.agent.registration import lookup_task
 

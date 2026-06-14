@@ -49,7 +49,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
-    monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
+    monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "head_sha": "abc123", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **kw: {})
     monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
@@ -1145,7 +1145,7 @@ class TestDiscoveryIntegration:
         pkg.write_text('{"scripts": {"dev": "next dev"}}')
         monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
         monkeypatch.setattr("src.agent.main._fetch_diff", lambda *a, **kw: _FRONTEND_DIFF)
-        monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
+        monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "head_sha": "abc123", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
         monkeypatch.setattr("src.agent.command_server.CommandServer", _MockCommandServer)
         monkeypatch.setenv("RENDERPR_PUBLIC_IP", "127.0.0.1")
 

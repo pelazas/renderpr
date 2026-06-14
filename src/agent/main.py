@@ -497,6 +497,7 @@ def _fetch_pr_meta(token: str, repo_full_name: str, pr_number: str) -> dict:
     data = resp.json()
     return {
         "head_ref": data["head"]["ref"],
+        "head_sha": data["head"]["sha"],
         "is_fork": data["head"]["repo"]["fork"],
     }
 
@@ -1049,7 +1050,7 @@ Live app: http://{public_ip}:{_dev_server_port}
     server.start()
 
     if task_arn and public_ip != "localhost":
-        register_task(pr_number, task_arn, public_ip)
+        register_task(pr_number, task_arn, public_ip, head_sha=pr_meta["head_sha"])
 
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:

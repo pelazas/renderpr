@@ -18,11 +18,18 @@ def _ssm():
     return boto3.client("ssm")
 
 
-def register_task(pr_number: str, task_arn: str, public_ip: str) -> None:
-    """Write the task's identity to SSM so the webhook Lambda can find it."""
+def register_task(
+    pr_number: str, task_arn: str, public_ip: str, head_sha: str | None = None
+) -> None:
+    """Write the task's identity to SSM so the webhook Lambda can find it.
+
+    ``head_sha`` records the commit this task is reviewing so the Lambda can tell
+    a still-relevant task (same SHA → reuse) from a stale one (older SHA → replace).
+    """
     payload = {
         "task_arn": task_arn,
         "public_ip": public_ip,
+        "head_sha": head_sha,
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
@@ -70,8 +77,8 @@ def deregister_task(pr_number: str, task_arn: str | None = None) -> None:
         logger.exception("Failed to deregister task for PR #%s from SSM", pr_number)
 
 
-def lookup_task(pr_number: str) -> str | None:
-    """Read the task's public IP from SSM. Returns None if not registered."""
+def lookup_task_record(pr_number: str) -> dict | None:
+    """Read the full registration payload from SSM. Returns None if not registered."""
     try:
         resp = _ssm().get_parameter(Name=_param_name(pr_number))
     except ClientError as e:
@@ -81,12 +88,15 @@ def lookup_task(pr_number: str) -> str | None:
         return None
 
     try:
-        payload = json.loads(resp["Parameter"]["Value"])
+        return json.loads(resp["Parameter"]["Value"])
     except (json.JSONDecodeError, KeyError):
         logger.warning("Malformed SSM payload for PR #%s", pr_number)
         return None
 
-    public_ip = payload.get("public_ip")
-    if not public_ip:
+
+def lookup_task(pr_number: str) -> str | None:
+    """Read the task's public IP from SSM. Returns None if not registered."""
+    payload = lookup_task_record(pr_number)
+    if not payload:
         return None
-    return public_ip
+    return payload.get("public_ip") or None
