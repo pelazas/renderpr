@@ -216,17 +216,27 @@ def execute_change(
     pr_number: str,
     frontend_root: str | None = None,
     framework: str = "next",
+    base_routes: list[dict] | None = None,
+    base_mocks: dict | None = None,
 ) -> dict:
     from src.agent.code_edit import EditGenerationError, request_edit, validate_edit
     from src.agent.routes import build_repo_tree, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
-    try:
-        repo_tree = build_repo_tree()
-        base_routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
-    except Exception:
-        base_routes = [{"path": "/", "actions": [], "reason": "fallback"}]
-        mocks = {}
+    # Reuse the route set the initial review already inferred for this diff so the
+    # code-change run screenshots the SAME base routes (route inference is
+    # non-deterministic — LLM augment — and re-running it would drift the capture
+    # set). edit-target routes are layered on top below for off-diff edits.
+    if base_routes is not None:
+        base_routes = [dict(route) for route in base_routes]
+        mocks = base_mocks or {}
+    else:
+        try:
+            repo_tree = build_repo_tree()
+            base_routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
+        except Exception:
+            base_routes = [{"path": "/", "actions": [], "reason": "fallback"}]
+            mocks = {}
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     # Screenshot the current page once: it grounds the edit model visually and is
