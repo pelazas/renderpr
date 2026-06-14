@@ -3,34 +3,53 @@ from src.agent.editor import apply_edit, wait_for_dev_server, revert_edit
 
 
 class TestApplyEdit:
-    def test_successful_replacement(self, tmp_path):
+    def _repo(self, tmp_path, monkeypatch):
+        # The traversal guard resolves paths under code_edit.REPO_DIR, so edits
+        # must be repo-relative; point REPO_DIR at the test's tmp dir.
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+
+    def test_successful_replacement(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text('className="bg-blue-500"')
-        edit = {"file": str(file), "line": 1, "oldString": "bg-blue-500", "newString": "bg-orange-500"}
+        edit = {"file": "test.tsx", "line": 1, "oldString": "bg-blue-500", "newString": "bg-orange-500"}
         assert apply_edit(edit)
         assert file.read_text() == 'className="bg-orange-500"'
 
-    def test_file_not_found(self):
-        edit = {"file": "/nonexistent/file.tsx", "line": 1, "oldString": "x", "newString": "y"}
+    def test_file_not_found(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
+        edit = {"file": "nonexistent/file.tsx", "line": 1, "oldString": "x", "newString": "y"}
         assert not apply_edit(edit)
 
-    def test_old_string_not_found(self, tmp_path):
+    def test_rejects_path_traversal(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
+        secret = tmp_path.parent / "secret.txt"
+        secret.write_text("token=abc")
+        edit = {"file": "../secret.txt", "line": 1, "oldString": "token", "newString": "X"}
+        assert not apply_edit(edit)
+        assert secret.read_text() == "token=abc"  # untouched
+
+    def test_old_string_not_found(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("something else")
-        edit = {"file": str(file), "line": 1, "oldString": "nonexistent", "newString": "whatever"}
+        edit = {"file": "test.tsx", "line": 1, "oldString": "nonexistent", "newString": "whatever"}
         assert not apply_edit(edit)
 
-    def test_disambiguates_by_line(self, tmp_path):
+    def test_disambiguates_by_line(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("a\na\na\n")
-        edit = {"file": str(file), "line": 3, "oldString": "a", "newString": "b"}
+        edit = {"file": "test.tsx", "line": 3, "oldString": "a", "newString": "b"}
         assert apply_edit(edit)
         assert file.read_text() == "a\na\nb\n"
 
-    def test_disambiguates_to_nearest_line(self, tmp_path):
+    def test_disambiguates_to_nearest_line(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("a\na\na\n")
-        edit = {"file": str(file), "line": 2, "oldString": "a", "newString": "b"}
+        edit = {"file": "test.tsx", "line": 2, "oldString": "a", "newString": "b"}
         assert apply_edit(edit)
         assert file.read_text() == "a\nb\na\n"
 
@@ -235,27 +254,33 @@ class TestRouteSetConsistency:
 
 
 class TestApplyEdits:
-    def test_applies_all_edits(self, tmp_path):
+    def _repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+
+    def test_applies_all_edits(self, tmp_path, monkeypatch):
         from src.agent.editor import apply_edits
 
+        self._repo(tmp_path, monkeypatch)
         f = tmp_path / "page.tsx"
         f.write_text("via-indigo-700 to-violet-600")
         edits = [
-            {"file": str(f), "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
-            {"file": str(f), "line": 1, "oldString": "to-violet-600", "newString": "to-orange-600"},
+            {"file": "page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
+            {"file": "page.tsx", "line": 1, "oldString": "to-violet-600", "newString": "to-orange-600"},
         ]
         assert apply_edits(edits)
         assert f.read_text() == "via-orange-500 to-orange-600"
 
-    def test_rolls_back_when_one_edit_fails(self, tmp_path):
+    def test_rolls_back_when_one_edit_fails(self, tmp_path, monkeypatch):
         from src.agent.editor import apply_edits
 
+        self._repo(tmp_path, monkeypatch)
         f = tmp_path / "page.tsx"
         original = "via-indigo-700 to-violet-600"
         f.write_text(original)
         edits = [
-            {"file": str(f), "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
-            {"file": str(f), "line": 1, "oldString": "DOES-NOT-EXIST", "newString": "x"},
+            {"file": "page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
+            {"file": "page.tsx", "line": 1, "oldString": "DOES-NOT-EXIST", "newString": "x"},
         ]
         assert not apply_edits(edits)
         assert f.read_text() == original  # first edit was rolled back

@@ -50,6 +50,43 @@ _DEV_URL_RE = re.compile(DEV_SERVER_URL_REGEX)
 logger = logging.getLogger(__name__)
 
 
+# Env vars stripped before launching UNTRUSTED PR processes (dependency install
+# scripts and the dev server, which run arbitrary code from the pull request).
+# Removing the ECS task-role credential pointers means a malicious postinstall
+# hook or dev script cannot trivially assume the Fargate task role and read
+# secrets from SSM. The agent process itself keeps these so its own AWS calls
+# (S3 upload, task registration) still work. Defense-in-depth for finding F-1 in
+# docs/SECURITY_THREAT_MODEL.md — it does not replace removing the role/egress.
+_UNTRUSTED_ENV_DENYLIST: frozenset[str] = frozenset({
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
+    "RENDERPR_COMMAND_TOKEN",
+    "GITHUB_PARAM_NAME",
+    "OPENROUTER_PARAM_NAME",
+    "COMMAND_TOKEN_PARAM_NAME",
+})
+
+
+def _untrusted_subprocess_env(*overlays: dict[str, str]) -> dict[str, str]:
+    """Environment for an untrusted child process: the current environment with
+    task-role credential pointers and renderpr secret references stripped, then
+    each overlay merged in order (later overlays win)."""
+    env = {k: v for k, v in os.environ.items() if k not in _UNTRUSTED_ENV_DENYLIST}
+    for overlay in overlays:
+        env.update(overlay)
+    return env
+
+
 def _fetch_command_token() -> str:
     param_name = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
     ssm = boto3.client("ssm")
@@ -270,12 +307,13 @@ def _ensure_pnpm_hoisted(install_cwd: Path) -> list[str]:
     return generated
 
 
-def _run_install(install_command: list[str], install_cwd: Path) -> None:
+def _run_install(install_command: list[str], install_cwd: Path, env: dict[str, str] | None = None) -> None:
     label = " ".join(install_command)
     try:
         proc = subprocess.Popen(
             install_command,
             cwd=str(install_cwd),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -397,12 +435,16 @@ def _start_dev_server(
             logger.warning("dependency cache check failed", exc_info=True)
 
     if not cache_restored:
-        _run_install(profile.install_command, install_cwd)
+        # Dependency install runs arbitrary PR code (postinstall hooks): give it
+        # the credential-stripped env so it can't reach the task role.
+        _run_install(profile.install_command, install_cwd, env=_untrusted_subprocess_env())
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
-    # Layer precedence: ambient env, then user-provided secrets/vars, then the
-    # framework launch profile's env (host flags etc.) which must win for a correct boot.
-    dev_env = {**os.environ, **(injected_env or {}), **profile.dev_env}
+    # Layer precedence: ambient (credential-stripped) env, then user-provided
+    # secrets/vars, then the framework launch profile's env (host flags etc.)
+    # which must win for a correct boot. The dev server is untrusted PR code, so
+    # it must not inherit the task-role credential pointers (finding F-1).
+    dev_env = _untrusted_subprocess_env(injected_env or {}, profile.dev_env)
     _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env)
 
     port = _resolve_ready_port(_dev_server_proc, sniffed, profile.default_port)
@@ -417,7 +459,9 @@ def _start_dev_server(
     logger.info("Dev server ready at %s", _dev_server_url)
 
 
-def _get_installation_token(installation_id: str, app_id: str, private_key: str) -> str:
+def _get_installation_token(
+    installation_id: str, app_id: str, private_key: str, repo_full_name: str = ""
+) -> str:
     now = int(time.time())
     payload = {"iat": now, "exp": now + 600, "iss": app_id}
     jwt_token = jwt.encode(payload, private_key, algorithm="RS256")
@@ -429,9 +473,26 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
         "User-Agent": "RenderPR/1.0",
     }
 
+    # Scope the installation token to just this PR's repository and the minimal
+    # permissions RenderPR actually uses. Without a body GitHub mints a token
+    # covering every repo in the installation with the App's full permission set;
+    # scoping bounds the blast radius if the token leaks (see
+    # docs/SECURITY_THREAT_MODEL.md, finding F-3).
+    body: dict = {
+        "permissions": {
+            "contents": "write",       # clone the PR branch + push `@renderpr apply`
+            "pull_requests": "write",  # read the diff/metadata
+            "issues": "write",         # post/update the review comment
+            "metadata": "read",
+        }
+    }
+    repo_name = repo_full_name.split("/", 1)[1] if "/" in repo_full_name else ""
+    if repo_name:
+        body["repositories"] = [repo_name]
+
     for attempt in range(RETRY_MAX_ATTEMPTS):
         with httpx.Client() as client:
-            resp = client.post(url, headers=headers)
+            resp = client.post(url, headers=headers, json=body)
 
         if resp.status_code == 201:
             return resp.json()["token"]
@@ -714,12 +775,16 @@ def run() -> None:
     logger.info("PR Number: %s", pr_number)
 
     secrets = _fetch_secrets()
+    # Held in a local and handed directly to the command server below. It is
+    # deliberately NOT placed in os.environ: the untrusted dev server inherits
+    # the environment, and leaking the command token there would let PR code
+    # drive the command server (finding F-4).
     command_token = _fetch_command_token()
-    os.environ["RENDERPR_COMMAND_TOKEN"] = command_token
     token = _get_installation_token(
         installation_id=installation_id,
         app_id=secrets["app_id"],
         private_key=secrets["private_key"],
+        repo_full_name=repo_full_name,
     )
     skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
 
@@ -1079,6 +1144,7 @@ Live app: http://{public_ip}:{_dev_server_port}
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
         handle_review_fn=on_review,
+        token=command_token.encode("utf-8"),
     )
     server.start()
 
