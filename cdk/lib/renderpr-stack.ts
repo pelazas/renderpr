@@ -7,6 +7,8 @@ import * as ssm from "aws-cdk-lib/aws-ssm";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2_integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
 import { Construct } from "constructs";
 import * as path from "path";
@@ -16,6 +18,24 @@ export class RenderprStack extends cdk.Stack {
     super(scope, id, props);
 
     const appName = "renderpr";
+
+    // Cost / abuse-control knobs (tunable via `cdk deploy -c <key>=<value>`).
+    const maxConcurrentTasks = String(
+      this.node.tryGetContext("maxConcurrentTasks") ?? "5",
+    );
+    const maxTaskAgeSeconds = String(
+      this.node.tryGetContext("maxTaskAgeSeconds") ?? "1500",
+    );
+    const reaperIntervalMinutes = Number(
+      this.node.tryGetContext("reaperIntervalMinutes") ?? 5,
+    );
+    const webhookRateLimit = Number(
+      this.node.tryGetContext("webhookRateLimit") ?? 20,
+    );
+    const webhookBurstLimit = Number(
+      this.node.tryGetContext("webhookBurstLimit") ?? 40,
+    );
+    const tasksParamPrefix = `/${appName}/tasks`;
 
     // VPC: public subnets only, 1 AZ, no NAT Gateway
     const vpc = new ec2.Vpc(this, "Vpc", {
@@ -120,7 +140,7 @@ export class RenderprStack extends cdk.Stack {
 
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ssm:GetParameter"],
+        actions: ["ssm:GetParameter", "ssm:DeleteParameter"],
         resources: [githubParamArn, commandTokenParamArn, tasksParamArn],
       }),
     );
@@ -209,6 +229,16 @@ export class RenderprStack extends cdk.Stack {
       ),
     });
 
+    // Edge rate limiting: cap requests hitting the Lambda so the public webhook
+    // can't be flooded into spinning Fargate tasks. The HMAC check already drops
+    // unsigned spam, but throttling bounds invocation volume regardless.
+    const defaultStage = httpApi.defaultStage?.node
+      .defaultChild as apigwv2.CfnStage;
+    defaultStage.defaultRouteSettings = {
+      throttlingRateLimit: webhookRateLimit,
+      throttlingBurstLimit: webhookBurstLimit,
+    };
+
     // ECS Cluster
     const cluster = new ecs.Cluster(this, "FargateCluster", {
       vpc,
@@ -254,15 +284,18 @@ export class RenderprStack extends cdk.Stack {
     handler.addEnvironment("SECURITY_GROUP_ID", fargateSg.securityGroupId);
     handler.addEnvironment("GITHUB_PARAM_NAME", githubParamName);
     handler.addEnvironment("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token");
+    handler.addEnvironment("MAX_CONCURRENT_TASKS", maxConcurrentTasks);
+    handler.addEnvironment("TASKS_PARAM_PREFIX", tasksParamPrefix);
 
     // Allow Lambda to pass the Fargate roles to ECS (required by RunTask)
     fargateExecutionRole.grantPassRole(lambdaRole);
     fargateTaskRole.grantPassRole(lambdaRole);
 
-    // Grant Lambda permission to run, describe, list, and tag tasks
+    // Grant Lambda permission to run, describe, list, tag, and stop tasks
+    // (StopTask backs per-PR replace of a task reviewing a superseded commit).
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource"],
+        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource", "ecs:StopTask"],
         resources: [
           `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDef.family}*`,
           cluster.clusterArn,
@@ -292,6 +325,59 @@ export class RenderprStack extends cdk.Stack {
         resources: ["*"],
       }),
     );
+
+    // Reusable ARN for any task in this cluster.
+    const clusterTaskArn = cdk.Arn.format(
+      { service: "ecs", resource: "task", resourceName: `${cluster.clusterName}/*` },
+      this,
+    );
+
+    // --- Orphan-task reaper -------------------------------------------------
+    // Scheduled Lambda that force-stops review tasks older than the max lifetime
+    // and sweeps stale /renderpr/tasks/* registrations — the backstop for
+    // containers that never self-terminate.
+    const reaperRole = new iam.Role(this, "ReaperRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName(
+          "service-role/AWSLambdaBasicExecutionRole",
+        ),
+      ],
+    });
+
+    reaperRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:ListTasks", "ecs:DescribeTasks", "ecs:StopTask"],
+        resources: [cluster.clusterArn, clusterTaskArn],
+      }),
+    );
+    reaperRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParametersByPath", "ssm:DeleteParameter"],
+        resources: [tasksParamArn],
+      }),
+    );
+
+    const reaper = new PythonFunction(this, "ReaperHandler", {
+      entry: path.join(__dirname, "../../src/lambda_handler"),
+      index: "reaper_handler.py",
+      handler: "handler",
+      runtime: lambda.Runtime.PYTHON_3_12,
+      role: reaperRole,
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 128,
+      environment: {
+        ECS_CLUSTER_ARN: cluster.clusterArn,
+        MAX_TASK_AGE_SECONDS: maxTaskAgeSeconds,
+        TASKS_PARAM_PREFIX: tasksParamPrefix,
+      },
+    });
+
+    new events.Rule(this, "ReaperSchedule", {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(reaperIntervalMinutes)),
+      targets: [new targets.LambdaFunction(reaper)],
+      description: "Periodically reap stale RenderPR Fargate tasks",
+    });
 
     // Outputs
     new cdk.CfnOutput(this, "ApiGatewayUrl", {
