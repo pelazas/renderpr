@@ -27,7 +27,7 @@ jobs:
           pip install pytest moto
 
       - name: Run tests
-        run: python -m pytest tests/ -v 2>&1 | tail -50
+        run: python -m pytest tests/ -q
 
   deploy:
     needs: test
