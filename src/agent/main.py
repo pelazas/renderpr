@@ -531,7 +531,7 @@ def _capture_screenshots(
     secrets: dict,
     auth_session=None,
 ) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
-    from src.agent.routes import build_repo_tree, infer_routes
+    from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
     repo_tree = build_repo_tree()
@@ -542,6 +542,12 @@ def _capture_screenshots(
         generated = write_server_mocks(Path(REPO_DIR), mocks, _framework)
         _runtime_generated_files.update(generated)
 
+    # When the change is confined to one element (e.g. a navbar), crop the
+    # screenshot to it; page-wide/ambiguous changes return None -> full page.
+    changed_selector = infer_changed_region(diff, secrets["openrouter_api_key"])
+    if changed_selector:
+        logger.info("Cropping screenshots to changed region: %s", changed_selector)
+
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     login_signals: list[dict] = []
     results = capture_screenshots(
@@ -549,6 +555,7 @@ def _capture_screenshots(
         storage_state=auth_session.storage_state if auth_session else None,
         entry_url=auth_session.entry_url if auth_session else None,
         login_signals=login_signals,
+        changed_selector=changed_selector,
     )
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
