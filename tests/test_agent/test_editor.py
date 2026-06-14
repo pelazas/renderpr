@@ -205,6 +205,79 @@ class TestScreenshotsIdentical:
         assert not _screenshots_identical([], [])
 
 
+class TestSelectGroundingImages:
+    def test_prefers_desktop_baselines(self, tmp_path):
+        from src.agent.editor import _select_grounding_images
+
+        desktop = tmp_path / "d.png"
+        desktop.write_bytes(b"desktop")
+        mobile = tmp_path / "m.png"
+        mobile.write_bytes(b"mobile")
+        interacted = tmp_path / "i.png"
+        interacted.write_bytes(b"interacted")
+        results = [
+            (mobile, "Mobile XS - /"),
+            (desktop, "Desktop - /"),
+            (interacted, "Desktop - / after interaction"),
+        ]
+        assert _select_grounding_images(results) == [b"desktop"]
+
+    def test_falls_back_to_any_when_no_desktop(self, tmp_path):
+        from src.agent.editor import _select_grounding_images
+
+        mobile = tmp_path / "m.png"
+        mobile.write_bytes(b"mobile")
+        assert _select_grounding_images([(mobile, "Mobile XS - /")]) == [b"mobile"]
+
+
+class TestVisionGrounding:
+    def test_before_screenshots_passed_to_edit_model(self, tmp_path, monkeypatch):
+        from src.agent import editor
+
+        target = tmp_path / "app" / "page.tsx"
+        target.parent.mkdir(parents=True)
+        target.write_text("via-indigo-700")
+
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+
+        seen = {}
+
+        def fake_request_edit(query, api_key, frontend_root=None, images=None):
+            seen["images"] = images
+            return {
+                "edits": [{"file": "app/page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"}],
+                "actions": [],
+            }
+
+        monkeypatch.setattr("src.agent.code_edit.request_edit", fake_request_edit)
+        monkeypatch.setattr(editor, "wait_for_dev_server", lambda *a, **kw: True)
+        monkeypatch.setattr("src.agent.routes.build_repo_tree", lambda: "app/page.tsx")
+        monkeypatch.setattr(
+            "src.agent.routes.infer_routes",
+            lambda *a, **kw: ([{"path": "/", "actions": [], "reason": "test"}], {}),
+        )
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+
+        calls = {"n": 0}
+
+        def fake_capture(*a, **kw):
+            calls["n"] += 1
+            shot = tmp_path / f"shot-{calls['n']}.png"
+            shot.write_bytes(f"img-{calls['n']}".encode())
+            return [(shot, "Desktop - /")]
+
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+
+        result = editor.execute_change(
+            "make the headline orange", "sk-or-fake", "http://localhost:3000", "diff",
+            bucket="", pr_number="1",
+        )
+
+        assert result["status"] == "success"
+        assert seen["images"] == [b"img-1"]  # before-screenshot handed to the model
+
+
 class TestNoVisibleChange:
     def test_unchanged_screenshots_revert_and_report(self, tmp_path, monkeypatch):
         from src.agent import editor

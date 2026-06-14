@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import time
@@ -159,10 +160,25 @@ def find_occurrence_in_file(file_path: str, old_string: str, line_hint: int | No
     return _find_occurrence(content, old_string, line_hint)
 
 
+def _user_content(text: str, images: list[bytes] | None) -> object:
+    """Build OpenRouter user-message content. With images, returns the multimodal
+    list form (text + inline base64 PNGs) so a vision model can SEE the rendered
+    page; without, returns the plain text string.
+    """
+    if not images:
+        return text
+    content: list[dict] = [{"type": "text", "text": text}]
+    for image in images:
+        encoded = base64.b64encode(image).decode()
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{encoded}"}})
+    return content
+
+
 def request_edit(
     query: str,
     api_key: str,
     frontend_root: str | None = None,
+    images: list[bytes] | None = None,
 ) -> dict:
     root = frontend_root or ""
     tree = _build_directory_tree(root)
@@ -180,11 +196,17 @@ def request_edit(
             content = full_path.read_text()
             file_contents.append(f"--- {fp} ---\n{content}")
 
-    user_message = f"Request: {query}\n\nFiles:\n\n" + "\n\n".join(file_contents)
+    grounding = (
+        "\n\nThe attached screenshot(s) show the CURRENT rendered page. Use them to "
+        "identify exactly which element and colour the user means, then locate the "
+        "matching classes in the files below."
+        if images else ""
+    )
+    user_message = f"Request: {query}{grounding}\n\nFiles:\n\n" + "\n\n".join(file_contents)
 
-    messages = [
+    messages: list[dict] = [
         {"role": "system", "content": CODE_EDIT_PROMPT},
-        {"role": "user", "content": user_message},
+        {"role": "user", "content": _user_content(user_message, images)},
     ]
 
     response = _call_llm(messages, api_key)

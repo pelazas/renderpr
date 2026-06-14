@@ -117,6 +117,19 @@ def _screenshots_identical(
     return bool(before_digests) and before_digests == after_digests
 
 
+def _select_grounding_images(results: list[tuple[Path, str]], limit: int = 3) -> list[bytes]:
+    """Pick a few representative screenshots (preferring the Desktop baseline of
+    each route) to hand the edit model as visual grounding."""
+    chosen = [
+        Path(path).read_bytes()
+        for path, label in results
+        if "Desktop -" in label and "interaction" not in label
+    ]
+    if not chosen:
+        chosen = [Path(path).read_bytes() for path, _ in results]
+    return chosen[:limit]
+
+
 def wait_for_dev_server(
     url: str,
     timeout: int | None = None,
@@ -174,8 +187,23 @@ def execute_change(
     from src.agent.routes import build_repo_tree, infer_routes, _validate_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
+    # Resolve the routes to screenshot from the diff. Independent of the edit, so
+    # we can screenshot the current state first — both to ground the edit model
+    # visually and to serve as the "before" baseline for the no-op guard.
     try:
-        change = request_edit(query, openrouter_api_key, frontend_root)
+        repo_tree = build_repo_tree()
+        routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
+    except Exception:
+        routes = [{"path": "/", "actions": [], "reason": "fallback"}]
+        mocks = {}
+
+    screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
+    before = capture_screenshots(dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
+
+    try:
+        change = request_edit(
+            query, openrouter_api_key, frontend_root, images=_select_grounding_images(before)
+        )
     except EditGenerationError as e:
         return {"status": "error", "message": str(e)}
 
@@ -184,15 +212,6 @@ def execute_change(
 
     if not all(validate_edit(edit) for edit in edits):
         return {"status": "error", "message": "Could not validate the generated edit(s)."}
-
-    # Resolve the routes to screenshot. This is independent of whether the edits
-    # are applied, so it can be computed once and reused for the before/after pass.
-    try:
-        repo_tree = build_repo_tree()
-        routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
-    except Exception:
-        routes = [{"path": "/", "actions": [], "reason": "fallback"}]
-        mocks = {}
 
     if actions:
         source_contents = {
@@ -216,12 +235,6 @@ def execute_change(
         if route and edit_route is None:
             edit_route = route
     logger.info("Edit route: %s (from %d edit(s))", edit_route, len(edits))
-
-    screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
-
-    # Capture the current state first so we can prove the edit actually changes
-    # something visible — a no-op edit must not be reported as a success.
-    before = capture_screenshots(dev_server_url, screenshot_dir=screenshot_dir, routes=routes, mocks=mocks)
 
     if not apply_edits(edits):
         return {"status": "error", "message": "Could not apply the generated edit(s)."}

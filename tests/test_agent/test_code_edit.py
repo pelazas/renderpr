@@ -4,8 +4,22 @@ from src.agent.code_edit import (
     EditGenerationError,
     _build_directory_tree,
     _normalize_edits,
+    _user_content,
     validate_edit,
 )
+
+
+class TestUserContent:
+    def test_plain_text_without_images(self):
+        assert _user_content("hello", None) == "hello"
+        assert _user_content("hello", []) == "hello"
+
+    def test_multimodal_with_images(self):
+        content = _user_content("hello", [b"\x89PNG-fake"])
+        assert isinstance(content, list)
+        assert content[0] == {"type": "text", "text": "hello"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
 
 class TestNormalizeEdits:
