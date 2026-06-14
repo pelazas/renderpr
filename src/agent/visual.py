@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import CHANGED_REGION_MAX_AREA_FRACTION, CHANGED_REGION_PADDING_PX, LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 from src.agent.mock_server import API_FALLBACK_HEADER
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
@@ -43,12 +43,50 @@ def _url_is_login_wall(url: str) -> bool:
     return any(parsed_path.startswith(marker) for marker in LOGIN_WALL_URL_MARKERS)
 
 
+def _changed_region_clip(page: "Page", selector: str, vp_width: int, vp_height: int) -> dict | None:
+    """Return a screenshot `clip` (padded, clamped to the page) for the changed
+    element, or None to fall back to a full-page shot. None when the selector
+    doesn't resolve to exactly one visible element, or the element covers most of
+    the viewport (a page-wide change shouldn't be cropped)."""
+    try:
+        locator = page.locator(selector)
+        if locator.count() != 1:
+            logger.info("Changed-region selector %r matched != 1 element; full screenshot", selector)
+            return None
+        box = locator.bounding_box()
+    except Exception:
+        logger.warning("Changed-region selector %r failed to resolve; full screenshot", selector, exc_info=True)
+        return None
+
+    if not box or box["width"] <= 0 or box["height"] <= 0:
+        return None
+    if box["width"] * box["height"] >= CHANGED_REGION_MAX_AREA_FRACTION * vp_width * vp_height:
+        logger.info("Changed-region selector %r covers most of the viewport; full screenshot", selector)
+        return None
+
+    try:
+        page_height = float(page.evaluate("Math.max(document.documentElement.scrollHeight, document.body.scrollHeight)"))
+    except Exception:
+        page_height = box["y"] + box["height"] + CHANGED_REGION_PADDING_PX
+
+    pad = CHANGED_REGION_PADDING_PX
+    x = max(0.0, box["x"] - pad)
+    y = max(0.0, box["y"] - pad)
+    return {
+        "x": x,
+        "y": y,
+        "width": min(box["width"] + 2 * pad, vp_width - x),
+        "height": min(box["height"] + 2 * pad, page_height - y),
+    }
+
+
 def _screenshot_route(
     page: "Page",
     base_url: str,
     route: dict,
     screenshot_dir: Path,
     login_signals: list | None = None,
+    changed_selector: str | None = None,
 ) -> list[tuple[Path, str]]:
     results: list[tuple[Path, str]] = []
     path = route["path"]
@@ -82,7 +120,9 @@ def _screenshot_route(
         if actions and not has_click:
             _perform_actions(page, path, actions)
 
-        baseline = _save_screenshot(page, screenshot_dir, path, route_slug, width, "")
+        # Crop the baseline to the changed element when the change is localized.
+        clip = _changed_region_clip(page, changed_selector, width, vp["height"]) if changed_selector else None
+        baseline = _save_screenshot(page, screenshot_dir, path, route_slug, width, "", clip=clip)
         if baseline:
             results.append(baseline)
 
@@ -128,15 +168,20 @@ def _save_screenshot(
     route_slug: str,
     width: int,
     label_suffix: str,
+    clip: dict | None = None,
 ) -> tuple[Path, str] | None:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
-    label = f"{vp_label} - {path}{label_suffix}"
-    suffix = "-interacted" if label_suffix else ""
+    region = clip is not None
+    label = f"{vp_label} - {path}{label_suffix}" + (" (changed region)" if region else "")
+    suffix = "-interacted" if label_suffix else ("-region" if region else "")
     filename = screenshot_dir / f"{vp_label}-{route_slug}{suffix}-{timestamp}.png"
 
     try:
-        page.screenshot(path=str(filename), full_page=True)
+        if clip is not None:
+            page.screenshot(path=str(filename), clip=clip)  # type: ignore[arg-type]
+        else:
+            page.screenshot(path=str(filename), full_page=True)
         logger.info("Screenshot saved: %s", filename)
         return filename, label
     except Exception:
@@ -214,6 +259,7 @@ def capture_screenshots(
     storage_state: dict | None = None,
     entry_url: str | None = None,
     login_signals: list | None = None,
+    changed_selector: str | None = None,
 ) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -235,7 +281,7 @@ def capture_screenshots(
             for route in routes:
                 for attempt in range(RETRY_MAX_ATTEMPTS):
                     try:
-                        results.extend(_screenshot_route(page, dev_server_url, route, screenshot_dir, login_signals))
+                        results.extend(_screenshot_route(page, dev_server_url, route, screenshot_dir, login_signals, changed_selector))
                         break
                     except Exception:
                         logger.warning(

@@ -111,7 +111,7 @@ class TestCaptureScreenshots:
 
         calls = {"n": 0}
 
-        def flaky_route(page, base_url, route, screenshot_dir, login_signals=None):
+        def flaky_route(page, base_url, route, screenshot_dir, login_signals=None, changed_selector=None):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("Target crashed")
@@ -133,7 +133,7 @@ class TestCaptureScreenshots:
         the review is reported as failed rather than silently empty."""
         import src.agent.visual as visual_mod
 
-        def always_crash(page, base_url, route, screenshot_dir, login_signals=None):
+        def always_crash(page, base_url, route, screenshot_dir, login_signals=None, changed_selector=None):
             raise RuntimeError("Target crashed")
 
         monkeypatch.setattr(visual_mod, "_screenshot_route", always_crash)
@@ -756,3 +756,65 @@ class TestLoginWallDetection:
             login_signals=signals,
         )
         assert signals == []
+
+
+class TestChangedRegionClip:
+    def _page(self, count, box, page_height=2000):
+        class Loc:
+            def count(self): return count
+            def bounding_box(self): return box
+
+        class Pg:
+            def locator(self, sel): return Loc()
+            def evaluate(self, expr): return page_height
+
+        return Pg()
+
+    def test_clip_for_small_element(self):
+        from src.agent.visual import _changed_region_clip
+        box = {"x": 0, "y": 0, "width": 1280, "height": 60}  # navbar
+        clip = _changed_region_clip(self._page(1, box), "nav", 1280, 800)
+        assert clip == {"x": 0, "y": 0, "width": 1280, "height": 108}  # +24 top clamped, +bottom pad
+
+    def test_clip_pads_and_clamps_inner_element(self):
+        from src.agent.visual import _changed_region_clip
+        box = {"x": 100, "y": 300, "width": 200, "height": 50}
+        clip = _changed_region_clip(self._page(1, box), ".card", 1280, 800)
+        assert clip == {"x": 76, "y": 276, "width": 248, "height": 98}
+
+    def test_none_when_multiple_matches(self):
+        from src.agent.visual import _changed_region_clip
+        box = {"x": 0, "y": 0, "width": 100, "height": 50}
+        assert _changed_region_clip(self._page(2, box), "div", 1280, 800) is None
+
+    def test_none_when_element_covers_most_of_viewport(self):
+        from src.agent.visual import _changed_region_clip
+        box = {"x": 0, "y": 0, "width": 1280, "height": 700}  # ~0.87 of viewport
+        assert _changed_region_clip(self._page(1, box), "main", 1280, 800) is None
+
+    def test_none_when_no_box(self):
+        from src.agent.visual import _changed_region_clip
+        assert _changed_region_clip(self._page(1, None), "nav", 1280, 800) is None
+
+
+class TestSaveScreenshotClip:
+    def _page(self, captured):
+        class Pg:
+            def screenshot(self, path, **kw):
+                captured.update(kw)
+                Path(path).touch()
+        return Pg()
+
+    def test_uses_clip_and_labels_region(self, tmp_path):
+        from src.agent.visual import _save_screenshot
+        captured = {}
+        res = _save_screenshot(self._page(captured), tmp_path, "/", "home", 1280, "", clip={"x": 0, "y": 0, "width": 100, "height": 50})
+        assert "clip" in captured and "full_page" not in captured
+        assert res is not None and "(changed region)" in res[1]
+
+    def test_full_page_without_clip(self, tmp_path):
+        from src.agent.visual import _save_screenshot
+        captured = {}
+        res = _save_screenshot(self._page(captured), tmp_path, "/", "home", 1280, "")
+        assert captured.get("full_page") is True
+        assert res is not None and "(changed region)" not in res[1]
