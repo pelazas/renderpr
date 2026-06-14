@@ -218,8 +218,10 @@ class TestGetInstallationToken:
         perms = captured["json"]["permissions"]
         assert perms["contents"] == "write"
         assert perms["pull_requests"] == "write"
-        assert perms["issues"] == "write"
-        assert set(perms) == {"contents", "pull_requests", "issues", "metadata"}
+        # No issues:write — the App is only granted issues:read, and PR comments are
+        # covered by pull_requests:write. Requesting issues:write 422s the mint.
+        assert "issues" not in perms
+        assert set(perms) == {"contents", "pull_requests", "metadata"}
 
     def test_token_request_omits_repositories_when_unknown(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr("src.agent.main.jwt.encode", lambda *a, **kw: "fake-jwt")

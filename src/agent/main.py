@@ -481,11 +481,14 @@ def _get_installation_token(
     body: dict = {
         "permissions": {
             "contents": "write",       # clone the PR branch + push `@renderpr apply`
-            "pull_requests": "write",  # read the diff/metadata
-            "issues": "write",         # post/update the review comment
+            "pull_requests": "write",  # read the diff/metadata + post/update the PR review comment
             "metadata": "read",
         }
     }
+    # NB: the review comment lives on the PR, so it's covered by pull_requests:write
+    # (the /issues/{n}/comments endpoint on a PR). We deliberately do NOT request
+    # `issues:write`: the App is only granted `issues:read`, so requesting write makes
+    # GitHub reject the whole token mint with 422 and breaks every run.
     repo_name = repo_full_name.split("/", 1)[1] if "/" in repo_full_name else ""
     if repo_name:
         body["repositories"] = [repo_name]
