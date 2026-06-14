@@ -4,7 +4,6 @@ import os
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
@@ -331,9 +330,25 @@ def capture_screenshots(
     return results
 
 
-@lru_cache(maxsize=1)
+# Holds (domain, CloudFrontSigner) once successfully loaded. Only *successful*
+# loads are cached: a transient SSM/key-load failure must not poison the cache,
+# or every screenshot in the task would fall back to a now-private (403) S3 URL.
+_CF_SIGNER: tuple | None = None
+
+
+def _reset_cloudfront_signer_cache() -> None:
+    """Clear the cached signer (used by tests)."""
+    global _CF_SIGNER
+    _CF_SIGNER = None
+
+
 def _cloudfront_signer():
-    """Return (domain, CloudFrontSigner) loaded from env+SSM, or None when CloudFront isn't configured."""
+    """Return (domain, CloudFrontSigner) from env+SSM, or None when CloudFront
+    isn't configured or the key can't be loaded. Caches only on success so a
+    transient failure is retried on the next call."""
+    global _CF_SIGNER
+    if _CF_SIGNER is not None:
+        return _CF_SIGNER
     domain = os.environ.get("CLOUDFRONT_DOMAIN")
     key_pair_id = os.environ.get("CLOUDFRONT_KEY_PAIR_ID")
     param = os.environ.get("CLOUDFRONT_PRIVATE_KEY_PARAM")
@@ -349,7 +364,8 @@ def _cloudfront_signer():
     def rsa_signer(message: bytes) -> bytes:
         return private_key.sign(message, padding.PKCS1v15(), hashes.SHA1())  # CloudFront requires RSA-SHA1
 
-    return domain, CloudFrontSigner(key_pair_id, rsa_signer)
+    _CF_SIGNER = (domain, CloudFrontSigner(key_pair_id, rsa_signer))
+    return _CF_SIGNER
 
 
 def _screenshot_url(bucket: str, key: str) -> str:

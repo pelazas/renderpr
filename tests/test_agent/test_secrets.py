@@ -136,3 +136,18 @@ def test_scoped_client_session_policy_restricts_to_this_repo(monkeypatch):
     # Scoped to exactly this repo's path; another repo's path is not allowed.
     assert "/renderpr/secrets/999/owner/repo" in joined
     assert "/renderpr/secrets/999/owner/other-repo" not in joined
+
+
+def test_scoped_client_returns_none_on_assume_role_failure(monkeypatch):
+    monkeypatch.setenv("SECRETS_ACCESS_ROLE_ARN", "arn:aws:iam::123456789012:role/renderpr-secrets-access")
+    monkeypatch.setenv("AWS_REGION", REGION)
+
+    class FailingSts:
+        def assume_role(self, **kwargs):
+            raise Exception("AssumeRole denied")
+
+    monkeypatch.setattr(secrets_mod.boto3, "client", lambda service, *a, **k: FailingSts())
+
+    # A failed assume must degrade to None so load_repo_secrets returns {} rather
+    # than reading with the (now unprivileged) base client.
+    assert _scoped_ssm_client("999", "owner/repo") is None
