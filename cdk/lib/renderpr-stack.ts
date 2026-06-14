@@ -4,6 +4,8 @@ import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2_integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as lambda from "aws-cdk-lib/aws-lambda";
@@ -12,6 +14,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
 import { Construct } from "constructs";
 import * as path from "path";
+import * as fs from "fs";
 
 export class RenderprStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -92,8 +95,8 @@ export class RenderprStack extends cdk.Stack {
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
       bucketName: `${appName}-screenshots-${this.account}`,
-      publicReadAccess: true,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ACLS,
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       lifecycleRules: [
@@ -112,6 +115,36 @@ export class RenderprStack extends cdk.Stack {
       ],
     });
 
+    // Screenshots of private/authenticated UI must not be world-readable
+    // (threat-model F-6): the bucket is private and screenshots are served only
+    // through CloudFront with Origin Access Control + signed URLs. The signing
+    // public key is read from CDK context or a gitignored PEM that
+    // scripts/setup-cloudfront-key.sh writes (the matching private key lives in
+    // SSM). Fail loudly if neither is present so we never deploy a broken signer.
+    const cfPublicKeyPath = path.join(__dirname, "../cloudfront-public-key.pem");
+    const cfPublicKeyPem: string | undefined =
+      this.node.tryGetContext("cloudfrontPublicKey") ??
+      (fs.existsSync(cfPublicKeyPath) ? fs.readFileSync(cfPublicKeyPath, "utf8") : undefined);
+    if (!cfPublicKeyPem) {
+      throw new Error(
+        "CloudFront signing public key not found. Run scripts/setup-cloudfront-key.sh " +
+        "(writes cdk/cloudfront-public-key.pem and stores the private key in SSM) before deploying, " +
+        "or pass -c cloudfrontPublicKey=\"$(cat cloudfront-public-key.pem)\".",
+      );
+    }
+    const cfPublicKey = new cloudfront.PublicKey(this, "ScreenshotSigningKey", { encodedKey: cfPublicKeyPem });
+    const cfKeyGroup = new cloudfront.KeyGroup(this, "ScreenshotKeyGroup", { items: [cfPublicKey] });
+    const screenshotDistribution = new cloudfront.Distribution(this, "ScreenshotDistribution", {
+      comment: "RenderPR screenshots — private bucket via OAC, signed URLs only",
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(screenshotBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        trustedKeyGroups: [cfKeyGroup],
+      },
+    });
+
     // SSM parameter names (created manually via scripts/setup-secrets.sh)
     const githubParamName = `/${appName}/github-app`;
     const openrouterParamName = `/${appName}/openrouter`;
@@ -127,6 +160,12 @@ export class RenderprStack extends cdk.Stack {
     );
     const commandTokenParamArn = cdk.Arn.format(
       { service: "ssm", resource: "parameter", resourceName: `${appName}/renderpr-command-token` },
+      this,
+    );
+    // CloudFront URL-signing private key (created by scripts/setup-cloudfront-key.sh).
+    const cloudfrontKeyParamName = `/${appName}/cloudfront-private-key`;
+    const cloudfrontKeyParamArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/cloudfront-private-key` },
       this,
     );
     const tasksParamArn = cdk.Arn.format(
@@ -187,7 +226,7 @@ export class RenderprStack extends cdk.Stack {
     fargateTaskRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [githubParamArn, openrouterParamArn, commandTokenParamArn],
+        resources: [githubParamArn, openrouterParamArn, commandTokenParamArn, cloudfrontKeyParamArn],
       }),
     );
 
@@ -318,6 +357,9 @@ export class RenderprStack extends cdk.Stack {
         COMMAND_TOKEN_PARAM_NAME: "/renderpr/renderpr-command-token",
         SECRETS_ACCESS_ROLE_ARN: secretsAccessRoleArn,
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
+        CLOUDFRONT_DOMAIN: screenshotDistribution.distributionDomainName,
+        CLOUDFRONT_KEY_PAIR_ID: cfPublicKey.publicKeyId,
+        CLOUDFRONT_PRIVATE_KEY_PARAM: cloudfrontKeyParamName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
       },
@@ -477,6 +519,11 @@ export class RenderprStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ScreenshotBucketName", {
       value: screenshotBucket.bucketName,
       description: "S3 bucket for PR review screenshots",
+    });
+
+    new cdk.CfnOutput(this, "ScreenshotDistributionDomain", {
+      value: screenshotDistribution.distributionDomainName,
+      description: "CloudFront domain serving signed screenshot URLs",
     });
   }
 }
