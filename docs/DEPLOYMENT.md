@@ -110,6 +110,13 @@ These are placeholders. You'll fill in real values in step 5.
 
 ### 5. Deploy the CDK Stack
 
+Before the first deploy, create the CloudFront signing key pair (see
+[Screenshot delivery](#screenshot-delivery-cloudfront-signed-urls) below):
+
+```bash
+./scripts/setup-cloudfront-key.sh
+```
+
 ```bash
 cd cdk
 npm install
@@ -162,6 +169,28 @@ Copy the API Gateway URL from the CDK output and set it as your GitHub App's Web
 
 The live app URL uses the Fargate task's ephemeral public IP. It is expected to stop working after the task exits its idle window.
 
+## Screenshot delivery (CloudFront signed URLs)
+
+Screenshots can show private/authenticated UI, so the S3 screenshot bucket is
+**fully private** (no public read). Screenshots are served through **CloudFront
+with Origin Access Control (OAC)**, and every URL posted in a PR comment is a
+**signed URL** — only RenderPR's private key can mint a working link.
+
+Before the first `cdk deploy`, run:
+
+```bash
+./scripts/setup-cloudfront-key.sh
+```
+
+This generates an RSA-2048 key pair, stores the **private** key in SSM
+SecureString `/renderpr/cloudfront-private-key`, and writes the **public** key
+to `cdk/cloudfront-public-key.pem` (gitignored), which CDK reads at deploy to
+provision the CloudFront public key and key group. The Fargate task signs URLs
+at runtime using the private key from SSM.
+
+Signed URLs expire after 7 days, matching the bucket's screenshot retention
+lifecycle, so links stay valid for the screenshots' whole life.
+
 ## Environment Variables
 
 ### Lambda Function
@@ -190,6 +219,9 @@ The live app URL uses the Fargate task's ephemeral public IP. It is expected to 
 | `POLL_INTERVAL` | CDK context | Seconds between poll cycles |
 | `RENDERPR_COMMAND_TOKEN` | CDK context/env | Auth token for command server requests |
 | `COMMAND` | ECS env override (from Lambda) | Cold-start command to execute, if any |
+| `CLOUDFRONT_DOMAIN` | CDK (auto) | CloudFront distribution domain for signed screenshot URLs |
+| `CLOUDFRONT_KEY_PAIR_ID` | CDK (auto) | CloudFront public key ID used to sign URLs |
+| `CLOUDFRONT_PRIVATE_KEY_PARAM` | CDK (auto) | SSM parameter name holding the URL-signing private key |
 
 ### Network Ports
 
