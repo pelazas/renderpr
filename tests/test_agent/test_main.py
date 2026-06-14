@@ -135,6 +135,40 @@ def _mock_client(response):
     return MockClient()
 
 
+class TestUntrustedSubprocessEnv:
+    def test_strips_credentials_and_secret_refs(self, monkeypatch: MonkeyPatch):
+        from src.agent.main import _untrusted_subprocess_env
+
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("HOME", "/root")
+        monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/creds/abc")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIA")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "shhh")
+        monkeypatch.setenv("RENDERPR_COMMAND_TOKEN", "tok")
+        monkeypatch.setenv("GITHUB_PARAM_NAME", "/renderpr/github-app")
+
+        env = _untrusted_subprocess_env()
+
+        # Benign vars survive so the dev server still boots.
+        assert env["PATH"] == "/usr/bin"
+        assert env["HOME"] == "/root"
+        # Credential pointers and secret references are gone.
+        assert "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" not in env
+        assert "AWS_ACCESS_KEY_ID" not in env
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert "RENDERPR_COMMAND_TOKEN" not in env
+        assert "GITHUB_PARAM_NAME" not in env
+
+    def test_overlays_apply_in_order(self, monkeypatch: MonkeyPatch):
+        from src.agent.main import _untrusted_subprocess_env
+
+        monkeypatch.setenv("HOST", "127.0.0.1")
+        env = _untrusted_subprocess_env({"FOO": "1", "HOST": "x"}, {"HOST": "0.0.0.0"})
+
+        assert env["FOO"] == "1"
+        assert env["HOST"] == "0.0.0.0"  # later overlay wins over earlier and ambient
+
+
 class TestGetInstallationToken:
     def test_token_success(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr(
