@@ -75,9 +75,12 @@ renderpr/
   - Starts an ECS Fargate task for PR `opened`, `synchronize`, or `@renderpr review`
   - Dispatches `@renderpr code change` and `@renderpr apply` to the existing task when one is still running
   - Cold-starts a task with a `COMMAND` environment variable when no running task exists
+  - **Dedups per PR by reviewed SHA**: an `opened`/`synchronize` whose commit matches a still-running task is reused; one on a superseded commit stops the stale task and starts a fresh review
+  - **Caps concurrency**: net-new task starts are refused with `429` once `MAX_CONCURRENT_TASKS` (default 5) are running
   - Returns 200 OK immediately to GitHub
 - **State:** Stateless, single-request lifespan
-- **IAM:** ECS run/list/describe/tag tasks, pass task roles, describe network interfaces
+- **IAM:** ECS run/list/describe/tag/**stop** tasks, pass task roles, describe network interfaces, delete task registration params
+- **Rate limiting:** API Gateway `$default` stage throttling (default 20 rps / 40 burst) bounds invocation volume ahead of the Lambda
 - **Timeout:** 30 seconds
 
 ### 2. Execution Sandbox (Fargate)
@@ -162,6 +165,26 @@ Supported commands:
   - Creates SSM Parameter Store SecureString parameters for secrets
   - Defines IAM roles and security groups
   - Packages and deploys everything via `cdk deploy`
+
+### 8. Orphan-Task Reaper (Lambda)
+
+- **Runtime:** Python 3.12
+- **Trigger:** EventBridge schedule (default every 5 minutes)
+- **Responsibilities:**
+  - Force-stops any running review task older than `MAX_TASK_AGE_SECONDS` (default 1500s / 25 min) — the backstop for tasks that never hit the in-container idle timeout (wedged, idle-timer reset, hung dev server)
+  - Sweeps `/renderpr/tasks/*` SSM registrations whose task is no longer running, so stale entries don't accumulate or misroute command dispatch
+- **State:** Stateless, per-invocation
+- **IAM:** `ecs:ListTasks/DescribeTasks/StopTask`, `ssm:GetParametersByPath/DeleteParameter`
+
+## Cost & Abuse Controls
+
+Three independent layers bound compute spend and protect the public webhook:
+
+1. **Self-termination** — the container exits on a 15-minute idle timeout (and deregisters from SSM on both signal and idle shutdown).
+2. **Webhook guards** — per-PR SHA dedup avoids duplicate tasks from rapid force-pushes; a global concurrency cap refuses net-new starts past `MAX_CONCURRENT_TASKS`; API Gateway throttling bounds request volume into the Lambda.
+3. **Reaper** — a scheduled hard-stop for any task that outlives the max age, plus orphan SSM cleanup, so nothing bills indefinitely.
+
+All thresholds are CDK context knobs: `maxConcurrentTasks`, `maxTaskAgeSeconds`, `reaperIntervalMinutes`, `webhookRateLimit`, `webhookBurstLimit`.
 
 ## Data Flow
 
@@ -264,6 +287,9 @@ aws ssm put-parameter \
 | Secrets access failure | Log context-free error, exit with status 1 |
 | Next dev origin blocks live preview HMR | Temporary `allowedDevOrigins` patch using task public IP |
 | API/data dependency unavailable in sandbox | Temporary server-side mock API routes generated from inferred mock data |
+| Orphan task never self-terminates | Reaper force-stops tasks past `MAX_TASK_AGE_SECONDS` and clears stale SSM registrations |
+| Webhook flooded to spin tasks | API Gateway throttling + global concurrency cap (`429` past `MAX_CONCURRENT_TASKS`) |
+| Duplicate tasks from rapid force-pushes | Per-PR SHA dedup: reuse same-commit task, replace superseded-commit task |
 
 ## Key Design Decisions
 
