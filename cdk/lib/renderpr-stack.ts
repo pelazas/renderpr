@@ -133,6 +133,12 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/secrets/*` },
       this,
     );
+    // Path-root ARN (no trailing /*) — required to authorize GetParametersByPath
+    // over the /renderpr/secrets hierarchy alongside the child wildcard above.
+    const secretsParamPathArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/secrets` },
+      this,
+    );
 
     // IAM: Lambda execution role
     const lambdaRole = new iam.Role(this, "LambdaRole", {
@@ -181,10 +187,37 @@ export class RenderprStack extends cdk.Stack {
     );
 
     // Read per-repo user secrets for env/auth injection (fork PRs are gated in code).
-    fargateTaskRole.addToPolicy(
+    // The task role does NOT hold the broad secrets read directly (threat-model F-2):
+    // instead it assumes SecretsAccessRole per task with an inline session policy
+    // scoped to the current repo's path, so a task can only ever read its own repo's
+    // secrets — never another installation's or repo's.
+    const secretsAccessRoleName = `${appName}-secrets-access`;
+    const secretsAccessRoleArn = cdk.Arn.format(
+      { service: "iam", resource: "role", resourceName: secretsAccessRoleName, region: "" },
+      this,
+    );
+    const secretsAccessRole = new iam.Role(this, "SecretsAccessRole", {
+      roleName: secretsAccessRoleName,
+      assumedBy: new iam.ArnPrincipal(fargateTaskRole.roleArn),
+      description:
+        "Assumed per-task by the review container with an inline session policy " +
+        "scoped to one repo's secrets path, so the task can only read the current " +
+        "repo's secrets (threat-model F-2).",
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+    secretsAccessRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParametersByPath", "ssm:GetParameter", "ssm:GetParameters"],
-        resources: [secretsParamArn],
+        resources: [secretsParamArn, secretsParamPathArn],
+      }),
+    );
+
+    // Reference the role by a constructed ARN string (not secretsAccessRole.roleArn)
+    // to avoid a CloudFormation circular dependency between the two roles.
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["sts:AssumeRole"],
+        resources: [secretsAccessRoleArn],
       }),
     );
 
@@ -271,6 +304,7 @@ export class RenderprStack extends cdk.Stack {
         GITHUB_PARAM_NAME: githubParamName,
         OPENROUTER_PARAM_NAME: openrouterParamName,
         COMMAND_TOKEN_PARAM_NAME: "/renderpr/renderpr-command-token",
+        SECRETS_ACCESS_ROLE_ARN: secretsAccessRoleArn,
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
