@@ -192,7 +192,7 @@ def _save_screenshot(
         return None
 
 
-def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url: str | None):
+def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url: str | None, changed_paths: set[str] | None = None):
     """Launch a fresh browser + page wired with mocks, diagnostics, and auth entry.
 
     Returns (browser, page). Called on first launch and on every crash-relaunch so
@@ -204,10 +204,19 @@ def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url
     context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()  # type: ignore[arg-type]
 
     mock_entries = _flatten_mocks(mocks)
+    changed = changed_paths or set()
 
     def handle_mock_route(route):
         request = route.request
         parsed = urlparse(request.url)
+
+        # A route the PR changed is served by its real (error-guarded) handler,
+        # so let the request through instead of stubbing or mocking it — that's
+        # how a genuine break the PR introduced becomes visible in the preview.
+        if parsed.path in changed:
+            logger.info("Changed route %s -> real handler (catch-all bypassed)", parsed.path)
+            return route.continue_()
+
         mock = mock_entries.get(parsed.path)
 
         if mock is not None:
@@ -263,6 +272,7 @@ def capture_screenshots(
     entry_url: str | None = None,
     login_signals: list | None = None,
     changed_selector: str | None = None,
+    changed_paths: set[str] | None = None,
 ) -> list[tuple[Path, str]]:
     if screenshot_dir is None:
         screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
@@ -275,7 +285,7 @@ def capture_screenshots(
 
     try:
         with sync_playwright() as p:
-            browser, page = _launch_session(p, storage_state, mocks, entry_url)
+            browser, page = _launch_session(p, storage_state, mocks, entry_url, changed_paths)
 
             # A renderer can segfault mid-capture (signal 11 under SwiftShader on
             # Fargate, typically memory pressure during a full-page screenshot).
@@ -296,7 +306,7 @@ def capture_screenshots(
                         except Exception:
                             pass
                         if attempt + 1 < RETRY_MAX_ATTEMPTS:
-                            browser, page = _launch_session(p, storage_state, mocks, entry_url)
+                            browser, page = _launch_session(p, storage_state, mocks, entry_url, changed_paths)
                         else:
                             logger.error("Giving up on route %s after %d attempts", route["path"], RETRY_MAX_ATTEMPTS)
 

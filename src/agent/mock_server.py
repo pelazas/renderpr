@@ -28,30 +28,42 @@ _SERVER_MOCK_FRAMEWORKS = frozenset({"next"})
 # Header stamped on every catch-all fallback response so the in-app banner can
 # tell the user which endpoint wasn't mocked.
 API_FALLBACK_HEADER = "x-renderpr-unmocked"
+# Header stamped only when a PR-changed route's real handler threw at runtime, so
+# the review can tell a genuine break apart from a benign never-mocked endpoint.
+API_ERROR_HEADER = "x-renderpr-route-error"
 _AUTH_API_PREFIX = "api/auth"
 _ROUTE_FILE_NAMES = ("route.ts", "route.js", "route.tsx", "route.jsx")
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+# Sibling module the original handler is moved to when we wrap a changed route.
+_ORIG_MODULE_STEM = "_renderpr_orig_route"
 _BANNER_REL = "public/__renderpr-unmocked.js"
 _LAYOUT_CANDIDATES = ("src/app/layout.tsx", "src/app/layout.jsx", "src/app/layout.js")
 
-# Vanilla client script: wraps fetch, and when a response carries the fallback
-# header, shows a dismissible "this route isn't mocked" notice in the middle of
-# the page. Served statically from /public so there's nothing to escape inline.
+# Vanilla client script: wraps fetch and shows a dismissible notice in the middle
+# of the page. Two cases are distinguished: a benign never-mocked route (empty
+# data, not a bug) vs. a PR-changed route whose real handler threw at runtime
+# (flagged as a possible bug). Served statically from /public so nothing to escape.
 _BANNER_JS = """(function () {
   if (window.__renderprUnmockedInit) return;
   window.__renderprUnmockedInit = true;
   var seen = {};
+  var errored = {};
   var orig = window.fetch;
   window.fetch = function () {
     return orig.apply(this, arguments).then(function (res) {
       try {
         var p = res.headers.get("x-renderpr-unmocked");
-        if (p && !seen[p]) { seen[p] = true; render(); }
+        var err = res.headers.get("x-renderpr-route-error");
+        if (p && err && !errored[p]) { errored[p] = err; render(); }
+        else if (p && !seen[p] && !errored[p]) { seen[p] = true; render(); }
       } catch (e) {}
       return res;
     });
   };
+  function code(p) {
+    return "<code style='background:#222;padding:1px 6px;border-radius:5px;color:#fff'>" + p + "</code>";
+  }
   function render() {
-    var paths = Object.keys(seen);
     var id = "__renderpr-unmocked-banner";
     var box = document.getElementById(id);
     if (!box) {
@@ -60,16 +72,26 @@ _BANNER_JS = """(function () {
       box.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;max-width:420px;width:calc(100vw - 32px);background:#000;color:#fff;font:14px/1.5 system-ui,-apple-system,sans-serif;padding:20px 22px;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.5);border:1px solid #333";
       document.body.appendChild(box);
     }
-    var list = paths.map(function (p) {
-      return "<code style='background:#222;padding:1px 6px;border-radius:5px;color:#fff'>" + p + "</code>";
-    }).join(" ");
-    box.innerHTML =
+    var html =
       "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>" +
         "<strong style='color:#fff'>renderpr preview</strong>" +
         "<button onclick=\\"document.getElementById('" + id + "').remove()\\" style='background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1'>&times;</button>" +
-      "</div>" +
-      "<div>The route " + list + " " + (paths.length > 1 ? "aren't" : "isn't") +
-      " mocked because your PR didn't change this area. Showing empty data \\u2014 this isn't a bug in your code.</div>";
+      "</div>";
+    var errPaths = Object.keys(errored);
+    if (errPaths.length) {
+      var elist = errPaths.map(function (p) { return code(p) + " \\u2014 " + errored[p]; }).join("<br>");
+      html += "<div style='color:#ff8c8c'><strong>\\u26a0 " + (errPaths.length > 1 ? "These routes" : "This route") +
+        " errored at runtime:</strong><br>" + elist +
+        "<br><br>Your PR changed " + (errPaths.length > 1 ? "these endpoints" : "this endpoint") +
+        " and they threw \\u2014 this may be a real bug.</div>";
+    }
+    var paths = Object.keys(seen);
+    if (paths.length) {
+      if (errPaths.length) html += "<div style='height:10px'></div>";
+      html += "<div>The route " + paths.map(code).join(" ") + " " + (paths.length > 1 ? "aren't" : "isn't") +
+        " mocked because your PR didn't change this area. Showing empty data \\u2014 this isn't a bug in your code.</div>";
+    }
+    box.innerHTML = html;
   }
 })();
 """
@@ -108,11 +130,139 @@ def _fallback_route_source(api_path: str) -> str:
     )
 
 
-def write_unmocked_api_fallbacks(repo_dir: Path | str, framework: str = "next", mocks: dict | None = None) -> list[str]:
-    """Replace every unmocked `src/app/api/**/route.*` handler with a benign
-    fallback that returns `[]` plus the fallback header, so navigating to a route
-    whose data wasn't mocked renders empty instead of crashing. Auth routes and
-    explicitly-mocked endpoints are left untouched.
+def changed_api_paths(diff: str | None) -> set[str]:
+    """API paths whose Next route handler the PR added or modified.
+
+    Parsed from the diff's `+++ b/...` headers; only files matching
+    `src/app/api/**/route.*` count, and auth routes are excluded. These endpoints
+    are the ones under review, so the catch-all must NOT blindly stub them — a
+    genuine break the PR introduced should be allowed to surface.
+    """
+    paths: set[str] = set()
+    if not diff:
+        return paths
+    for line in diff.splitlines():
+        if not line.startswith("+++ "):
+            continue
+        target = line[4:].strip()
+        if target.startswith("b/"):
+            target = target[2:]
+        if target == "/dev/null":
+            continue
+        route_rel = Path(target)
+        if route_rel.name not in _ROUTE_FILE_NAMES:
+            continue
+        api_path = _route_file_to_api_path(route_rel)
+        if api_path is None or api_path.lstrip("/").startswith(_AUTH_API_PREFIX):
+            continue
+        paths.add(api_path)
+    return paths
+
+
+def _detect_handler_methods(source: str) -> list[str]:
+    """HTTP method handlers exported by a Next route module, best-effort."""
+    found: list[str] = []
+    for method in _HTTP_METHODS:
+        patterns = (
+            rf"export\s+async\s+function\s+{method}\b",
+            rf"export\s+function\s+{method}\b",
+            rf"export\s+const\s+{method}\b",
+            rf"export\s*\{{[^}}]*\b{method}\b[^}}]*\}}",
+        )
+        if any(re.search(p, source) for p in patterns):
+            found.append(method)
+    return found
+
+
+def _route_handler_wrapper_source(api_path: str, methods: list[str], is_ts: bool) -> str:
+    """Source that runs the original handler (moved to a sibling module) and falls
+    back to empty data only when it errors — a thrown exception or a 5xx response
+    (e.g. a DB-backed route that try/catches into a 500 because the preview has no
+    database). A working/changed handler still renders its real output, so genuine
+    breaks surface while environmental failures degrade gracefully with a banner."""
+    orig = "(__orig as any)" if is_ts else "__orig"
+    lines: list[str] = []
+    if is_ts:
+        lines.append("// @ts-nocheck")
+    lines += [
+        f'import * as __orig from "./{_ORIG_MODULE_STEM}";',
+        f'export * from "./{_ORIG_MODULE_STEM}";',
+        "const __renderprMsg = (e) =>",
+        '  String((e && e.message) || e || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200);',
+        "const __renderprFallback = (msg) =>",
+        "  Response.json([], {",
+        "    status: 200,",
+        "    headers: {",
+        f'      "{API_FALLBACK_HEADER}": "{api_path}",',
+        '      "' + API_ERROR_HEADER + '": msg,',
+        "    },",
+        "  });",
+        "const __renderprWrap = (fn) =>",
+        "  async (...args) => {",
+        "    try {",
+        "      const res = await fn(...args);",
+        '      if (res && typeof res.status === "number" && res.status >= 500) {',
+        f'        console.error("[renderpr] handler for {api_path} returned status " + res.status);',
+        '        return __renderprFallback("HTTP " + res.status);',
+        "      }",
+        "      return res;",
+        "    } catch (err) {",
+        f'      console.error("[renderpr] handler for {api_path} threw:", err);',
+        "      return __renderprFallback(__renderprMsg(err));",
+        "    }",
+        "  };",
+    ]
+    for method in methods:
+        lines.append(f"export const {method} = __renderprWrap({orig}.{method});")
+    return "\n".join(lines) + "\n"
+
+
+def _blind_stub_route(repo_path: Path, route_file: Path, route_rel: Path, api_path: str) -> list[str]:
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    route_file.write_text(_fallback_route_source(api_path))
+    generated.append(str(route_rel))
+    return generated
+
+
+def _wrap_changed_route(repo_path: Path, route_file: Path, route_rel: Path, api_path: str) -> list[str]:
+    """Guard a PR-changed route instead of stubbing it: move the real handler to
+    a sibling module and replace the route with a wrapper that runs it, falling
+    back to empty data only on a thrown exception (logged + error header)."""
+    source = route_file.read_text()
+    methods = _detect_handler_methods(source)
+    if not methods:
+        logger.info("Changed route %s has no detectable handlers; blind-stubbing", api_path)
+        return _blind_stub_route(repo_path, route_file, route_rel, api_path)
+
+    orig_module = route_file.with_name(f"{_ORIG_MODULE_STEM}{route_file.suffix}")
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    orig_module.write_text(source)
+    generated.append(str(orig_module.relative_to(repo_path)))
+    route_file.write_text(_route_handler_wrapper_source(api_path, methods, route_file.suffix in (".ts", ".tsx")))
+    generated.append(str(route_rel))
+    logger.info("Changed route %s wrapped (methods: %s); real handler runs with an error guard", api_path, ",".join(methods))
+    return generated
+
+
+def write_unmocked_api_fallbacks(
+    repo_dir: Path | str,
+    framework: str = "next",
+    mocks: dict | None = None,
+    diff: str | None = None,
+) -> list[str]:
+    """Make every unmocked `src/app/api/**/route.*` handler degrade gracefully so
+    navigating to a route whose data wasn't mocked renders empty instead of
+    crashing. Auth routes and explicitly-mocked endpoints are left untouched.
+
+    Routes the PR changed (per `diff`) are *wrapped* rather than blind-stubbed:
+    their real handler still runs, so a genuine break surfaces, and only a thrown
+    exception degrades to empty data. Untouched routes get the benign `[]` stub.
     """
     if framework not in _SERVER_MOCK_FRAMEWORKS:
         return []
@@ -123,6 +273,7 @@ def write_unmocked_api_fallbacks(repo_dir: Path | str, framework: str = "next", 
         return []
 
     explicit = _explicit_mock_paths(mocks)
+    changed = changed_api_paths(diff)
     generated: list[str] = []
 
     for route_file in sorted(api_dir.rglob("route.*")):
@@ -133,12 +284,11 @@ def write_unmocked_api_fallbacks(repo_dir: Path | str, framework: str = "next", 
         if api_path is None or api_path.lstrip("/").startswith(_AUTH_API_PREFIX) or api_path in explicit:
             continue
 
-        backup = _backup_file(route_file)
-        if backup is not None:
-            generated.append(str(backup.relative_to(repo_path)))
-        route_file.write_text(_fallback_route_source(api_path))
-        generated.append(str(route_rel))
-        logger.info("Unmocked API fallback written for %s", api_path)
+        if api_path in changed:
+            generated.extend(_wrap_changed_route(repo_path, route_file, route_rel, api_path))
+        else:
+            generated.extend(_blind_stub_route(repo_path, route_file, route_rel, api_path))
+            logger.info("Unmocked API fallback written for %s", api_path)
 
     return generated
 
@@ -200,7 +350,7 @@ def _mock_route_path(api_path: str) -> Path | None:
     return Path("src/app") / Path(*parts) / "route.ts"
 
 
-def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str = "next") -> list[str]:
+def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str = "next", diff: str | None = None) -> list[str]:
     if not mocks:
         return []
     if framework not in _SERVER_MOCK_FRAMEWORKS:
@@ -210,6 +360,7 @@ def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str 
         return []
 
     repo_path = Path(repo_dir)
+    changed = changed_api_paths(diff)
     generated: list[str] = []
 
     for endpoints in mocks.values():
@@ -217,6 +368,11 @@ def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str 
             continue
         for api_path, mock_data in endpoints.items():
             if not isinstance(api_path, str) or not isinstance(mock_data, dict) or "body" not in mock_data:
+                continue
+            if api_path in changed:
+                # The PR changed this route; let its real (wrapped) handler run
+                # rather than masking it with a synthetic mock body.
+                logger.info("Skipping server mock for changed route %s; real handler runs", api_path)
                 continue
             route_rel = _mock_route_path(api_path)
             if route_rel is None:

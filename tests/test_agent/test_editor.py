@@ -3,34 +3,53 @@ from src.agent.editor import apply_edit, wait_for_dev_server, revert_edit
 
 
 class TestApplyEdit:
-    def test_successful_replacement(self, tmp_path):
+    def _repo(self, tmp_path, monkeypatch):
+        # The traversal guard resolves paths under code_edit.REPO_DIR, so edits
+        # must be repo-relative; point REPO_DIR at the test's tmp dir.
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+
+    def test_successful_replacement(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text('className="bg-blue-500"')
-        edit = {"file": str(file), "line": 1, "oldString": "bg-blue-500", "newString": "bg-orange-500"}
+        edit = {"file": "test.tsx", "line": 1, "oldString": "bg-blue-500", "newString": "bg-orange-500"}
         assert apply_edit(edit)
         assert file.read_text() == 'className="bg-orange-500"'
 
-    def test_file_not_found(self):
-        edit = {"file": "/nonexistent/file.tsx", "line": 1, "oldString": "x", "newString": "y"}
+    def test_file_not_found(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
+        edit = {"file": "nonexistent/file.tsx", "line": 1, "oldString": "x", "newString": "y"}
         assert not apply_edit(edit)
 
-    def test_old_string_not_found(self, tmp_path):
+    def test_rejects_path_traversal(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
+        secret = tmp_path.parent / "secret.txt"
+        secret.write_text("token=abc")
+        edit = {"file": "../secret.txt", "line": 1, "oldString": "token", "newString": "X"}
+        assert not apply_edit(edit)
+        assert secret.read_text() == "token=abc"  # untouched
+
+    def test_old_string_not_found(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("something else")
-        edit = {"file": str(file), "line": 1, "oldString": "nonexistent", "newString": "whatever"}
+        edit = {"file": "test.tsx", "line": 1, "oldString": "nonexistent", "newString": "whatever"}
         assert not apply_edit(edit)
 
-    def test_disambiguates_by_line(self, tmp_path):
+    def test_disambiguates_by_line(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("a\na\na\n")
-        edit = {"file": str(file), "line": 3, "oldString": "a", "newString": "b"}
+        edit = {"file": "test.tsx", "line": 3, "oldString": "a", "newString": "b"}
         assert apply_edit(edit)
         assert file.read_text() == "a\na\nb\n"
 
-    def test_disambiguates_to_nearest_line(self, tmp_path):
+    def test_disambiguates_to_nearest_line(self, tmp_path, monkeypatch):
+        self._repo(tmp_path, monkeypatch)
         file = tmp_path / "test.tsx"
         file.write_text("a\na\na\n")
-        edit = {"file": str(file), "line": 2, "oldString": "a", "newString": "b"}
+        edit = {"file": "test.tsx", "line": 2, "oldString": "a", "newString": "b"}
         assert apply_edit(edit)
         assert file.read_text() == "a\nb\na\n"
 
@@ -151,28 +170,117 @@ class TestRunEditPreview:
         assert captured["routes"] == [{"path": "/users", "actions": [], "reason": "test"}]
 
 
+class TestRouteSetConsistency:
+    """Regression: a code-change run must screenshot the SAME route set the
+    initial review used for a given diff. The review infers routes once and
+    hands that set to execute_change as base_routes; the run must reuse it
+    verbatim (no re-inference, which is non-deterministic) and only ever add
+    edit-target routes for files the edit touched but the diff didn't cover.
+
+    The original bug: the code-change run re-inferred routes and screenshotted
+    e.g. /users when the review never did, so the two capture sets diverged.
+    """
+
+    def _run(self, tmp_path, monkeypatch, base_routes, edit_file, edit_route_dir):
+        from src.agent import editor
+
+        target = tmp_path / edit_route_dir / "page.tsx"
+        target.parent.mkdir(parents=True)
+        target.write_text("<td>Admin</td>")
+
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr(
+            "src.agent.code_edit.request_edit",
+            lambda *a, **kw: {
+                "edits": [{"file": edit_file, "line": 1, "oldString": "Admin", "newString": "Administrator"}],
+                "actions": [],
+            },
+        )
+        monkeypatch.setattr(editor, "wait_for_dev_server", lambda *a, **kw: True)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+
+        # If execute_change ever re-infers routes, the capture set could drift
+        # from the review's — so make any inference attempt fail the test loudly.
+        def _must_not_infer(*a, **kw):
+            raise AssertionError("execute_change re-inferred routes instead of reusing base_routes")
+
+        monkeypatch.setattr("src.agent.routes.infer_routes", _must_not_infer)
+
+        captured: dict = {}
+        calls = {"n": 0}
+
+        def fake_capture_screenshots(*a, **kw):
+            captured["routes"] = kw["routes"]
+            calls["n"] += 1  # distinct bytes per call => before/after differ
+            return [(tmp_path / f"shot-{calls['n']}.png", "Desktop - /x")]
+
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture_screenshots)
+        for n in (1, 2):
+            (tmp_path / f"shot-{n}.png").write_bytes(str(n).encode())
+
+        result = editor.execute_change(
+            "change role text", "sk-or-fake", "http://localhost:3000", "diff",
+            bucket="", pr_number="1", base_routes=base_routes,
+        )
+        return result, captured["routes"]
+
+    def test_reuses_review_base_set_and_adds_only_edit_target(self, tmp_path, monkeypatch):
+        # Review inferred /dashboard for this diff; the edit touches /users.
+        review_routes = [{"path": "/dashboard", "actions": [], "reason": "deterministic"}]
+        result, captured = self._run(
+            tmp_path, monkeypatch, review_routes, "app/users/page.tsx", "app/users"
+        )
+
+        assert result["status"] == "success"
+        captured_paths = [r["path"] for r in captured]
+        # The review's base route is preserved unchanged...
+        assert {"path": "/dashboard", "actions": [], "reason": "deterministic"} in captured
+        # ...and the ONLY route added beyond the review's set is the edit target.
+        added = [r for r in captured if r["path"] not in {"/dashboard"}]
+        assert added == [{"path": "/users", "actions": [], "reason": "edit-target"}]
+        assert set(captured_paths) - {"/dashboard"} == {"/users"}
+
+    def test_edit_within_base_set_adds_no_routes(self, tmp_path, monkeypatch):
+        # When the edit lands on a route the review already covers, the capture
+        # set is identical to the review's — no duplicate, no drift.
+        review_routes = [{"path": "/users", "actions": [], "reason": "deterministic"}]
+        result, captured = self._run(
+            tmp_path, monkeypatch, review_routes, "app/users/page.tsx", "app/users"
+        )
+
+        assert result["status"] == "success"
+        assert captured == [{"path": "/users", "actions": [], "reason": "deterministic"}]
+
+
 class TestApplyEdits:
-    def test_applies_all_edits(self, tmp_path):
+    def _repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+
+    def test_applies_all_edits(self, tmp_path, monkeypatch):
         from src.agent.editor import apply_edits
 
+        self._repo(tmp_path, monkeypatch)
         f = tmp_path / "page.tsx"
         f.write_text("via-indigo-700 to-violet-600")
         edits = [
-            {"file": str(f), "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
-            {"file": str(f), "line": 1, "oldString": "to-violet-600", "newString": "to-orange-600"},
+            {"file": "page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
+            {"file": "page.tsx", "line": 1, "oldString": "to-violet-600", "newString": "to-orange-600"},
         ]
         assert apply_edits(edits)
         assert f.read_text() == "via-orange-500 to-orange-600"
 
-    def test_rolls_back_when_one_edit_fails(self, tmp_path):
+    def test_rolls_back_when_one_edit_fails(self, tmp_path, monkeypatch):
         from src.agent.editor import apply_edits
 
+        self._repo(tmp_path, monkeypatch)
         f = tmp_path / "page.tsx"
         original = "via-indigo-700 to-violet-600"
         f.write_text(original)
         edits = [
-            {"file": str(f), "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
-            {"file": str(f), "line": 1, "oldString": "DOES-NOT-EXIST", "newString": "x"},
+            {"file": "page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"},
+            {"file": "page.tsx", "line": 1, "oldString": "DOES-NOT-EXIST", "newString": "x"},
         ]
         assert not apply_edits(edits)
         assert f.read_text() == original  # first edit was rolled back

@@ -62,8 +62,10 @@ def _find_occurrence(content: str, old_string: str, line_hint: int | None) -> in
 
 
 def apply_edit(edit: dict) -> bool:
-    filepath = Path(REPO_DIR) / edit["file"]
-    if not filepath.exists():
+    from src.agent.code_edit import safe_repo_path
+
+    filepath = safe_repo_path(edit.get("file", ""))
+    if filepath is None or not filepath.exists():
         return False
     content = filepath.read_text()
     line_hint = edit.get("line")
@@ -79,10 +81,12 @@ def apply_edits(edits: list[dict]) -> bool:
     """Apply every edit atomically. If any edit fails to apply, restore all
     touched files to their pre-edit contents and return False.
     """
+    from src.agent.code_edit import safe_repo_path
+
     snapshots: dict[Path, str] = {}
     for edit in edits:
-        fp = Path(REPO_DIR) / edit["file"]
-        if fp not in snapshots and fp.exists():
+        fp = safe_repo_path(edit.get("file", ""))
+        if fp is not None and fp not in snapshots and fp.exists():
             snapshots[fp] = fp.read_text()
 
     for edit in edits:
@@ -184,14 +188,15 @@ def _describe_attempt(edits: list[dict], reason: str) -> str:
 def _routes_for_edits(base_routes: list[dict], edits: list[dict], actions: list, framework: str) -> tuple[list[dict], str | None]:
     """Expand the diff-inferred routes with edit-provided actions and the route
     that renders each edited file, returning (routes, primary_edit_route)."""
+    from src.agent.code_edit import safe_repo_path
     from src.agent.routes import _validate_routes
 
     if actions:
-        source_contents = {
-            edit["file"]: (Path(REPO_DIR) / edit["file"]).read_text(errors="replace")
-            for edit in edits
-            if (Path(REPO_DIR) / edit["file"]).exists()
-        }
+        source_contents: dict[str, str] = {}
+        for edit in edits:
+            path = safe_repo_path(edit.get("file", ""))
+            if path is not None and path.is_file():
+                source_contents[edit["file"]] = path.read_text(errors="replace")
         routes = _validate_routes([{**route, "actions": actions} for route in base_routes], source_contents)
     else:
         routes = [dict(route) for route in base_routes]
@@ -216,17 +221,27 @@ def execute_change(
     pr_number: str,
     frontend_root: str | None = None,
     framework: str = "next",
+    base_routes: list[dict] | None = None,
+    base_mocks: dict | None = None,
 ) -> dict:
     from src.agent.code_edit import EditGenerationError, request_edit, validate_edit
     from src.agent.routes import build_repo_tree, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
-    try:
-        repo_tree = build_repo_tree()
-        base_routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
-    except Exception:
-        base_routes = [{"path": "/", "actions": [], "reason": "fallback"}]
-        mocks = {}
+    # Reuse the route set the initial review already inferred for this diff so the
+    # code-change run screenshots the SAME base routes (route inference is
+    # non-deterministic — LLM augment — and re-running it would drift the capture
+    # set). edit-target routes are layered on top below for off-diff edits.
+    if base_routes is not None:
+        base_routes = [dict(route) for route in base_routes]
+        mocks = base_mocks or {}
+    else:
+        try:
+            repo_tree = build_repo_tree()
+            base_routes, mocks = infer_routes(diff, repo_tree, openrouter_api_key, framework)
+        except Exception:
+            base_routes = [{"path": "/", "actions": [], "reason": "fallback"}]
+            mocks = {}
 
     screenshot_dir = Path(REPO_DIR) / ".renderpr" / "screenshots"
     # Screenshot the current page once: it grounds the edit model visually and is

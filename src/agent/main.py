@@ -50,6 +50,43 @@ _DEV_URL_RE = re.compile(DEV_SERVER_URL_REGEX)
 logger = logging.getLogger(__name__)
 
 
+# Env vars stripped before launching UNTRUSTED PR processes (dependency install
+# scripts and the dev server, which run arbitrary code from the pull request).
+# Removing the ECS task-role credential pointers means a malicious postinstall
+# hook or dev script cannot trivially assume the Fargate task role and read
+# secrets from SSM. The agent process itself keeps these so its own AWS calls
+# (S3 upload, task registration) still work. Defense-in-depth for finding F-1 in
+# docs/SECURITY_THREAT_MODEL.md — it does not replace removing the role/egress.
+_UNTRUSTED_ENV_DENYLIST: frozenset[str] = frozenset({
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_ROLE_ARN",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
+    "RENDERPR_COMMAND_TOKEN",
+    "GITHUB_PARAM_NAME",
+    "OPENROUTER_PARAM_NAME",
+    "COMMAND_TOKEN_PARAM_NAME",
+})
+
+
+def _untrusted_subprocess_env(*overlays: dict[str, str]) -> dict[str, str]:
+    """Environment for an untrusted child process: the current environment with
+    task-role credential pointers and renderpr secret references stripped, then
+    each overlay merged in order (later overlays win)."""
+    env = {k: v for k, v in os.environ.items() if k not in _UNTRUSTED_ENV_DENYLIST}
+    for overlay in overlays:
+        env.update(overlay)
+    return env
+
+
 def _fetch_command_token() -> str:
     param_name = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
     ssm = boto3.client("ssm")
@@ -270,12 +307,13 @@ def _ensure_pnpm_hoisted(install_cwd: Path) -> list[str]:
     return generated
 
 
-def _run_install(install_command: list[str], install_cwd: Path) -> None:
+def _run_install(install_command: list[str], install_cwd: Path, env: dict[str, str] | None = None) -> None:
     label = " ".join(install_command)
     try:
         proc = subprocess.Popen(
             install_command,
             cwd=str(install_cwd),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -397,12 +435,16 @@ def _start_dev_server(
             logger.warning("dependency cache check failed", exc_info=True)
 
     if not cache_restored:
-        _run_install(profile.install_command, install_cwd)
+        # Dependency install runs arbitrary PR code (postinstall hooks): give it
+        # the credential-stripped env so it can't reach the task role.
+        _run_install(profile.install_command, install_cwd, env=_untrusted_subprocess_env())
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
-    # Layer precedence: ambient env, then user-provided secrets/vars, then the
-    # framework launch profile's env (host flags etc.) which must win for a correct boot.
-    dev_env = {**os.environ, **(injected_env or {}), **profile.dev_env}
+    # Layer precedence: ambient (credential-stripped) env, then user-provided
+    # secrets/vars, then the framework launch profile's env (host flags etc.)
+    # which must win for a correct boot. The dev server is untrusted PR code, so
+    # it must not inherit the task-role credential pointers (finding F-1).
+    dev_env = _untrusted_subprocess_env(injected_env or {}, profile.dev_env)
     _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env)
 
     port = _resolve_ready_port(_dev_server_proc, sniffed, profile.default_port)
@@ -417,7 +459,9 @@ def _start_dev_server(
     logger.info("Dev server ready at %s", _dev_server_url)
 
 
-def _get_installation_token(installation_id: str, app_id: str, private_key: str) -> str:
+def _get_installation_token(
+    installation_id: str, app_id: str, private_key: str, repo_full_name: str = ""
+) -> str:
     now = int(time.time())
     payload = {"iat": now, "exp": now + 600, "iss": app_id}
     jwt_token = jwt.encode(payload, private_key, algorithm="RS256")
@@ -429,9 +473,26 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
         "User-Agent": "RenderPR/1.0",
     }
 
+    # Scope the installation token to just this PR's repository and the minimal
+    # permissions RenderPR actually uses. Without a body GitHub mints a token
+    # covering every repo in the installation with the App's full permission set;
+    # scoping bounds the blast radius if the token leaks (see
+    # docs/SECURITY_THREAT_MODEL.md, finding F-3).
+    body: dict = {
+        "permissions": {
+            "contents": "write",       # clone the PR branch + push `@renderpr apply`
+            "pull_requests": "write",  # read the diff/metadata
+            "issues": "write",         # post/update the review comment
+            "metadata": "read",
+        }
+    }
+    repo_name = repo_full_name.split("/", 1)[1] if "/" in repo_full_name else ""
+    if repo_name:
+        body["repositories"] = [repo_name]
+
     for attempt in range(RETRY_MAX_ATTEMPTS):
         with httpx.Client() as client:
-            resp = client.post(url, headers=headers)
+            resp = client.post(url, headers=headers, json=body)
 
         if resp.status_code == 201:
             return resp.json()["token"]
@@ -531,17 +592,29 @@ def _capture_screenshots(
     diff: str,
     secrets: dict,
     auth_session=None,
+    routes: list[dict] | None = None,
+    mocks: dict | None = None,
 ) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
+    from src.agent.mock_server import changed_api_paths
     from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
-    repo_tree = build_repo_tree()
-    routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"], _framework)
+    # Routes/mocks are inferred once per diff (see run()) and reused for every
+    # capture pass; only infer here when a caller hasn't supplied them.
+    if routes is None:
+        repo_tree = build_repo_tree()
+        routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"], _framework)
+    mocks = mocks or {}
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
-        generated = write_server_mocks(Path(REPO_DIR), mocks, _framework)
+        generated = write_server_mocks(Path(REPO_DIR), mocks, _framework, diff=diff)
         _runtime_generated_files.update(generated)
+
+    # Routes the PR changed are served by their real (error-guarded) handler, so
+    # the browser-layer catch-all must let those requests through instead of
+    # stubbing them. Only meaningful for Next, where handlers live in-repo.
+    changed_paths = changed_api_paths(diff) if _framework == "next" else set()
 
     # When the change is confined to one element (e.g. a navbar), crop the
     # screenshot to it; page-wide/ambiguous changes return None -> full page.
@@ -557,6 +630,7 @@ def _capture_screenshots(
         entry_url=auth_session.entry_url if auth_session else None,
         login_signals=login_signals,
         changed_selector=changed_selector,
+        changed_paths=changed_paths,
     )
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
@@ -702,12 +776,16 @@ def run() -> None:
     logger.info("PR Number: %s", pr_number)
 
     secrets = _fetch_secrets()
+    # Held in a local and handed directly to the command server below. It is
+    # deliberately NOT placed in os.environ: the untrusted dev server inherits
+    # the environment, and leaking the command token there would let PR code
+    # drive the command server (finding F-4).
     command_token = _fetch_command_token()
-    os.environ["RENDERPR_COMMAND_TOKEN"] = command_token
     token = _get_installation_token(
         installation_id=installation_id,
         app_id=secrets["app_id"],
         private_key=secrets["private_key"],
+        repo_full_name=repo_full_name,
     )
     skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
 
@@ -807,7 +885,7 @@ def run() -> None:
         # Make unmocked API routes degrade to empty data + an explanatory in-app
         # banner instead of crashing when the previewer browses a route the PR
         # didn't touch (so no data was mocked for it).
-        _runtime_generated_files.update(write_unmocked_api_fallbacks(Path(REPO_DIR), _framework_name))
+        _runtime_generated_files.update(write_unmocked_api_fallbacks(Path(REPO_DIR), _framework_name, diff=diff))
         _runtime_generated_files.update(write_unmocked_banner(Path(REPO_DIR), _framework_name))
 
         update_progress(1)
@@ -825,6 +903,22 @@ def run() -> None:
         from src.agent.auth import build_session
         auth_session = build_session(repo_config["auth"], repo_secrets, _dev_server_url)
 
+        # Infer the screenshot route set ONCE for this diff. Both the initial
+        # review and every later code-change run reuse it, so a given diff always
+        # produces the same capture set — route inference is non-deterministic
+        # (LLM augment), so re-running it per command drifted the sets apart.
+        route_plan: dict = {}
+
+        def get_route_plan() -> tuple[list[dict], dict]:
+            if not route_plan:
+                from src.agent.routes import build_repo_tree, infer_routes
+                routes, mocks = infer_routes(
+                    diff, build_repo_tree(), secrets["openrouter_api_key"], _framework
+                )
+                route_plan["routes"] = routes
+                route_plan["mocks"] = mocks
+            return route_plan["routes"], route_plan["mocks"]
+
         def do_review(use_progress: bool = False) -> None:
             from src.agent.review import ReviewError, run_review
 
@@ -833,7 +927,10 @@ def run() -> None:
 
             if pid is not None:
                 update_progress(2)
-            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(diff, secrets, auth_session)
+            routes, mocks = get_route_plan()
+            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(
+                diff, secrets, auth_session, routes=routes, mocks=mocks
+            )
             logger.info(
                 "Captured %d screenshots: %s",
                 len(screenshot_paths),
@@ -913,6 +1010,7 @@ def run() -> None:
         if frontend_root:
             frontend_root = str(Path(frontend_root).parent)
 
+        base_routes, base_mocks = get_route_plan()
         result = execute_change(
             query=query,
             openrouter_api_key=secrets["openrouter_api_key"],
@@ -922,6 +1020,8 @@ def run() -> None:
             pr_number=pr_number,
             frontend_root=frontend_root,
             framework=discovery["launch_profile"].framework,
+            base_routes=base_routes,
+            base_mocks=base_mocks,
         )
 
         if result["status"] == "no_visible_change":
@@ -1046,6 +1146,7 @@ Live app: http://{public_ip}:{_dev_server_port}
         handle_apply_fn=on_apply,
         handle_review_fn=on_review,
         on_idle_shutdown=lambda: deregister_task(pr_number, task_arn),
+        token=command_token.encode("utf-8"),
     )
     server.start()
 
