@@ -143,6 +143,55 @@ def _save_screenshot(
         return None
 
 
+def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url: str | None):
+    """Launch a fresh browser + page wired with mocks, diagnostics, and auth entry.
+
+    Returns (browser, page). Called on first launch and on every crash-relaunch so
+    a recovered session is configured identically to the original.
+    """
+    browser = p.chromium.launch()
+    # A synthetic auth session (forged cookies / localStorage) is loaded into
+    # the context so the app treats the preview user as logged in.
+    context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()  # type: ignore[arg-type]
+
+    mock_entries = _flatten_mocks(mocks)
+    if mock_entries:
+        def handle_mock_route(route):
+            request = route.request
+            parsed = urlparse(request.url)
+            mock = mock_entries.get(parsed.path)
+
+            if mock is None:
+                return route.continue_()
+
+            logger.info("Mock matched %s %s -> %d", request.method, parsed.path, mock["status"])
+            return route.fulfill(
+                status=mock["status"],
+                content_type="application/json",
+                body=json.dumps(mock["body"]),
+            )
+
+        context.route("**/*", handle_mock_route)
+        logger.info("Mock routes registered for %d endpoint(s): %s", len(mock_entries), list(mock_entries.keys()))
+
+    page = context.new_page()
+
+    page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
+    page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
+    page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
+
+    # Some providers (e.g. Clerk) establish the session by consuming a ticket
+    # at an entry URL before the app is browsed.
+    if entry_url:
+        try:
+            page.goto(entry_url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
+            logger.info("Loaded auth entry URL")
+        except Exception:
+            logger.warning("Failed to load auth entry URL", exc_info=True)
+
+    return browser, page
+
+
 def capture_screenshots(
     dev_server_url: str,
     screenshot_dir: Path | None = None,
@@ -163,53 +212,41 @@ def capture_screenshots(
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch()
-            # A synthetic auth session (forged cookies / localStorage) is loaded into
-            # the context so the app treats the preview user as logged in.
-            context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()  # type: ignore[arg-type]
+            browser, page = _launch_session(p, storage_state, mocks, entry_url)
 
-            mock_entries = _flatten_mocks(mocks)
-            if mock_entries:
-                def handle_mock_route(route):
-                    request = route.request
-                    parsed = urlparse(request.url)
-                    mock = mock_entries.get(parsed.path)
-
-                    if mock is None:
-                        return route.continue_()
-
-                    logger.info("Mock matched %s %s -> %d", request.method, parsed.path, mock["status"])
-                    return route.fulfill(
-                        status=mock["status"],
-                        content_type="application/json",
-                        body=json.dumps(mock["body"]),
-                    )
-
-                context.route("**/*", handle_mock_route)
-                logger.info("Mock routes registered for %d endpoint(s): %s", len(mock_entries), list(mock_entries.keys()))
-
-            page = context.new_page()
-
-            page.on("console", lambda msg: logger.info("PAGE CONSOLE [%s]: %s", msg.type, msg.text))
-            page.on("pageerror", lambda exc: logger.warning("PAGE ERROR (hydration?): %s", exc))
-            page.on("requestfailed", lambda req: logger.warning("PAGE REQUEST FAILED: %s (%s)", req.url, req.failure))
-
-            # Some providers (e.g. Clerk) establish the session by consuming a ticket
-            # at an entry URL before the app is browsed.
-            if entry_url:
-                try:
-                    page.goto(entry_url, wait_until="networkidle", timeout=PLAYWRIGHT_NAVIGATION_TIMEOUT)
-                    logger.info("Loaded auth entry URL")
-                except Exception:
-                    logger.warning("Failed to load auth entry URL", exc_info=True)
-
+            # A renderer can segfault mid-capture (signal 11 under SwiftShader on
+            # Fargate, typically memory pressure during a full-page screenshot).
+            # Treat that as recoverable: relaunch the browser and retry the route
+            # rather than aborting the entire review.
             for route in routes:
-                route_results = _screenshot_route(page, dev_server_url, route, screenshot_dir, login_signals)
-                results.extend(route_results)
+                for attempt in range(RETRY_MAX_ATTEMPTS):
+                    try:
+                        results.extend(_screenshot_route(page, dev_server_url, route, screenshot_dir, login_signals))
+                        break
+                    except Exception:
+                        logger.warning(
+                            "Browser crashed capturing %s (attempt %d/%d); relaunching",
+                            route["path"], attempt + 1, RETRY_MAX_ATTEMPTS, exc_info=True,
+                        )
+                        try:
+                            browser.close()
+                        except Exception:
+                            pass
+                        if attempt + 1 < RETRY_MAX_ATTEMPTS:
+                            browser, page = _launch_session(p, storage_state, mocks, entry_url)
+                        else:
+                            logger.error("Giving up on route %s after %d attempts", route["path"], RETRY_MAX_ATTEMPTS)
 
-            browser.close()
+            try:
+                browser.close()
+            except Exception:
+                pass
     except Exception:
         logger.exception("Failed to initialize Playwright")
+        sys.exit(1)
+
+    if not results:
+        logger.error("Captured 0 screenshots across %d route(s); failing", len(routes))
         sys.exit(1)
 
     logger.info("Captured %d screenshots across %d route(s)", len(results), len(routes))

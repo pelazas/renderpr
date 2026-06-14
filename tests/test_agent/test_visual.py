@@ -104,6 +104,47 @@ class TestCaptureScreenshots:
             assert path.exists()
             assert " - /" in label
 
+    def test_browser_crash_relaunches_and_retries(self, tmp_path, monkeypatch):
+        """A renderer crash mid-capture must relaunch the browser and retry the
+        route, returning the recovered screenshots instead of aborting the run."""
+        import src.agent.visual as visual_mod
+
+        calls = {"n": 0}
+
+        def flaky_route(page, base_url, route, screenshot_dir, login_signals=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("Target crashed")
+            return [(screenshot_dir / "recovered.png", f"{route['path']} - recovered")]
+
+        monkeypatch.setattr(visual_mod, "_screenshot_route", flaky_route)
+
+        result = visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": []}],
+        )
+
+        assert calls["n"] == 2  # crashed once, retried after relaunch
+        assert len(result) == 1
+
+    def test_total_failure_exits_nonzero(self, tmp_path, monkeypatch):
+        """If every route crashes through all retries, capture exits non-zero so
+        the review is reported as failed rather than silently empty."""
+        import src.agent.visual as visual_mod
+
+        def always_crash(page, base_url, route, screenshot_dir, login_signals=None):
+            raise RuntimeError("Target crashed")
+
+        monkeypatch.setattr(visual_mod, "_screenshot_route", always_crash)
+
+        with pytest.raises(SystemExit):
+            visual_mod.capture_screenshots(
+                "http://localhost:3000",
+                screenshot_dir=tmp_path,
+                routes=[{"path": "/", "actions": []}],
+            )
+
     def test_screenshot_directory_created(self, tmp_path):
         from src.agent.visual import capture_screenshots
 

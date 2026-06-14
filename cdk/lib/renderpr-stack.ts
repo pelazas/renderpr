@@ -219,8 +219,11 @@ export class RenderprStack extends cdk.Stack {
     // Fargate task definition
     const taskDef = new ecs.FargateTaskDefinition(this, "ReviewTaskDef", {
       family: `${appName}-review`,
-      cpu: 512,
-      memoryLimitMiB: 1024,
+      // Full-page screenshots under SwiftShader (software GL, no GPU on Fargate)
+      // are memory-hungry; 1 GB shared with Node + the dev server segfaulted the
+      // Chromium renderer (signal 11). 2 GB / 1 vCPU gives headroom.
+      cpu: 1024,
+      memoryLimitMiB: 2048,
       executionRole: fargateExecutionRole,
       taskRole: fargateTaskRole,
     });
