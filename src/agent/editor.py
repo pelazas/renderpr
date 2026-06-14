@@ -62,8 +62,10 @@ def _find_occurrence(content: str, old_string: str, line_hint: int | None) -> in
 
 
 def apply_edit(edit: dict) -> bool:
-    filepath = Path(REPO_DIR) / edit["file"]
-    if not filepath.exists():
+    from src.agent.code_edit import safe_repo_path
+
+    filepath = safe_repo_path(edit.get("file", ""))
+    if filepath is None or not filepath.exists():
         return False
     content = filepath.read_text()
     line_hint = edit.get("line")
@@ -79,10 +81,12 @@ def apply_edits(edits: list[dict]) -> bool:
     """Apply every edit atomically. If any edit fails to apply, restore all
     touched files to their pre-edit contents and return False.
     """
+    from src.agent.code_edit import safe_repo_path
+
     snapshots: dict[Path, str] = {}
     for edit in edits:
-        fp = Path(REPO_DIR) / edit["file"]
-        if fp not in snapshots and fp.exists():
+        fp = safe_repo_path(edit.get("file", ""))
+        if fp is not None and fp not in snapshots and fp.exists():
             snapshots[fp] = fp.read_text()
 
     for edit in edits:

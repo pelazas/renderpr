@@ -138,12 +138,33 @@ def _select_files(query: str, directory_tree: str, api_key: str) -> list[str]:
         raise EditGenerationError(f"File selector returned invalid JSON: {response[:200]}")
 
 
+def safe_repo_path(rel_path: object) -> Path | None:
+    """Resolve ``rel_path`` under ``REPO_DIR`` and return it only if it stays
+    inside the repo.
+
+    File paths in edits come from the LLM, whose input (the user request and the
+    PR diff/source) is attacker-influenced. Rejecting absolute paths and ``..``
+    traversal stops a crafted path from reading or writing outside the cloned
+    repo (finding F-11 in docs/SECURITY_THREAT_MODEL.md).
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        return None
+    repo_root = Path(REPO_DIR).resolve()
+    try:
+        candidate = (repo_root / rel_path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if candidate == repo_root or repo_root in candidate.parents:
+        return candidate
+    return None
+
+
 def validate_edit(edit: dict) -> bool:
     required_keys = {"file", "line", "oldString", "newString"}
     if not required_keys.issubset(edit.keys()):
         return False
-    filepath = Path(REPO_DIR) / edit["file"]
-    if not filepath.exists():
+    filepath = safe_repo_path(edit["file"])
+    if filepath is None or not filepath.exists():
         return False
     content = filepath.read_text()
     return edit["oldString"] in content
@@ -154,8 +175,8 @@ def find_occurrence_in_file(file_path: str, old_string: str, line_hint: int | No
     closest to the given line hint. Returns None if not found.
     """
     from src.agent.editor import _find_occurrence
-    full_path = Path(REPO_DIR) / file_path
-    if not full_path.exists():
+    full_path = safe_repo_path(file_path)
+    if full_path is None or not full_path.exists():
         return None
     content = full_path.read_text()
     return _find_occurrence(content, old_string, line_hint)
@@ -196,8 +217,8 @@ def request_edit(
 
     file_contents: list[str] = []
     for fp in selected:
-        full_path = Path(REPO_DIR) / fp
-        if full_path.exists() and full_path.is_file():
+        full_path = safe_repo_path(fp)
+        if full_path is not None and full_path.is_file():
             content = full_path.read_text()
             file_contents.append(f"--- {fp} ---\n{content}")
 
