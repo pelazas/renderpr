@@ -3,6 +3,8 @@ name: Deploy
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -29,6 +31,9 @@ jobs:
 
   deploy:
     needs: test
+    # Only deploy on a push to main; on pull_request the test job runs as a gate
+    # but we never deploy PR code.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
