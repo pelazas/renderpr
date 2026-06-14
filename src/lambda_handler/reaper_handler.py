@@ -24,6 +24,16 @@ ECS_CLUSTER = os.environ["ECS_CLUSTER_ARN"]
 # review before the backstop fires.
 MAX_TASK_AGE_SECONDS = int(os.environ.get("MAX_TASK_AGE_SECONDS", "1500"))
 TASKS_PARAM_PREFIX = os.environ.get("TASKS_PARAM_PREFIX", "/renderpr/tasks")
+# Only stop tasks of this task-definition family. Empty = no family filter (stop
+# any over-age task). Guards the destructive StopTask if the cluster is ever
+# shared with non-review workloads.
+TASK_FAMILY = os.environ.get("TASK_FAMILY", "")
+
+
+def _task_family(task: dict) -> str:
+    # taskDefinitionArn tail is "<family>:<revision>".
+    arn = task.get("taskDefinitionArn", "")
+    return arn.split("/")[-1].split(":")[0]
 
 
 def _task_started_at(task: dict) -> datetime | None:
@@ -61,6 +71,8 @@ def _reap_stale_tasks(now: datetime) -> list[str]:
         chunk = arns[i : i + 100]
         desc = ecs.describe_tasks(cluster=ECS_CLUSTER, tasks=chunk)
         for task in desc.get("tasks", []):
+            if TASK_FAMILY and _task_family(task) != TASK_FAMILY:
+                continue
             age = _age_seconds(task, now)
             if age is None or age < MAX_TASK_AGE_SECONDS:
                 continue

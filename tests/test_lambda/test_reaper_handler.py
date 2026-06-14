@@ -77,6 +77,22 @@ def test_reaper_stops_task_over_max_age(monkeypatch):
     assert arn not in running
 
 
+def test_reaper_skips_tasks_outside_family(monkeypatch):
+    from src.lambda_handler import reaper_handler
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    arn = _run_task(ecs)  # family "renderpr-review"
+
+    # Over-age, but reaper is scoped to a different family -> must not stop it.
+    monkeypatch.setattr(reaper_handler, "_age_seconds", lambda task, now: 9999)
+    monkeypatch.setattr(reaper_handler, "TASK_FAMILY", "some-other-family")
+    result = reaper_handler.handler({}, {})
+
+    assert arn not in result["stopped"]
+    running = ecs.list_tasks(cluster=CLUSTER_ARN, desiredStatus="RUNNING")["taskArns"]
+    assert arn in running
+
+
 def test_reaper_leaves_fresh_task_running():
     from src.lambda_handler import reaper_handler
 

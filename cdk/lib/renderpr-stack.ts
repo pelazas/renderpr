@@ -121,6 +121,12 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks/*` },
       this,
     );
+    // Path-root ARN (no trailing /*) — required to authorize GetParametersByPath
+    // over the /renderpr/tasks hierarchy alongside the child wildcard above.
+    const tasksParamPathArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks` },
+      this,
+    );
     // Per-repo user secrets (env vars, auth signing secrets, provider keys),
     // one parameter per secret under /{appName}/secrets/{installation}/{repo}/{KEY}.
     const secretsParamArn = cdk.Arn.format(
@@ -291,11 +297,11 @@ export class RenderprStack extends cdk.Stack {
     fargateExecutionRole.grantPassRole(lambdaRole);
     fargateTaskRole.grantPassRole(lambdaRole);
 
-    // Grant Lambda permission to run, describe, list, tag, and stop tasks
+    // Grant Lambda permission to run, describe, tag, and stop tasks
     // (StopTask backs per-PR replace of a task reviewing a superseded commit).
     lambdaRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:ListTasks", "ecs:TagResource", "ecs:StopTask"],
+        actions: ["ecs:RunTask", "ecs:DescribeTasks", "ecs:TagResource", "ecs:StopTask"],
         resources: [
           `arn:aws:ecs:${this.region}:${this.account}:task-definition/${taskDef.family}*`,
           cluster.clusterArn,
@@ -316,6 +322,16 @@ export class RenderprStack extends cdk.Stack {
             this,
           ),
         ],
+      }),
+    );
+
+    // ecs:ListTasks does not support resource-level scoping — it must be granted
+    // on "*" (the ecs:cluster condition key does not apply to it either), so the
+    // concurrency-cap count needs this separate broad statement.
+    lambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ecs:ListTasks"],
+        resources: ["*"],
       }),
     );
 
@@ -345,16 +361,26 @@ export class RenderprStack extends cdk.Stack {
       ],
     });
 
+    // ecs:ListTasks requires Resource "*" (no resource-level scoping); the
+    // task-scoped actions stay constrained to this cluster's tasks.
     reaperRole.addToPolicy(
       new iam.PolicyStatement({
-        actions: ["ecs:ListTasks", "ecs:DescribeTasks", "ecs:StopTask"],
-        resources: [cluster.clusterArn, clusterTaskArn],
+        actions: ["ecs:ListTasks"],
+        resources: ["*"],
       }),
     );
     reaperRole.addToPolicy(
       new iam.PolicyStatement({
+        actions: ["ecs:DescribeTasks", "ecs:StopTask"],
+        resources: [cluster.clusterArn, clusterTaskArn],
+      }),
+    );
+    // GetParametersByPath authorizes against the path hierarchy, so grant both
+    // the path root and its descendants; DeleteParameter targets the children.
+    reaperRole.addToPolicy(
+      new iam.PolicyStatement({
         actions: ["ssm:GetParametersByPath", "ssm:DeleteParameter"],
-        resources: [tasksParamArn],
+        resources: [tasksParamPathArn, tasksParamArn],
       }),
     );
 
@@ -370,6 +396,8 @@ export class RenderprStack extends cdk.Stack {
         ECS_CLUSTER_ARN: cluster.clusterArn,
         MAX_TASK_AGE_SECONDS: maxTaskAgeSeconds,
         TASKS_PARAM_PREFIX: tasksParamPrefix,
+        // Scope destructive reaping to this stack's review tasks only.
+        TASK_FAMILY: taskDef.family,
       },
     });
 
