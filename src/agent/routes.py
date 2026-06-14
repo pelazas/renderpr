@@ -609,3 +609,72 @@ def infer_routes(
 
 def _fallback_routes() -> list[dict]:
     return [{"path": "/", "reason": "fallback", "actions": []}]
+
+
+CHANGED_REGION_PROMPT = """You decide whether a PR's visual change is confined to ONE specific element on the page.
+
+Given the git diff, respond with a CSS selector for the changed element ONLY when the change is localized to a single, identifiable element that occupies a MINORITY of the page (e.g. a navbar, header, footer, a specific card, a button). Otherwise respond with null.
+
+Return null (do NOT guess a selector) when:
+- the change affects the whole page, the overall layout, or several separate areas,
+- it's a global stylesheet / theme / config change,
+- you are not confident which single element it maps to.
+
+Selector rules:
+- It must resolve to exactly ONE element on the rendered page.
+- Prefer stable, semantic selectors: a tag like nav/header/footer/main/aside, an id (#id), a data attribute ([data-x]), or [aria-label="..."]. Avoid brittle Tailwind / utility class chains.
+- A wrong selector is worse than null.
+
+Output ONLY JSON, nothing else:
+{"selector": "nav"}   or   {"selector": null}"""
+
+
+def infer_changed_region(diff: str, api_key: str) -> str | None:
+    """Return a CSS selector for the single element a localized PR change maps to,
+    or None when the change is page-wide / ambiguous. Best-effort: any failure
+    returns None so the caller falls back to full-page screenshots.
+    """
+    if not diff.strip():
+        return None
+
+    url = f"{OPENROUTER_BASE_URL}/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    body = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": CHANGED_REGION_PROMPT},
+            {"role": "user", "content": f"## Git Diff\n\n```diff\n{diff[:8000]}\n```"},
+        ],
+    }
+
+    for attempt in range(RETRY_MAX_ATTEMPTS):
+        try:
+            with httpx.Client(timeout=LLM_CLIENT_TIMEOUT) as client:
+                resp = client.post(url, headers=headers, json=body)
+        except Exception:
+            logger.warning("Changed-region request failed (attempt %d)", attempt + 1, exc_info=True)
+            if attempt < RETRY_MAX_ATTEMPTS - 1:
+                _sleep_backoff(attempt)
+            continue
+
+        if resp.status_code == 200:
+            try:
+                raw = resp.json()["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError):
+                return None
+            parsed = _extract_balanced_json(raw) or _extract_balanced_json(_validate_and_repair_json(raw))
+            if not isinstance(parsed, dict):
+                return None
+            selector = parsed.get("selector")
+            if isinstance(selector, str) and selector.strip():
+                logger.info("Changed-region selector inferred: %s", selector.strip())
+                return selector.strip()
+            return None
+
+        if 400 <= resp.status_code < 500 and resp.status_code != 429:
+            logger.warning("Changed-region: non-retryable %d", resp.status_code)
+            return None
+        if attempt < RETRY_MAX_ATTEMPTS - 1:
+            _sleep_backoff(attempt)
+
+    return None

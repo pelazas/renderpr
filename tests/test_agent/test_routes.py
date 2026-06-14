@@ -702,3 +702,38 @@ class TestMockOutput:
         assert len(routes) == 1
         assert routes[0]["path"] == "/users"
         assert mocks == {}
+
+
+class TestInferChangedRegion:
+    def _content(self, selector_json):
+        return httpx.Response(200, json={"choices": [{"message": {"content": selector_json}}]})
+
+    def test_returns_selector_for_localized_change(self, mock_httpx_client):
+        from src.agent.routes import infer_changed_region
+
+        mock_httpx_client([self._content('{"selector": "nav"}')])
+        assert infer_changed_region("diff --git a/Navbar.tsx b/Navbar.tsx", "sk") == "nav"
+
+    def test_null_selector_returns_none(self, mock_httpx_client):
+        from src.agent.routes import infer_changed_region
+
+        mock_httpx_client([self._content('{"selector": null}')])
+        assert infer_changed_region("diff --git a/page.tsx b/page.tsx", "sk") is None
+
+    def test_empty_diff_skips_llm(self, mock_httpx_client):
+        from src.agent.routes import infer_changed_region
+
+        mock_httpx_client([])  # no response queued; must not call the client
+        assert infer_changed_region("   ", "sk") is None
+
+    def test_http_error_returns_none(self, mock_httpx_client):
+        from src.agent.routes import infer_changed_region
+
+        mock_httpx_client([httpx.Response(400, json={"error": "bad"})])
+        assert infer_changed_region("diff ...", "sk") is None
+
+    def test_malformed_json_returns_none(self, mock_httpx_client):
+        from src.agent.routes import infer_changed_region
+
+        mock_httpx_client([self._content("not json at all")])
+        assert infer_changed_region("diff ...", "sk") is None
