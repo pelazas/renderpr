@@ -244,7 +244,10 @@ def test_changed_route_is_wrapped_not_blind_stubbed(tmp_path):
     assert "_renderpr_orig_route" in wrapper
     assert "export const GET = __renderprWrap" in wrapper
     assert "x-renderpr-route-error" in wrapper
-    assert "return await fn" in wrapper
+    assert "const res = await fn" in wrapper
+    # A 5xx response (e.g. a DB-backed route that try/catches into a 500 in the
+    # database-less preview) degrades like a throw, so the page doesn't crash.
+    assert "res.status >= 500" in wrapper
     # The error message goes into an HTTP header, so non-printable/non-ASCII
     # chars (e.g. newlines in a stack-y message) must be stripped or building
     # the fallback response would itself throw.

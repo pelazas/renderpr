@@ -175,9 +175,11 @@ def _detect_handler_methods(source: str) -> list[str]:
 
 
 def _route_handler_wrapper_source(api_path: str, methods: list[str], is_ts: bool) -> str:
-    """Source that runs the original handler (moved to a sibling module) and only
-    falls back to empty data if it throws — so a working/changed handler renders
-    real output while an environmental crash still degrades gracefully."""
+    """Source that runs the original handler (moved to a sibling module) and falls
+    back to empty data only when it errors — a thrown exception or a 5xx response
+    (e.g. a DB-backed route that try/catches into a 500 because the preview has no
+    database). A working/changed handler still renders its real output, so genuine
+    breaks surface while environmental failures degrade gracefully with a banner."""
     orig = "(__orig as any)" if is_ts else "__orig"
     lines: list[str] = []
     if is_ts:
@@ -185,21 +187,28 @@ def _route_handler_wrapper_source(api_path: str, methods: list[str], is_ts: bool
     lines += [
         f'import * as __orig from "./{_ORIG_MODULE_STEM}";',
         f'export * from "./{_ORIG_MODULE_STEM}";',
-        "const __renderprFallback = (err) =>",
+        "const __renderprMsg = (e) =>",
+        '  String((e && e.message) || e || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200);',
+        "const __renderprFallback = (msg) =>",
         "  Response.json([], {",
         "    status: 200,",
         "    headers: {",
         f'      "{API_FALLBACK_HEADER}": "{api_path}",',
-        f'      "{API_ERROR_HEADER}": String((err && err.message) || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200),',
+        '      "' + API_ERROR_HEADER + '": msg,',
         "    },",
         "  });",
         "const __renderprWrap = (fn) =>",
         "  async (...args) => {",
         "    try {",
-        "      return await fn(...args);",
+        "      const res = await fn(...args);",
+        '      if (res && typeof res.status === "number" && res.status >= 500) {',
+        f'        console.error("[renderpr] handler for {api_path} returned status " + res.status);',
+        '        return __renderprFallback("HTTP " + res.status);',
+        "      }",
+        "      return res;",
         "    } catch (err) {",
         f'      console.error("[renderpr] handler for {api_path} threw:", err);',
-        "      return __renderprFallback(err);",
+        "      return __renderprFallback(__renderprMsg(err));",
         "    }",
         "  };",
     ]
