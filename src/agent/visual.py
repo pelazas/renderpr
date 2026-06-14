@@ -173,7 +173,10 @@ def _save_screenshot(
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     vp_label = VIEWPORT_LABELS.get(width, f"{width}w")
     region = clip is not None
-    label = f"{vp_label} - {path}{label_suffix}" + (" (changed region)" if region else "")
+    # Keep the label as a clean "Viewport - Route" so the review's screenshot
+    # reference matching (inline image + per-viewport links) keeps working; the
+    # crop is conveyed to the review separately, not via the label.
+    label = f"{vp_label} - {path}{label_suffix}"
     suffix = "-interacted" if label_suffix else ("-region" if region else "")
     filename = screenshot_dir / f"{vp_label}-{route_slug}{suffix}-{timestamp}.png"
 

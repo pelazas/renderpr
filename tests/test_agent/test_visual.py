@@ -805,12 +805,13 @@ class TestSaveScreenshotClip:
                 Path(path).touch()
         return Pg()
 
-    def test_uses_clip_and_labels_region(self, tmp_path):
+    def test_uses_clip_with_clean_label(self, tmp_path):
         from src.agent.visual import _save_screenshot
         captured = {}
         res = _save_screenshot(self._page(captured), tmp_path, "/", "home", 1280, "", clip={"x": 0, "y": 0, "width": 100, "height": 50})
         assert "clip" in captured and "full_page" not in captured
-        assert res is not None and "(changed region)" in res[1]
+        # Label must stay clean "Viewport - Route" so review reference-matching works.
+        assert res is not None and res[1] == "Desktop - /"
 
     def test_full_page_without_clip(self, tmp_path):
         from src.agent.visual import _save_screenshot
