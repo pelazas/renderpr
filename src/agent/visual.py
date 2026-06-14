@@ -1,16 +1,21 @@
 import json
 import logging
+import os
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Final
 from urllib.parse import urlparse
 
 import boto3
+from botocore.signers import CloudFrontSigner
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
-from src.agent.config import CHANGED_REGION_MAX_AREA_FRACTION, CHANGED_REGION_PADDING_PX, LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.config import CHANGED_REGION_MAX_AREA_FRACTION, CHANGED_REGION_PADDING_PX, CLOUDFRONT_SIGNED_URL_TTL_SECONDS, LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
 from src.agent.mock_server import API_FALLBACK_HEADER
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
@@ -326,6 +331,37 @@ def capture_screenshots(
     return results
 
 
+@lru_cache(maxsize=1)
+def _cloudfront_signer():
+    """Return (domain, CloudFrontSigner) loaded from env+SSM, or None when CloudFront isn't configured."""
+    domain = os.environ.get("CLOUDFRONT_DOMAIN")
+    key_pair_id = os.environ.get("CLOUDFRONT_KEY_PAIR_ID")
+    param = os.environ.get("CLOUDFRONT_PRIVATE_KEY_PARAM")
+    if not (domain and key_pair_id and param):
+        return None
+    try:
+        pem = boto3.client("ssm").get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"]
+        private_key = serialization.load_pem_private_key(pem.encode(), password=None)
+    except Exception:
+        logger.warning("CloudFront private key unavailable; falling back to direct S3 URLs", exc_info=True)
+        return None
+
+    def rsa_signer(message: bytes) -> bytes:
+        return private_key.sign(message, padding.PKCS1v15(), hashes.SHA1())  # CloudFront requires RSA-SHA1
+
+    return domain, CloudFrontSigner(key_pair_id, rsa_signer)
+
+
+def _screenshot_url(bucket: str, key: str) -> str:
+    """Signed CloudFront URL when CloudFront is configured; legacy direct-S3 URL otherwise."""
+    signer = _cloudfront_signer()
+    if signer is None:
+        return f"https://{bucket}.s3.amazonaws.com/{key}"
+    domain, cf = signer
+    expires = datetime.now(timezone.utc) + timedelta(seconds=CLOUDFRONT_SIGNED_URL_TTL_SECONDS)
+    return cf.generate_presigned_url(f"https://{domain}/{key}", date_less_than=expires)
+
+
 def upload_screenshots(
     bucket: str,
     pr_number: str,
@@ -345,7 +381,7 @@ def upload_screenshots(
                     Body=body,
                     ContentType="image/png",
                 )
-                url = f"https://{bucket}.s3.amazonaws.com/{key}"
+                url = _screenshot_url(bucket, key)
                 results.append((url, label))
                 logger.info("Uploaded screenshot: %s (%s)", url, label)
                 break

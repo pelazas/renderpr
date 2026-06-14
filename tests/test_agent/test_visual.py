@@ -754,7 +754,12 @@ class TestUploadScreenshots:
 
         monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3Client())
 
-        from src.agent.visual import upload_screenshots
+        # No CloudFront configured -> legacy direct-S3 URLs.
+        from src.agent.visual import _cloudfront_signer, upload_screenshots
+
+        _cloudfront_signer.cache_clear()
+        for var in ("CLOUDFRONT_DOMAIN", "CLOUDFRONT_KEY_PAIR_ID", "CLOUDFRONT_PRIVATE_KEY_PARAM"):
+            monkeypatch.delenv(var, raising=False)
 
         png1 = tmp_path / "a.png"
         png1.write_bytes(b"png1-data")
@@ -787,6 +792,47 @@ class TestUploadScreenshots:
 
         pairs = upload_screenshots("my-bucket", "42", [(png, "Mobile XS")])
         assert pairs == []
+
+
+class TestScreenshotUrl:
+    def test_signed_cloudfront_url_when_configured(self, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        monkeypatch.setenv("CLOUDFRONT_DOMAIN", "d123.cloudfront.net")
+        monkeypatch.setenv("CLOUDFRONT_KEY_PAIR_ID", "K123")
+        monkeypatch.setenv("CLOUDFRONT_PRIVATE_KEY_PARAM", "/renderpr/cloudfront-private-key")
+
+        class FakeSigner:
+            def __init__(self):
+                self.called_with = None
+
+            def generate_presigned_url(self, url, date_less_than):
+                self.called_with = url
+                return f"{url}?Signature=sig&Key-Pair-Id=K123"
+
+        fake = FakeSigner()
+        visual_mod._cloudfront_signer.cache_clear()
+        monkeypatch.setattr(
+            visual_mod, "_cloudfront_signer", lambda: ("d123.cloudfront.net", fake)
+        )
+
+        url = visual_mod._screenshot_url("my-bucket", "screenshots/42/abc.png")
+
+        assert url.startswith("https://d123.cloudfront.net/screenshots/42/abc.png")
+        assert "Signature=sig" in url
+        assert "my-bucket.s3.amazonaws.com" not in url
+        assert fake.called_with == "https://d123.cloudfront.net/screenshots/42/abc.png"
+
+    def test_direct_s3_url_when_not_configured(self, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        visual_mod._cloudfront_signer.cache_clear()
+        for var in ("CLOUDFRONT_DOMAIN", "CLOUDFRONT_KEY_PAIR_ID", "CLOUDFRONT_PRIVATE_KEY_PARAM"):
+            monkeypatch.delenv(var, raising=False)
+
+        url = visual_mod._screenshot_url("my-bucket", "screenshots/42/abc.png")
+
+        assert url == "https://my-bucket.s3.amazonaws.com/screenshots/42/abc.png"
 
 
 class TestLoginWallDetection:
