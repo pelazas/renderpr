@@ -48,7 +48,6 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
 
 def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
     client = boto3.client("ecs")
-    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
     task_tags = [
         {"key": "Project", "value": "renderpr"},
         {"key": "PRNumber", "value": pr_number},
