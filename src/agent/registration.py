@@ -37,10 +37,32 @@ def register_task(pr_number: str, task_arn: str, public_ip: str) -> None:
         logger.exception("Failed to register task for PR #%s in SSM", pr_number)
 
 
-def deregister_task(pr_number: str) -> None:
-    """Remove the task's identity from SSM on graceful shutdown."""
+def deregister_task(pr_number: str, task_arn: str | None = None) -> None:
+    """Remove the task's identity from SSM on shutdown.
+
+    When ``task_arn`` is given, the param is only deleted if it still belongs to
+    this task. This prevents a replaced task's delayed SIGTERM from clobbering
+    the registration a newer task has since written for the same PR.
+    """
+    ssm = _ssm()
+    if task_arn is not None:
+        try:
+            resp = ssm.get_parameter(Name=_param_name(pr_number))
+            payload = json.loads(resp["Parameter"]["Value"])
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ParameterNotFound":
+                return
+            logger.exception("Failed to read task for PR #%s before deregister", pr_number)
+            return
+        except (json.JSONDecodeError, KeyError):
+            payload = {}
+        if payload.get("task_arn") not in (None, task_arn):
+            logger.info(
+                "Skipping deregister for PR #%s: param belongs to a different task", pr_number
+            )
+            return
     try:
-        _ssm().delete_parameter(Name=_param_name(pr_number))
+        ssm.delete_parameter(Name=_param_name(pr_number))
         logger.info("Deregistered task for PR #%s from SSM", pr_number)
     except ClientError as e:
         if e.response["Error"]["Code"] == "ParameterNotFound":

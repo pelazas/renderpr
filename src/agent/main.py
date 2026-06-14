@@ -793,7 +793,7 @@ def run() -> None:
         logger.info("Task ARN: %s", task_arn)
 
         def _shutdown(_signum, _frame):
-            deregister_task(pr_number)
+            deregister_task(pr_number, task_arn)
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, _shutdown)
@@ -1044,6 +1044,7 @@ Live app: http://{public_ip}:{_dev_server_port}
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
         handle_review_fn=on_review,
+        on_idle_shutdown=lambda: deregister_task(pr_number, task_arn),
     )
     server.start()
 

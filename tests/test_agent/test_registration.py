@@ -68,3 +68,21 @@ def test_deregister_missing_task_is_noop():
     from src.agent.registration import deregister_task
 
     deregister_task("never-existed")
+
+
+def test_deregister_with_matching_arn_deletes():
+    from src.agent.registration import register_task, deregister_task, lookup_task
+
+    register_task("42", "arn:mine", "1.2.3.4")
+    deregister_task("42", task_arn="arn:mine")
+    assert lookup_task("42") is None
+
+
+def test_deregister_with_mismatched_arn_is_noop():
+    """A replaced task's late SIGTERM must not delete a newer task's registration."""
+    from src.agent.registration import register_task, deregister_task, lookup_task
+
+    register_task("42", "arn:new-task", "9.9.9.9")
+    # The old task (arn:old-task) tries to deregister after being replaced.
+    deregister_task("42", task_arn="arn:old-task")
+    assert lookup_task("42") == "9.9.9.9"

@@ -96,6 +96,7 @@ class CommandServer:
         port: int = 3001,
         idle_timeout: int | None = None,
         token: bytes | None = None,
+        on_idle_shutdown: Callable | None = None,
     ):
         self._handle_change = handle_change_fn
         self._handle_apply = handle_apply_fn
@@ -104,6 +105,7 @@ class CommandServer:
         self._port = port
         self._idle_timeout = idle_timeout or IDLE_TIMEOUT_SECONDS
         self._token = token if token is not None else _get_command_token()
+        self._on_idle_shutdown = on_idle_shutdown
         self._last_interaction = time.time()
         self._httpd: ThreadingHTTPServer | None = None
         self._last_interaction_lock = threading.Lock()
@@ -162,6 +164,11 @@ class CommandServer:
                 elapsed = time.time() - self._last_interaction
             if elapsed >= self._idle_timeout:
                 logger.info("Idle timeout reached (%ds). Shutting down.", self._idle_timeout)
+                if self._on_idle_shutdown is not None:
+                    try:
+                        self._on_idle_shutdown()
+                    except Exception:
+                        logger.exception("on_idle_shutdown callback failed")
                 if self._httpd:
                     self._httpd.shutdown()
                 sys.exit(0)

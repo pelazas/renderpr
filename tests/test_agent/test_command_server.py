@@ -203,3 +203,41 @@ class TestCommandServer:
         time.sleep(0.01)
         server.reset_idle_timer()
         assert server._last_interaction > old
+
+    def test_idle_timeout_runs_shutdown_callback(self, monkeypatch):
+        import pytest
+
+        from src.agent import command_server as cs
+
+        called = {"shutdown": False}
+
+        server = CommandServer(
+            handle_change_fn=lambda q: {},
+            handle_apply_fn=lambda: {},
+            idle_timeout=1,
+            on_idle_shutdown=lambda: called.__setitem__("shutdown", True),
+        )
+        # Force the timeout to be already exceeded, and skip the real poll sleep.
+        server._last_interaction = time.time() - 100
+        monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+
+        with pytest.raises(SystemExit):
+            server.run_idle_loop()
+
+        assert called["shutdown"] is True
+
+    def test_idle_timeout_without_callback_still_exits(self, monkeypatch):
+        import pytest
+
+        from src.agent import command_server as cs
+
+        server = CommandServer(
+            handle_change_fn=lambda q: {},
+            handle_apply_fn=lambda: {},
+            idle_timeout=1,
+        )
+        server._last_interaction = time.time() - 100
+        monkeypatch.setattr(cs.time, "sleep", lambda _s: None)
+
+        with pytest.raises(SystemExit):
+            server.run_idle_loop()
