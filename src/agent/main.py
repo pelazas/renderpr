@@ -530,12 +530,18 @@ def _capture_screenshots(
     diff: str,
     secrets: dict,
     auth_session=None,
+    routes: list[dict] | None = None,
+    mocks: dict | None = None,
 ) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
     from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
-    repo_tree = build_repo_tree()
-    routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"], _framework)
+    # Routes/mocks are inferred once per diff (see run()) and reused for every
+    # capture pass; only infer here when a caller hasn't supplied them.
+    if routes is None:
+        repo_tree = build_repo_tree()
+        routes, mocks = infer_routes(diff, repo_tree, secrets["openrouter_api_key"], _framework)
+    mocks = mocks or {}
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
@@ -824,6 +830,22 @@ def run() -> None:
         from src.agent.auth import build_session
         auth_session = build_session(repo_config["auth"], repo_secrets, _dev_server_url)
 
+        # Infer the screenshot route set ONCE for this diff. Both the initial
+        # review and every later code-change run reuse it, so a given diff always
+        # produces the same capture set — route inference is non-deterministic
+        # (LLM augment), so re-running it per command drifted the sets apart.
+        route_plan: dict = {}
+
+        def get_route_plan() -> tuple[list[dict], dict]:
+            if not route_plan:
+                from src.agent.routes import build_repo_tree, infer_routes
+                routes, mocks = infer_routes(
+                    diff, build_repo_tree(), secrets["openrouter_api_key"], _framework
+                )
+                route_plan["routes"] = routes
+                route_plan["mocks"] = mocks
+            return route_plan["routes"], route_plan["mocks"]
+
         def do_review(use_progress: bool = False) -> None:
             from src.agent.review import ReviewError, run_review
 
@@ -832,7 +854,10 @@ def run() -> None:
 
             if pid is not None:
                 update_progress(2)
-            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(diff, secrets, auth_session)
+            routes, mocks = get_route_plan()
+            screenshot_paths, screenshot_urls, login_walls = _capture_screenshots(
+                diff, secrets, auth_session, routes=routes, mocks=mocks
+            )
             logger.info(
                 "Captured %d screenshots: %s",
                 len(screenshot_paths),
@@ -912,6 +937,7 @@ def run() -> None:
         if frontend_root:
             frontend_root = str(Path(frontend_root).parent)
 
+        base_routes, base_mocks = get_route_plan()
         result = execute_change(
             query=query,
             openrouter_api_key=secrets["openrouter_api_key"],
@@ -921,6 +947,8 @@ def run() -> None:
             pr_number=pr_number,
             frontend_root=frontend_root,
             framework=discovery["launch_profile"].framework,
+            base_routes=base_routes,
+            base_mocks=base_mocks,
         )
 
         if result["status"] == "no_visible_change":
