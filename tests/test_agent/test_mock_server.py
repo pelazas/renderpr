@@ -245,6 +245,10 @@ def test_changed_route_is_wrapped_not_blind_stubbed(tmp_path):
     assert "export const GET = __renderprWrap" in wrapper
     assert "x-renderpr-route-error" in wrapper
     assert "return await fn" in wrapper
+    # The error message goes into an HTTP header, so non-printable/non-ASCII
+    # chars (e.g. newlines in a stack-y message) must be stripped or building
+    # the fallback response would itself throw.
+    assert r"replace(/[^\x20-\x7E]/g, " in wrapper
 
     orig = tmp_path / "src/app/api/users/_renderpr_orig_route.ts"
     assert "return Response.json([{ id: 1 }])" in orig.read_text()

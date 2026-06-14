@@ -190,7 +190,7 @@ def _route_handler_wrapper_source(api_path: str, methods: list[str], is_ts: bool
         "    status: 200,",
         "    headers: {",
         f'      "{API_FALLBACK_HEADER}": "{api_path}",',
-        f'      "{API_ERROR_HEADER}": String((err && err.message) || "error").slice(0, 300),',
+        f'      "{API_ERROR_HEADER}": String((err && err.message) || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200),',
         "    },",
         "  });",
         "const __renderprWrap = (fn) =>",
