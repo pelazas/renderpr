@@ -126,7 +126,7 @@ def _inline_references(text: str, url_pairs: list[tuple[str, str]]) -> str:
     return re.sub(pattern, replace_ref, text)
 
 
-def _inline_all_views(text: str, screenshot_urls: list[tuple[str, str]], inline_images: bool = False) -> str:
+def _inline_all_views(text: str, screenshot_urls: list[tuple[str, str]]) -> str:
     route_views: dict[str, list[tuple[str, str]]] = {}
     for url, label in screenshot_urls:
         parts = label.split(" - ", 1)
@@ -142,13 +142,6 @@ def _inline_all_views(text: str, screenshot_urls: list[tuple[str, str]], inline_
         non_desktop = [(v, u) for v, u in views if v != "Desktop"]
         if not non_desktop:
             return ""
-        if inline_images:
-            # Cropped changed-region shots are small; show every viewport inline
-            # instead of hiding them behind links (responsive diffs matter).
-            return "".join(
-                f'\n\n<img width="400" src="{u}" alt="{v}"><br><em>{v}</em>\n\n'
-                for v, u in sorted(non_desktop)
-            )
         return " · ".join(f"[View on {v}]({u})" for v, u in sorted(non_desktop))
 
     return re.sub(pattern, replace_all_views, text)
@@ -159,7 +152,6 @@ def run_review(
     screenshot_paths: list[Path],
     openrouter_api_key: str,
     screenshot_urls: list[tuple[str, str]] | None = None,
-    cropped: bool = False,
 ) -> str:
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
     headers = {
@@ -188,7 +180,7 @@ def run_review(
                 text = _strip_code_fence(text)
                 if screenshot_urls:
                     text = _inline_references(text, screenshot_urls)
-                    text = _inline_all_views(text, screenshot_urls, inline_images=cropped)
+                    text = _inline_all_views(text, screenshot_urls)
                 return text
             except (KeyError, IndexError, TypeError):
                 raise ReviewError(f"Unexpected OpenRouter response shape: {str(data)[:200]}")

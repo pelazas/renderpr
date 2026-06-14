@@ -261,22 +261,6 @@ class TestInlineAllViews:
         assert "[View on Tablet]" in result
         assert "[View on Desktop]" not in result
 
-    def test_inline_images_embeds_all_viewports_when_cropped(self):
-        from src.agent.review import _inline_all_views
-
-        text = "Changed nav. [All views: /]"
-        urls = [
-            ("https://s3/desktop.png", "Desktop - /"),
-            ("https://s3/mobile.png", "Mobile XS - /"),
-            ("https://s3/tablet.png", "Tablet - /"),
-        ]
-        result = _inline_all_views(text, urls, inline_images=True)
-        # non-Desktop viewports rendered as inline images, not links
-        assert '<img width="400" src="https://s3/mobile.png"' in result
-        assert '<img width="400" src="https://s3/tablet.png"' in result
-        assert "[View on" not in result
-        assert "https://s3/desktop.png" not in result  # Desktop inlined separately via [Desktop - /]
-
     def test_excludes_desktop_from_links(self):
         from src.agent.review import _inline_all_views
 

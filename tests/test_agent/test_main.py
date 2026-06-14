@@ -52,7 +52,7 @@ def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_pr_meta", lambda *a, **kw: {"head_ref": "review-pr", "is_fork": False, "base": {"repo": {"full_name": "test-owner/test-repo"}}})
     monkeypatch.setattr("src.agent.main.discover_frontend", _successful_discovery)
     monkeypatch.setattr("src.agent.main.load_repo_secrets", lambda *a, **kw: {})
-    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], [], False))
+    monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
     monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
     monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
     monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review\n\nLooks good.")
@@ -1110,7 +1110,7 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
         monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], [], False))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
 
         run()
 
@@ -1129,7 +1129,7 @@ class TestDiscoveryIntegration:
         monkeypatch.setattr("src.agent.main._post_comment", lambda *a, **kw: 123)
         monkeypatch.setattr("src.agent.main._update_comment", lambda *a, body, **kw: posted.append(body) or True)
         monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], [], False))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
 
         run()
 
@@ -1155,7 +1155,7 @@ class TestDiscoveryIntegration:
             started_with["install_dir"] = install_dir
         monkeypatch.setattr("src.agent.main._start_dev_server", track_start)
 
-        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], [], False))
+        monkeypatch.setattr("src.agent.main._capture_screenshots", lambda *a, **kw: ([], [], []))
         monkeypatch.setattr("src.agent.network.get_public_ip", lambda: "54.1.2.3")
         monkeypatch.setattr("src.agent.main.write_dev_origin_allowlist", lambda *a, **kw: [])
         monkeypatch.setattr("src.agent.review.run_review", lambda *a, **kw: "## Review")
@@ -1239,7 +1239,7 @@ def test_login_wall_without_auth_degrades(tmp_path, monkeypatch):
     # Simulate screenshots landing on a login wall, with no auth configured.
     monkeypatch.setattr(
         "src.agent.main._capture_screenshots",
-        lambda *a, **kw: ([], [], [{"path": "/", "url": "http://localhost:3000/login"}], False),
+        lambda *a, **kw: ([], [], [{"path": "/", "url": "http://localhost:3000/login"}]),
     )
 
     run()
