@@ -188,14 +188,15 @@ def _describe_attempt(edits: list[dict], reason: str) -> str:
 def _routes_for_edits(base_routes: list[dict], edits: list[dict], actions: list, framework: str) -> tuple[list[dict], str | None]:
     """Expand the diff-inferred routes with edit-provided actions and the route
     that renders each edited file, returning (routes, primary_edit_route)."""
+    from src.agent.code_edit import safe_repo_path
     from src.agent.routes import _validate_routes
 
     if actions:
-        source_contents = {
-            edit["file"]: (Path(REPO_DIR) / edit["file"]).read_text(errors="replace")
-            for edit in edits
-            if (Path(REPO_DIR) / edit["file"]).exists()
-        }
+        source_contents: dict[str, str] = {}
+        for edit in edits:
+            path = safe_repo_path(edit.get("file", ""))
+            if path is not None and path.is_file():
+                source_contents[edit["file"]] = path.read_text(errors="replace")
         routes = _validate_routes([{**route, "actions": actions} for route in base_routes], source_contents)
     else:
         routes = [dict(route) for route in base_routes]
