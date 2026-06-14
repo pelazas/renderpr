@@ -613,7 +613,11 @@ def _fallback_routes() -> list[dict]:
 
 CHANGED_REGION_PROMPT = """You decide whether a PR's visual change is confined to ONE specific element on the page.
 
-Given the git diff, respond with a CSS selector for the changed element ONLY when the change is localized to a single, identifiable element that occupies a MINORITY of the page (e.g. a navbar, header, footer, a specific card, a button). Otherwise respond with null.
+Given the git diff, respond with a CSS selector for the changed element ONLY when the change is localized to a single, identifiable element that occupies a MINORITY of the page (e.g. a navbar, header, footer, sidebar, a specific card, a button). Otherwise respond with null.
+
+Decision heuristic — judge by WHERE it renders, not which file changed:
+- Peripheral chrome (navbar, header, footer, sidebar) or one small, self-contained component => return its selector.
+- The primary content area, the hero, the page's main column, a layout/spacing change, or several separate areas => return null.
 
 Return null (do NOT guess a selector) when:
 - the change affects the whole page, the overall layout, or several separate areas,
@@ -622,7 +626,8 @@ Return null (do NOT guess a selector) when:
 
 Selector rules:
 - It must resolve to exactly ONE element on the rendered page.
-- Prefer stable, semantic selectors: a tag like nav/header/footer/main/aside, an id (#id), a data attribute ([data-x]), or [aria-label="..."]. Avoid brittle Tailwind / utility class chains.
+- NEVER return a page-level container that wraps the main content: not `main`, `body`, `#root`, `#__next`, `html`, or a top-level layout wrapper. If the change lives inside the primary content area, return null instead.
+- Prefer stable, semantic selectors: a tag like nav/header/footer/aside, an id (#id), a data attribute ([data-x]), or [aria-label="..."]. Avoid brittle Tailwind / utility class chains.
 - A wrong selector is worse than null.
 
 Output ONLY JSON, nothing else:
