@@ -372,6 +372,94 @@ def test_reject_is_ignored_no_task_spawned(monkeypatch):
     assert len(tasks["taskArns"]) == 0
 
 
+def _register_ssm_task(pr_number: str, head_sha: str, task_arn: str = "arn:task:abc"):
+    ssm = boto3.client("ssm", region_name="us-east-1")
+    ssm.put_parameter(
+        Name=f"/renderpr/tasks/{pr_number}",
+        Type="String",
+        Value=json.dumps({"task_arn": task_arn, "public_ip": "5.6.7.8", "head_sha": head_sha}),
+        Overwrite=True,
+    )
+
+
+def test_synchronize_same_sha_reuses_task():
+    from src.lambda_handler.webhook_handler import handler
+
+    _register_ssm_task("99", head_sha="cafe1234")
+
+    body = json.dumps(
+        {
+            "action": "synchronize",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "pull_request": {"number": 99, "head": {"sha": "cafe1234"}},
+            "after": "cafe1234",
+        }
+    )
+    event = {"headers": {"x-hub-signature-256": _sign(body)}, "body": body}
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"]).get("reused") is True
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    assert len(ecs.list_tasks(cluster=CLUSTER_ARN)["taskArns"]) == 0
+
+
+def test_synchronize_older_sha_replaces_task():
+    from src.lambda_handler.webhook_handler import handler
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    old = _create_running_task(ecs)
+    old_arn = old["tasks"][0]["taskArn"]
+    _register_ssm_task("99", head_sha="oldsha00", task_arn=old_arn)
+
+    body = json.dumps(
+        {
+            "action": "synchronize",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "pull_request": {"number": 99, "head": {"sha": "newsha11"}},
+            "after": "newsha11",
+        }
+    )
+    event = {"headers": {"x-hub-signature-256": _sign(body)}, "body": body}
+    result = handler(event, {})
+    assert result["statusCode"] == 200
+    assert json.loads(result["body"]).get("replaced") is True
+
+    # Old task stopped, a fresh one started, SSM registration cleared.
+    running = ecs.list_tasks(cluster=CLUSTER_ARN, desiredStatus="RUNNING")["taskArns"]
+    assert old_arn not in running
+    assert len(running) == 1
+
+    ssm = boto3.client("ssm", region_name="us-east-1")
+    with pytest.raises(ssm.exceptions.ParameterNotFound):
+        ssm.get_parameter(Name="/renderpr/tasks/99")
+
+
+def test_concurrency_cap_returns_429(monkeypatch):
+    from src.lambda_handler import webhook_handler
+
+    monkeypatch.setattr(webhook_handler, "MAX_CONCURRENT_TASKS", 2)
+    monkeypatch.setattr(webhook_handler, "_count_running_tasks", lambda: 2)
+
+    body = json.dumps(
+        {
+            "action": "opened",
+            "installation": {"id": 456},
+            "repository": {"full_name": "owner/repo"},
+            "pull_request": {"number": 123, "head": {"sha": "abc"}},
+        }
+    )
+    event = {"headers": {"x-hub-signature-256": _sign(body)}, "body": body}
+    result = webhook_handler.handler(event, {})
+    assert result["statusCode"] == 429
+    assert json.loads(result["body"])["ok"] is False
+
+    ecs = boto3.client("ecs", region_name="us-east-1")
+    assert len(ecs.list_tasks(cluster=CLUSTER_ARN)["taskArns"]) == 0
+
+
 def test_code_change_with_running_task_dispatches(monkeypatch):
     from src.lambda_handler.webhook_handler import handler
 

@@ -16,6 +16,11 @@ SUBNET_IDS = os.environ["SUBNET_IDS"].split(",")
 SECURITY_GROUP_ID = os.environ["SECURITY_GROUP_ID"]
 GITHUB_PARAM_NAME = os.environ["GITHUB_PARAM_NAME"]
 
+# Hard ceiling on concurrently running Fargate review tasks. New net-new starts
+# above this are refused with 429 to bound runaway compute spend. 0 disables.
+MAX_CONCURRENT_TASKS = int(os.environ.get("MAX_CONCURRENT_TASKS", "5"))
+TASKS_PARAM_PREFIX = os.environ.get("TASKS_PARAM_PREFIX", "/renderpr/tasks")
+
 _ssm = boto3.client("ssm")
 try:
     param = _ssm.get_parameter(Name=GITHUB_PARAM_NAME, WithDecryption=True)
@@ -43,7 +48,6 @@ def _verify_signature(body: bytes, signature_header: str) -> bool:
 
 def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
     client = boto3.client("ecs")
-    family = ECS_TASK_DEF.split("/")[-1].split(":")[0]
     task_tags = [
         {"key": "Project", "value": "renderpr"},
         {"key": "PRNumber", "value": pr_number},
@@ -77,9 +81,9 @@ def _run_fargate_task(overrides: list[dict], pr_number: str) -> None:
         logger.error("run_task failures: %s", failures)
 
 
-def _lookup_running_task(pr_number: str) -> str | None:
-    """Return the public IP of the running task for this PR, or None."""
-    param_name = f"/renderpr/tasks/{pr_number}"
+def _lookup_running_record(pr_number: str) -> dict | None:
+    """Return the full registration payload for this PR's task, or None."""
+    param_name = f"{TASKS_PARAM_PREFIX}/{pr_number}"
     ssm = boto3.client("ssm")
     try:
         resp = ssm.get_parameter(Name=param_name)
@@ -91,15 +95,70 @@ def _lookup_running_task(pr_number: str) -> str | None:
         return None
 
     try:
-        payload = json.loads(resp["Parameter"]["Value"])
+        return json.loads(resp["Parameter"]["Value"])
     except (json.JSONDecodeError, KeyError):
         logger.warning("Malformed SSM payload for PR #%s", pr_number)
         return None
 
+
+def _lookup_running_task(pr_number: str) -> str | None:
+    """Return the public IP of the running task for this PR, or None."""
+    payload = _lookup_running_record(pr_number)
+    if not payload:
+        return None
     public_ip = payload.get("public_ip")
     if public_ip:
         logger.info("Found running task for PR #%s via SSM at %s", pr_number, public_ip)
     return public_ip
+
+
+def _deregister_task(pr_number: str) -> None:
+    """Best-effort removal of a PR's task registration from SSM."""
+    ssm = boto3.client("ssm")
+    try:
+        ssm.delete_parameter(Name=f"{TASKS_PARAM_PREFIX}/{pr_number}")
+    except ssm.exceptions.ParameterNotFound:
+        return
+    except Exception:
+        logger.exception("Failed to deregister task for PR #%s", pr_number)
+
+
+def _count_running_tasks() -> int:
+    """Count RUNNING/PENDING Fargate tasks in the cluster (cap of 5 « page size)."""
+    client = boto3.client("ecs")
+    try:
+        resp = client.list_tasks(cluster=ECS_CLUSTER, desiredStatus="RUNNING")
+        return len(resp.get("taskArns", []))
+    except Exception:
+        # Fail open: a transient ECS API error shouldn't block legitimate reviews;
+        # the reaper still bounds total cost.
+        logger.exception("Failed to count running tasks; allowing request")
+        return 0
+
+
+def _capacity_exceeded() -> bool:
+    if MAX_CONCURRENT_TASKS <= 0:
+        return False
+    return _count_running_tasks() >= MAX_CONCURRENT_TASKS
+
+
+def _too_many_tasks_response() -> dict:
+    return {
+        "statusCode": 429,
+        "body": json.dumps({
+            "ok": False,
+            "error": "Too many concurrent RenderPR review tasks. Try again shortly.",
+        }),
+    }
+
+
+def _stop_task(task_arn: str, reason: str) -> None:
+    client = boto3.client("ecs")
+    try:
+        client.stop_task(cluster=ECS_CLUSTER, task=task_arn, reason=reason)
+        logger.info("Stopped task %s (%s)", task_arn, reason)
+    except Exception:
+        logger.exception("Failed to stop task %s", task_arn)
 
 
 def _dispatch_to_task(public_ip: str, command: str, query: str | None) -> bool:
@@ -230,6 +289,11 @@ def handler(event: dict, context: object) -> dict:
                     }),
                 }
 
+            # Cold-start paths spawn a net-new task, so they honor the cap.
+            if _capacity_exceeded():
+                logger.warning("Concurrency cap (%d) reached; refusing PR #%s", MAX_CONCURRENT_TASKS, pr_number)
+                return _too_many_tasks_response()
+
             if cmd["command"] == "review":
                 _run_fargate_task(base_env, pr_number)
                 return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
@@ -246,6 +310,8 @@ def handler(event: dict, context: object) -> dict:
             return {"statusCode": 200, "body": json.dumps({"ok": True, "cold_start": True})}
 
         # Default: full review (no @renderpr command, just a plain comment)
+        if _capacity_exceeded():
+            return _too_many_tasks_response()
         _run_fargate_task(base_env, pr_number)
         return {"statusCode": 200, "body": json.dumps({"ok": True})}
 
@@ -259,6 +325,31 @@ def handler(event: dict, context: object) -> dict:
     if sender_login.endswith("[bot]") or sender_type == "Bot":
         logger.info("Ignoring %s event from bot account: %s", action, sender_login or sender_type)
         return {"statusCode": 200, "body": json.dumps({"ok": True, "ignored": "self"})}
+
+    # Per-PR dedup by reviewed SHA: a task already reviewing this exact commit is
+    # reused (no new task); a task on a superseded commit is stopped and replaced.
+    new_sha = str(
+        body.get("after")
+        or body.get("pull_request", {}).get("head", {}).get("sha", "")
+    )
+    record = _lookup_running_record(pr_number)
+    if record:
+        running_sha = record.get("head_sha")
+        if running_sha and new_sha and running_sha == new_sha:
+            logger.info("Task already reviewing %s for PR #%s; reusing", new_sha[:8], pr_number)
+            return {"statusCode": 200, "body": json.dumps({"ok": True, "reused": True})}
+        # Stale task on an older commit: stop it, then start a fresh review. This
+        # is net-neutral on concurrency, so it bypasses the cap.
+        task_arn = record.get("task_arn")
+        if task_arn:
+            _stop_task(task_arn, reason="Superseded by a newer commit")
+        _deregister_task(pr_number)
+        _run_fargate_task(base_env, pr_number)
+        return {"statusCode": 200, "body": json.dumps({"ok": True, "replaced": True})}
+
+    if _capacity_exceeded():
+        logger.warning("Concurrency cap (%d) reached; refusing PR #%s", MAX_CONCURRENT_TASKS, pr_number)
+        return _too_many_tasks_response()
 
     _run_fargate_task(base_env, pr_number)
     return {"statusCode": 200, "body": json.dumps({"ok": True})}

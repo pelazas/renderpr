@@ -223,7 +223,7 @@ BYOC-vs-SaaS relevance.
 | F-5 | **H** | No egress restriction (see (b)); enables exfiltration and SSRF from untrusted code. | `renderpr-stack.ts:36-40` | Both |
 | F-6 | **H** | S3 screenshot bucket is `publicReadAccess: true`; object keys are `screenshots/{pr_number}/...` (guessable). Rendered UI of private repos — including **authenticated** views produced via synthetic-session forging — is world-readable to anyone with/guessing the URL. URLs are posted in PR comments. | `renderpr-stack.ts:61-81`; `visual.upload_screenshots` | Both |
 | F-7 | **M** | Lambda→task command dispatch is plaintext **HTTP** to `http://{public_ip}:3001`; the bearer-style command token is sent in clear over the internet and is interceptable. | `webhook_handler.py:105-128` | Both |
-| F-8 | **M** | Any user who can comment `@renderpr` (or open a PR) on a watched repo can trigger Fargate `RunTask` → arbitrary code execution + unbounded compute/LLM spend. No per-author authorization, rate limit, or concurrency cap. On public repos this is fully unauthenticated-from-the-internet (any GitHub user). | `webhook_handler.py:203-264` | Both (cost DoS worse in SaaS) |
+| F-8 | **M → L** | Any user who can comment `@renderpr` (or open a PR) on a watched repo can trigger Fargate `RunTask` → arbitrary code execution + compute/LLM spend. **Partially mitigated:** a global concurrency cap (`MAX_CONCURRENT_TASKS`), per-PR SHA dedup, API Gateway throttling, and a scheduled reaper now bound *unbounded* spend. **Residual:** still no per-author authorization (author-association gating remains open); the compute-DoS ceiling is capped but non-zero. | `webhook_handler.py` (dedup/cap), `reaper_handler.py`, `renderpr-stack.ts` (throttling) | Both (cost DoS worse in SaaS) |
 | F-9 | **M** | No webhook replay/timestamp protection; a captured valid delivery can be replayed to re-trigger tasks. | `webhook_handler.py:37-41,160-171` | Both |
 | F-10 | **M** | CI uses long-lived static AWS keys (`AWS_ACCESS_KEY_ID`/`SECRET`) for `cdk deploy --require-approval never`; deploy identity is typically broad. Prefer GitHub OIDC role assumption + scoped deploy policy. | `.github/workflows/deploy.yml:64-81` | Both |
 | F-11 | **L/M** | LLM-generated edits write to `Path(REPO_DIR)/edit["file"]` with no path-traversal guard; `validate_edit` only checks existence + `oldString` match. A `../`-containing path (LLM influenced by attacker query/diff) could write outside the intended tree (bounded: target must exist and contain `oldString`). | `code_edit.py:141-149`; `editor.py:64-75` | Both |
@@ -324,10 +324,13 @@ cross-tenant reads.
   over plaintext HTTP across the internet.
 
 ### P2 — Trigger authorization & abuse limits (fixes F-8, F-9)
-- Gate `RunTask` on author association (e.g., only OWNER/MEMBER/COLLABORATOR can
-  trigger automatically; others require a maintainer opt-in label), and/or add
-  per-repo concurrency caps and rate limits. Add LLM/compute budget guards.
-- Add webhook delivery-id/timestamp replay protection.
+- ✅ **Done:** global concurrency cap (`MAX_CONCURRENT_TASKS`), per-PR SHA dedup,
+  API Gateway throttling, and a scheduled orphan-task reaper that hard-stops
+  tasks past `MAX_TASK_AGE_SECONDS`. Bounds the cost-DoS surface of F-8.
+- **Still open:** gate `RunTask` on author association (e.g., only
+  OWNER/MEMBER/COLLABORATOR trigger automatically; others require a maintainer
+  opt-in label). Add LLM/compute budget guards.
+- Add webhook delivery-id/timestamp replay protection (F-9).
 
 ### P3 — Supply-chain & hygiene (F-10, F-11, F-12, F-13)
 - CI: switch to GitHub OIDC + a scoped CDK deploy role; drop static AWS keys.

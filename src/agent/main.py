@@ -558,6 +558,7 @@ def _fetch_pr_meta(token: str, repo_full_name: str, pr_number: str) -> dict:
     data = resp.json()
     return {
         "head_ref": data["head"]["ref"],
+        "head_sha": data["head"]["sha"],
         "is_fork": data["head"]["repo"]["fork"],
     }
 
@@ -871,7 +872,7 @@ def run() -> None:
         logger.info("Task ARN: %s", task_arn)
 
         def _shutdown(_signum, _frame):
-            deregister_task(pr_number)
+            deregister_task(pr_number, task_arn)
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, _shutdown)
@@ -1144,12 +1145,13 @@ Live app: http://{public_ip}:{_dev_server_port}
         handle_change_fn=on_change,
         handle_apply_fn=on_apply,
         handle_review_fn=on_review,
+        on_idle_shutdown=lambda: deregister_task(pr_number, task_arn),
         token=command_token.encode("utf-8"),
     )
     server.start()
 
     if task_arn and public_ip != "localhost":
-        register_task(pr_number, task_arn, public_ip)
+        register_task(pr_number, task_arn, public_ip, head_sha=pr_meta["head_sha"])
 
     boot_cmd = os.environ.get("COMMAND", "")
     if boot_cmd:
