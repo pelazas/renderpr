@@ -243,7 +243,7 @@ class TestVisionGrounding:
 
         seen = {}
 
-        def fake_request_edit(query, api_key, frontend_root=None, images=None):
+        def fake_request_edit(query, api_key, frontend_root=None, images=None, feedback=None):
             seen["images"] = images
             return {
                 "edits": [{"file": "app/page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"}],
@@ -276,6 +276,61 @@ class TestVisionGrounding:
 
         assert result["status"] == "success"
         assert seen["images"] == [b"img-1"]  # before-screenshot handed to the model
+
+
+class TestRetryLoop:
+    def test_retries_with_feedback_then_succeeds(self, tmp_path, monkeypatch):
+        from src.agent import editor
+
+        target = tmp_path / "app" / "page.tsx"
+        target.parent.mkdir(parents=True)
+        target.write_text("via-indigo-700")
+
+        monkeypatch.setattr("src.agent.editor.REPO_DIR", str(tmp_path))
+        monkeypatch.setattr("src.agent.code_edit.REPO_DIR", str(tmp_path))
+
+        calls = {"n": 0, "feedback_seen": []}
+
+        def fake_request_edit(query, api_key, frontend_root=None, images=None, feedback=None):
+            calls["n"] += 1
+            calls["feedback_seen"].append(list(feedback or []))
+            return {
+                "edits": [{"file": "app/page.tsx", "line": 1, "oldString": "via-indigo-700", "newString": "via-orange-500"}],
+                "actions": [],
+            }
+
+        monkeypatch.setattr("src.agent.code_edit.request_edit", fake_request_edit)
+        monkeypatch.setattr(editor, "wait_for_dev_server", lambda *a, **kw: True)
+        # Restore the file on revert so the next attempt's edit applies again.
+        monkeypatch.setattr(editor, "revert_edits", lambda edits: target.write_text("via-indigo-700"))
+        monkeypatch.setattr("src.agent.routes.build_repo_tree", lambda: "app/page.tsx")
+        monkeypatch.setattr(
+            "src.agent.routes.infer_routes",
+            lambda *a, **kw: ([{"path": "/", "actions": [], "reason": "test"}], {}),
+        )
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+
+        cap = {"n": 0}
+
+        def fake_capture(*a, **kw):
+            cap["n"] += 1
+            # before (call 1) and attempt-1 after (call 2) identical; attempt-2 after (call 3) differs.
+            content = b"same" if cap["n"] <= 2 else b"changed"
+            shot = tmp_path / f"s{cap['n']}.png"
+            shot.write_bytes(content)
+            return [(shot, "Desktop - /")]
+
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+
+        result = editor.execute_change(
+            "make the headline orange", "sk-or-fake", "http://localhost:3000", "diff",
+            bucket="", pr_number="1",
+        )
+
+        assert result["status"] == "success"
+        assert calls["n"] == 2  # second attempt succeeded
+        assert calls["feedback_seen"][0] == []  # first attempt: no feedback
+        assert calls["feedback_seen"][1]  # second attempt: got feedback about the no-op
 
 
 class TestNoVisibleChange:

@@ -36,6 +36,7 @@ RULES:
 - The user describes what they SEE — map their words to the implementation:
   - A colour word covers the whole Tailwind family: "purple" may be `purple`, `violet`, `indigo`, or `fuchsia`; "orange" may be `orange` or `amber`. Match on the visible colour, not on the literal word.
   - Text colour is often produced by a GRADIENT, not a `text-*` class: look for `bg-gradient-to-*` with `from-*` / `via-*` / `to-*` colour stops combined with `bg-clip-text text-transparent`. To recolour such text you MUST change EVERY gradient stop (`from-`, `via-`, AND `to-`), not just one.
+- Edit the component that RENDERS the element shown in the screenshot. Do NOT change CSS custom properties such as `--foreground` / `--background` in a global stylesheet unless the request is explicitly about global/body text — they will not affect a specific styled element.
 - Output ALL edits required. One visual change often needs several class edits — return one entry per class you change.
 - Output valid JSON only. No explanation, no markdown.
 
@@ -179,6 +180,7 @@ def request_edit(
     api_key: str,
     frontend_root: str | None = None,
     images: list[bytes] | None = None,
+    feedback: list[str] | None = None,
 ) -> dict:
     root = frontend_root or ""
     tree = _build_directory_tree(root)
@@ -187,7 +189,10 @@ def request_edit(
     if not selected:
         raise EditGenerationError("No files selected for edit")
 
-    logger.info("Selected files for edit: %s", selected)
+    logger.info(
+        "Selected files for edit: %s (grounded with %d screenshot(s), %d prior failed attempt(s))",
+        selected, len(images or []), len(feedback or []),
+    )
 
     file_contents: list[str] = []
     for fp in selected:
@@ -202,7 +207,12 @@ def request_edit(
         "matching classes in the files below."
         if images else ""
     )
-    user_message = f"Request: {query}{grounding}\n\nFiles:\n\n" + "\n\n".join(file_contents)
+    retry = (
+        "\n\nPREVIOUS ATTEMPTS THAT DID NOT WORK — do something DIFFERENT this time:\n"
+        + "\n".join(f"- {f}" for f in feedback)
+        if feedback else ""
+    )
+    user_message = f"Request: {query}{grounding}{retry}\n\nFiles:\n\n" + "\n\n".join(file_contents)
 
     messages: list[dict] = [
         {"role": "system", "content": CODE_EDIT_PROMPT},

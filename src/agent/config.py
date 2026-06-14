@@ -87,6 +87,10 @@ REPO_DIR: str = "/app/repo"
 LLM_MODEL: str = "google/gemini-2.5-flash"
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
 
+# How many times the code-change agent may regenerate an edit when the previous
+# attempt produced no visible change (verified via screenshot diff).
+EDIT_MAX_ATTEMPTS: int = 3
+
 # --- Env/secret injection & auth-gated apps ---
 
 # Per-repo user secrets live in SSM SecureString, one parameter per secret under
