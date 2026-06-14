@@ -531,6 +531,7 @@ def _capture_screenshots(
     secrets: dict,
     auth_session=None,
 ) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
+    from src.agent.mock_server import changed_api_paths
     from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
@@ -539,8 +540,13 @@ def _capture_screenshots(
     logger.info("Routes to screenshot: %s", [r["path"] for r in routes])
     if mocks:
         logger.info("Mocks configured for %d domain(s): %s", len(mocks), list(mocks.keys()))
-        generated = write_server_mocks(Path(REPO_DIR), mocks, _framework)
+        generated = write_server_mocks(Path(REPO_DIR), mocks, _framework, diff=diff)
         _runtime_generated_files.update(generated)
+
+    # Routes the PR changed are served by their real (error-guarded) handler, so
+    # the browser-layer catch-all must let those requests through instead of
+    # stubbing them. Only meaningful for Next, where handlers live in-repo.
+    changed_paths = changed_api_paths(diff) if _framework == "next" else set()
 
     # When the change is confined to one element (e.g. a navbar), crop the
     # screenshot to it; page-wide/ambiguous changes return None -> full page.
@@ -556,6 +562,7 @@ def _capture_screenshots(
         entry_url=auth_session.entry_url if auth_session else None,
         login_signals=login_signals,
         changed_selector=changed_selector,
+        changed_paths=changed_paths,
     )
 
     bucket = os.environ.get("SCREENSHOT_BUCKET", "")
@@ -806,7 +813,7 @@ def run() -> None:
         # Make unmocked API routes degrade to empty data + an explanatory in-app
         # banner instead of crashing when the previewer browses a route the PR
         # didn't touch (so no data was mocked for it).
-        _runtime_generated_files.update(write_unmocked_api_fallbacks(Path(REPO_DIR), _framework_name))
+        _runtime_generated_files.update(write_unmocked_api_fallbacks(Path(REPO_DIR), _framework_name, diff=diff))
         _runtime_generated_files.update(write_unmocked_banner(Path(REPO_DIR), _framework_name))
 
         update_progress(1)

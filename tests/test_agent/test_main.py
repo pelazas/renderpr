@@ -964,7 +964,7 @@ class TestCaptureScreenshotsMockWiring:
                 {"localhost": {"/api/users": {"body": [{"id": 1}], "status": 200}}},
             )
 
-        def fake_write(repo_dir, mocks, framework="next"):
+        def fake_write(repo_dir, mocks, framework="next", diff=None):
             captured["generated"] = (str(repo_dir), mocks)
             return ["src/app/api/users/route.ts"]
 
