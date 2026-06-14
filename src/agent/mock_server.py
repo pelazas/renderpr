@@ -57,16 +57,16 @@ _BANNER_JS = """(function () {
     if (!box) {
       box = document.createElement("div");
       box.id = id;
-      box.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;max-width:420px;width:calc(100vw - 32px);background:#1e1b4b;color:#e0e7ff;font:14px/1.5 system-ui,-apple-system,sans-serif;padding:20px 22px;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.4);border:1px solid #4338ca";
+      box.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;max-width:420px;width:calc(100vw - 32px);background:#000;color:#fff;font:14px/1.5 system-ui,-apple-system,sans-serif;padding:20px 22px;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.5);border:1px solid #333";
       document.body.appendChild(box);
     }
     var list = paths.map(function (p) {
-      return "<code style='background:#312e81;padding:1px 6px;border-radius:5px;color:#c7d2fe'>" + p + "</code>";
+      return "<code style='background:#222;padding:1px 6px;border-radius:5px;color:#fff'>" + p + "</code>";
     }).join(" ");
     box.innerHTML =
       "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>" +
         "<strong style='color:#fff'>renderpr preview</strong>" +
-        "<button onclick=\\"document.getElementById('" + id + "').remove()\\" style='background:none;border:0;color:#a5b4fc;font-size:18px;cursor:pointer;line-height:1'>&times;</button>" +
+        "<button onclick=\\"document.getElementById('" + id + "').remove()\\" style='background:none;border:0;color:#fff;font-size:18px;cursor:pointer;line-height:1'>&times;</button>" +
       "</div>" +
       "<div>The route " + list + " " + (paths.length > 1 ? "aren't" : "isn't") +
       " mocked because your PR didn't change this area. Showing empty data \\u2014 this isn't a bug in your code.</div>";
