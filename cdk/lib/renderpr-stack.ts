@@ -55,8 +55,8 @@ export class RenderprStack extends cdk.Stack {
     // Security group: outbound-only for Fargate (no inbound)
     const fargateSg = new ec2.SecurityGroup(this, "FargateSecurityGroup", {
       vpc,
-      allowAllOutbound: true,
-      description: "Allows outbound traffic and dev server preview on port 3000. For RenderPR Fargate tasks.",
+      allowAllOutbound: false,
+      description: "Egress restricted to web/DNS ports and dev server preview on port 3000. For RenderPR Fargate tasks.",
     });
 
     // Live-preview dev-server ports, one per framework family. Keep in sync with
@@ -76,6 +76,18 @@ export class RenderprStack extends cdk.Stack {
       ec2.Port.tcp(3001),
       "Allow Lambda to dispatch commands to command server",
     );
+
+    // Egress is restricted to standard web + DNS ports (threat-model F-5): this
+    // blocks C2 / exfiltration over arbitrary ports and non-web protocols while
+    // still allowing package installs, git/GitHub, OpenRouter, AWS APIs, the ECS
+    // metadata/credentials endpoint (169.254.170.2:80), and DNS. NOTE: it does NOT
+    // stop exfiltration over HTTPS to an arbitrary public host — that needs a
+    // domain-allowlist egress proxy / NAT+firewall, which would require leaving the
+    // public-subnet model and is tracked as a follow-up.
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), "HTTPS: registries, GitHub, OpenRouter, AWS APIs");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "HTTP: package CDNs + ECS metadata/credentials endpoint");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(53), "DNS (UDP)");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(53), "DNS (TCP)");
 
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
