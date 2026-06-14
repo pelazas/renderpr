@@ -417,7 +417,9 @@ def _start_dev_server(
     logger.info("Dev server ready at %s", _dev_server_url)
 
 
-def _get_installation_token(installation_id: str, app_id: str, private_key: str) -> str:
+def _get_installation_token(
+    installation_id: str, app_id: str, private_key: str, repo_full_name: str = ""
+) -> str:
     now = int(time.time())
     payload = {"iat": now, "exp": now + 600, "iss": app_id}
     jwt_token = jwt.encode(payload, private_key, algorithm="RS256")
@@ -429,9 +431,26 @@ def _get_installation_token(installation_id: str, app_id: str, private_key: str)
         "User-Agent": "RenderPR/1.0",
     }
 
+    # Scope the installation token to just this PR's repository and the minimal
+    # permissions RenderPR actually uses. Without a body GitHub mints a token
+    # covering every repo in the installation with the App's full permission set;
+    # scoping bounds the blast radius if the token leaks (see
+    # docs/SECURITY_THREAT_MODEL.md, finding F-3).
+    body: dict = {
+        "permissions": {
+            "contents": "write",       # clone the PR branch + push `@renderpr apply`
+            "pull_requests": "write",  # read the diff/metadata
+            "issues": "write",         # post/update the review comment
+            "metadata": "read",
+        }
+    }
+    repo_name = repo_full_name.split("/", 1)[1] if "/" in repo_full_name else ""
+    if repo_name:
+        body["repositories"] = [repo_name]
+
     for attempt in range(RETRY_MAX_ATTEMPTS):
         with httpx.Client() as client:
-            resp = client.post(url, headers=headers)
+            resp = client.post(url, headers=headers, json=body)
 
         if resp.status_code == 201:
             return resp.json()["token"]
@@ -720,6 +739,7 @@ def run() -> None:
         installation_id=installation_id,
         app_id=secrets["app_id"],
         private_key=secrets["private_key"],
+        repo_full_name=repo_full_name,
     )
     skip_review = os.environ.get("SKIP_REVIEW", "false").lower() == "true"
 

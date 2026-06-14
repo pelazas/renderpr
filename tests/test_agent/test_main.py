@@ -153,6 +153,64 @@ class TestGetInstallationToken:
 
         assert token == "ghs_fake-installation-token"
 
+    def test_token_request_is_scoped_to_repo_and_min_perms(self, monkeypatch: MonkeyPatch):
+        monkeypatch.setattr("src.agent.main.jwt.encode", lambda *a, **kw: "fake-jwt")
+        import httpx
+
+        captured: dict = {}
+
+        class CapturingClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def post(self, url, headers=None, json=None):
+                captured["json"] = json
+                return httpx.Response(201, json={"token": "ghs_scoped"})
+
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: CapturingClient())
+
+        token = _get_installation_token(
+            installation_id="999",
+            app_id="123456",
+            private_key="fake-key",
+            repo_full_name="acme/web",
+        )
+
+        assert token == "ghs_scoped"
+        assert captured["json"]["repositories"] == ["web"]
+        perms = captured["json"]["permissions"]
+        assert perms["contents"] == "write"
+        assert perms["pull_requests"] == "write"
+        assert perms["issues"] == "write"
+        assert set(perms) == {"contents", "pull_requests", "issues", "metadata"}
+
+    def test_token_request_omits_repositories_when_unknown(self, monkeypatch: MonkeyPatch):
+        monkeypatch.setattr("src.agent.main.jwt.encode", lambda *a, **kw: "fake-jwt")
+        import httpx
+
+        captured: dict = {}
+
+        class CapturingClient:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                pass
+
+            def post(self, url, headers=None, json=None):
+                captured["json"] = json
+                return httpx.Response(201, json={"token": "ghs_unscoped"})
+
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: CapturingClient())
+
+        _get_installation_token(installation_id="999", app_id="1", private_key="k")
+
+        assert "repositories" not in captured["json"]
+        assert "permissions" in captured["json"]
+
     def test_token_4xx_exits(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr(
             "src.agent.main.jwt.encode",
