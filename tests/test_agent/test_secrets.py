@@ -1,7 +1,15 @@
+import json
+
 import boto3
 from moto import mock_aws
 
-from src.agent.secrets import load_repo_secrets, redact, secret_path_prefix
+from src.agent import secrets as secrets_mod
+from src.agent.secrets import (
+    _scoped_ssm_client,
+    load_repo_secrets,
+    redact,
+    secret_path_prefix,
+)
 
 REGION = "eu-west-1"
 
@@ -78,3 +86,68 @@ def test_redact_masks_values_longest_first():
 
 def test_redact_skips_short_values():
     assert redact("a=1 b=22 c=cat", {"1", "22", "cat"}) == "a=1 b=22 c=cat"
+
+
+def test_scoped_client_without_role_arn_returns_plain_client(monkeypatch):
+    monkeypatch.delenv("SECRETS_ACCESS_ROLE_ARN", raising=False)
+    calls = []
+
+    def fake_client(service, *a, **k):
+        calls.append(service)
+        return object()
+
+    monkeypatch.setattr(secrets_mod.boto3, "client", fake_client)
+
+    _scoped_ssm_client("999", "owner/repo")
+
+    # Falls back to a plain SSM client; never reaches STS.
+    assert calls == ["ssm"]
+    assert "sts" not in calls
+
+
+def test_scoped_client_session_policy_restricts_to_this_repo(monkeypatch):
+    monkeypatch.setenv("SECRETS_ACCESS_ROLE_ARN", "arn:aws:iam::123456789012:role/renderpr-secrets-access")
+    monkeypatch.setenv("AWS_REGION", REGION)
+
+    captured = {}
+
+    class FakeSts:
+        def assume_role(self, **kwargs):
+            captured.update(kwargs)
+            return {"Credentials": {"AccessKeyId": "a", "SecretAccessKey": "b", "SessionToken": "c"}}
+
+    def fake_client(service, *a, **k):
+        if service == "sts":
+            return FakeSts()
+        return ("ssm", k)
+
+    monkeypatch.setattr(secrets_mod.boto3, "client", fake_client)
+
+    out = _scoped_ssm_client("999", "owner/repo")
+
+    # An SSM client built from the assumed-role credentials is returned.
+    assert out[0] == "ssm"
+    assert out[1]["aws_access_key_id"] == "a"
+    assert out[1]["aws_session_token"] == "c"
+
+    policy = json.loads(captured["Policy"])
+    resources = policy["Statement"][0]["Resource"]
+    joined = " ".join(resources)
+    # Scoped to exactly this repo's path; another repo's path is not allowed.
+    assert "/renderpr/secrets/999/owner/repo" in joined
+    assert "/renderpr/secrets/999/owner/other-repo" not in joined
+
+
+def test_scoped_client_returns_none_on_assume_role_failure(monkeypatch):
+    monkeypatch.setenv("SECRETS_ACCESS_ROLE_ARN", "arn:aws:iam::123456789012:role/renderpr-secrets-access")
+    monkeypatch.setenv("AWS_REGION", REGION)
+
+    class FailingSts:
+        def assume_role(self, **kwargs):
+            raise Exception("AssumeRole denied")
+
+    monkeypatch.setattr(secrets_mod.boto3, "client", lambda service, *a, **k: FailingSts())
+
+    # A failed assume must degrade to None so load_repo_secrets returns {} rather
+    # than reading with the (now unprivileged) base client.
+    assert _scoped_ssm_client("999", "owner/repo") is None

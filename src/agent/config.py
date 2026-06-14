@@ -64,6 +64,10 @@ DEV_SERVER_CANDIDATE_PORTS: Final[tuple[int, ...]] = (3000, 5173, 4321, 8080, 42
 # Matches the "Local: http://localhost:PORT" banner dev servers print on boot.
 DEV_SERVER_URL_REGEX: str = r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d+)"
 
+# CloudFront signed-URL lifetime for screenshots — matches the 7-day S3 retention
+# lifecycle so links in PR comments stay valid for the screenshots' whole life.
+CLOUDFRONT_SIGNED_URL_TTL_SECONDS: int = 7 * 24 * 60 * 60
+
 # S3 npm cache
 NPM_CACHE_ENABLED: bool = True
 NPM_CACHE_PREFIX: str = "npm-cache"

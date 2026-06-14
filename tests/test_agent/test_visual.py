@@ -754,7 +754,12 @@ class TestUploadScreenshots:
 
         monkeypatch.setattr("boto3.client", lambda *a, **kw: MockS3Client())
 
-        from src.agent.visual import upload_screenshots
+        # No CloudFront configured -> legacy direct-S3 URLs.
+        from src.agent.visual import _reset_cloudfront_signer_cache, upload_screenshots
+
+        _reset_cloudfront_signer_cache()
+        for var in ("CLOUDFRONT_DOMAIN", "CLOUDFRONT_KEY_PAIR_ID", "CLOUDFRONT_PRIVATE_KEY_PARAM"):
+            monkeypatch.delenv(var, raising=False)
 
         png1 = tmp_path / "a.png"
         png1.write_bytes(b"png1-data")
@@ -787,6 +792,88 @@ class TestUploadScreenshots:
 
         pairs = upload_screenshots("my-bucket", "42", [(png, "Mobile XS")])
         assert pairs == []
+
+
+class TestScreenshotUrl:
+    def test_signed_cloudfront_url_when_configured(self, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        monkeypatch.setenv("CLOUDFRONT_DOMAIN", "d123.cloudfront.net")
+        monkeypatch.setenv("CLOUDFRONT_KEY_PAIR_ID", "K123")
+        monkeypatch.setenv("CLOUDFRONT_PRIVATE_KEY_PARAM", "/renderpr/cloudfront-private-key")
+
+        class FakeSigner:
+            def __init__(self):
+                self.called_with = None
+
+            def generate_presigned_url(self, url, date_less_than):
+                self.called_with = url
+                return f"{url}?Signature=sig&Key-Pair-Id=K123"
+
+        fake = FakeSigner()
+        visual_mod._reset_cloudfront_signer_cache()
+        monkeypatch.setattr(
+            visual_mod, "_cloudfront_signer", lambda: ("d123.cloudfront.net", fake)
+        )
+
+        url = visual_mod._screenshot_url("my-bucket", "screenshots/42/abc.png")
+
+        assert url.startswith("https://d123.cloudfront.net/screenshots/42/abc.png")
+        assert "Signature=sig" in url
+        assert "my-bucket.s3.amazonaws.com" not in url
+        assert fake.called_with == "https://d123.cloudfront.net/screenshots/42/abc.png"
+
+    def test_direct_s3_url_when_not_configured(self, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        visual_mod._reset_cloudfront_signer_cache()
+        for var in ("CLOUDFRONT_DOMAIN", "CLOUDFRONT_KEY_PAIR_ID", "CLOUDFRONT_PRIVATE_KEY_PARAM"):
+            monkeypatch.delenv(var, raising=False)
+
+        url = visual_mod._screenshot_url("my-bucket", "screenshots/42/abc.png")
+
+        assert url == "https://my-bucket.s3.amazonaws.com/screenshots/42/abc.png"
+
+    def test_transient_ssm_failure_is_not_cached(self, monkeypatch):
+        """A transient key-load failure must not poison the cache: the next call
+        retries and succeeds (otherwise every screenshot 403s on the private bucket)."""
+        from src.agent import visual as visual_mod
+
+        visual_mod._reset_cloudfront_signer_cache()
+        monkeypatch.setenv("CLOUDFRONT_DOMAIN", "d123.cloudfront.net")
+        monkeypatch.setenv("CLOUDFRONT_KEY_PAIR_ID", "K123")
+        monkeypatch.setenv("CLOUDFRONT_PRIVATE_KEY_PARAM", "/renderpr/cloudfront-private-key")
+
+        calls = {"n": 0}
+
+        class FlakySsm:
+            def get_parameter(self, **kw):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise Exception("transient SSM error")
+                # Minimal valid RSA private key PEM for the second (successful) call.
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric import rsa
+                pem = (
+                    rsa.generate_private_key(public_exponent=65537, key_size=2048)
+                    .private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.TraditionalOpenSSL,
+                        encryption_algorithm=serialization.NoEncryption(),
+                    )
+                    .decode()
+                )
+                return {"Parameter": {"Value": pem}}
+
+        monkeypatch.setattr("boto3.client", lambda *a, **kw: FlakySsm())
+
+        # First call fails -> None, and must NOT be cached.
+        assert visual_mod._cloudfront_signer() is None
+        # Second call retries and succeeds.
+        signer = visual_mod._cloudfront_signer()
+        assert signer is not None and signer[0] == "d123.cloudfront.net"
+        assert calls["n"] == 2
+        visual_mod._reset_cloudfront_signer_cache()
 
 
 class TestLoginWallDetection:

@@ -4,6 +4,8 @@ import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as apigwv2 from "aws-cdk-lib/aws-apigatewayv2";
 import * as apigwv2_integrations from "aws-cdk-lib/aws-apigatewayv2-integrations";
 import * as lambda from "aws-cdk-lib/aws-lambda";
@@ -12,6 +14,7 @@ import * as targets from "aws-cdk-lib/aws-events-targets";
 import { PythonFunction } from "@aws-cdk/aws-lambda-python-alpha";
 import { Construct } from "constructs";
 import * as path from "path";
+import * as fs from "fs";
 
 export class RenderprStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -55,8 +58,8 @@ export class RenderprStack extends cdk.Stack {
     // Security group: outbound-only for Fargate (no inbound)
     const fargateSg = new ec2.SecurityGroup(this, "FargateSecurityGroup", {
       vpc,
-      allowAllOutbound: true,
-      description: "Allows outbound traffic and dev server preview on port 3000. For RenderPR Fargate tasks.",
+      allowAllOutbound: false,
+      description: "Egress restricted to web/DNS ports and dev server preview on port 3000. For RenderPR Fargate tasks.",
     });
 
     // Live-preview dev-server ports, one per framework family. Keep in sync with
@@ -77,11 +80,23 @@ export class RenderprStack extends cdk.Stack {
       "Allow Lambda to dispatch commands to command server",
     );
 
+    // Egress is restricted to standard web + DNS ports (threat-model F-5): this
+    // blocks C2 / exfiltration over arbitrary ports and non-web protocols while
+    // still allowing package installs, git/GitHub, OpenRouter, AWS APIs, the ECS
+    // metadata/credentials endpoint (169.254.170.2:80), and DNS. NOTE: it does NOT
+    // stop exfiltration over HTTPS to an arbitrary public host — that needs a
+    // domain-allowlist egress proxy / NAT+firewall, which would require leaving the
+    // public-subnet model and is tracked as a follow-up.
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(443), "HTTPS: registries, GitHub, OpenRouter, AWS APIs");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80), "HTTP: package CDNs + ECS metadata/credentials endpoint");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.udp(53), "DNS (UDP)");
+    fargateSg.addEgressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(53), "DNS (TCP)");
+
     // S3 bucket for screenshot hosting
     const screenshotBucket = new s3.Bucket(this, "ScreenshotBucket", {
       bucketName: `${appName}-screenshots-${this.account}`,
-      publicReadAccess: true,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ACLS,
+      publicReadAccess: false,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       autoDeleteObjects: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       lifecycleRules: [
@@ -98,6 +113,36 @@ export class RenderprStack extends cdk.Stack {
           expiration: cdk.Duration.days(7),
         },
       ],
+    });
+
+    // Screenshots of private/authenticated UI must not be world-readable
+    // (threat-model F-6): the bucket is private and screenshots are served only
+    // through CloudFront with Origin Access Control + signed URLs. The signing
+    // public key is read from CDK context or a gitignored PEM that
+    // scripts/setup-cloudfront-key.sh writes (the matching private key lives in
+    // SSM). Fail loudly if neither is present so we never deploy a broken signer.
+    const cfPublicKeyPath = path.join(__dirname, "../cloudfront-public-key.pem");
+    const cfPublicKeyPem: string | undefined =
+      this.node.tryGetContext("cloudfrontPublicKey") ??
+      (fs.existsSync(cfPublicKeyPath) ? fs.readFileSync(cfPublicKeyPath, "utf8") : undefined);
+    if (!cfPublicKeyPem) {
+      throw new Error(
+        "CloudFront signing public key not found. Run scripts/setup-cloudfront-key.sh " +
+        "(writes cdk/cloudfront-public-key.pem and stores the private key in SSM) before deploying, " +
+        "or pass -c cloudfrontPublicKey=\"$(cat cloudfront-public-key.pem)\".",
+      );
+    }
+    const cfPublicKey = new cloudfront.PublicKey(this, "ScreenshotSigningKey", { encodedKey: cfPublicKeyPem });
+    const cfKeyGroup = new cloudfront.KeyGroup(this, "ScreenshotKeyGroup", { items: [cfPublicKey] });
+    const screenshotDistribution = new cloudfront.Distribution(this, "ScreenshotDistribution", {
+      comment: "RenderPR screenshots — private bucket via OAC, signed URLs only",
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(screenshotBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        trustedKeyGroups: [cfKeyGroup],
+      },
     });
 
     // SSM parameter names (created manually via scripts/setup-secrets.sh)
@@ -117,6 +162,12 @@ export class RenderprStack extends cdk.Stack {
       { service: "ssm", resource: "parameter", resourceName: `${appName}/renderpr-command-token` },
       this,
     );
+    // CloudFront URL-signing private key (created by scripts/setup-cloudfront-key.sh).
+    const cloudfrontKeyParamName = `/${appName}/cloudfront-private-key`;
+    const cloudfrontKeyParamArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/cloudfront-private-key` },
+      this,
+    );
     const tasksParamArn = cdk.Arn.format(
       { service: "ssm", resource: "parameter", resourceName: `${appName}/tasks/*` },
       this,
@@ -131,6 +182,12 @@ export class RenderprStack extends cdk.Stack {
     // one parameter per secret under /{appName}/secrets/{installation}/{repo}/{KEY}.
     const secretsParamArn = cdk.Arn.format(
       { service: "ssm", resource: "parameter", resourceName: `${appName}/secrets/*` },
+      this,
+    );
+    // Path-root ARN (no trailing /*) — required to authorize GetParametersByPath
+    // over the /renderpr/secrets hierarchy alongside the child wildcard above.
+    const secretsParamPathArn = cdk.Arn.format(
+      { service: "ssm", resource: "parameter", resourceName: `${appName}/secrets` },
       this,
     );
 
@@ -169,7 +226,7 @@ export class RenderprStack extends cdk.Stack {
     fargateTaskRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParameter"],
-        resources: [githubParamArn, openrouterParamArn, commandTokenParamArn],
+        resources: [githubParamArn, openrouterParamArn, commandTokenParamArn, cloudfrontKeyParamArn],
       }),
     );
 
@@ -181,10 +238,37 @@ export class RenderprStack extends cdk.Stack {
     );
 
     // Read per-repo user secrets for env/auth injection (fork PRs are gated in code).
-    fargateTaskRole.addToPolicy(
+    // The task role does NOT hold the broad secrets read directly (threat-model F-2):
+    // instead it assumes SecretsAccessRole per task with an inline session policy
+    // scoped to the current repo's path, so a task can only ever read its own repo's
+    // secrets — never another installation's or repo's.
+    const secretsAccessRoleName = `${appName}-secrets-access`;
+    const secretsAccessRoleArn = cdk.Arn.format(
+      { service: "iam", resource: "role", resourceName: secretsAccessRoleName, region: "" },
+      this,
+    );
+    const secretsAccessRole = new iam.Role(this, "SecretsAccessRole", {
+      roleName: secretsAccessRoleName,
+      assumedBy: new iam.ArnPrincipal(fargateTaskRole.roleArn),
+      description:
+        "Assumed per-task by the review container with an inline session policy " +
+        "scoped to one repo's secrets path, so the task can only read the current " +
+        "repo's secrets (threat-model F-2).",
+      maxSessionDuration: cdk.Duration.hours(1),
+    });
+    secretsAccessRole.addToPolicy(
       new iam.PolicyStatement({
         actions: ["ssm:GetParametersByPath", "ssm:GetParameter", "ssm:GetParameters"],
-        resources: [secretsParamArn],
+        resources: [secretsParamArn, secretsParamPathArn],
+      }),
+    );
+
+    // Reference the role by a constructed ARN string (not secretsAccessRole.roleArn)
+    // to avoid a CloudFormation circular dependency between the two roles.
+    fargateTaskRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["sts:AssumeRole"],
+        resources: [secretsAccessRoleArn],
       }),
     );
 
@@ -271,7 +355,11 @@ export class RenderprStack extends cdk.Stack {
         GITHUB_PARAM_NAME: githubParamName,
         OPENROUTER_PARAM_NAME: openrouterParamName,
         COMMAND_TOKEN_PARAM_NAME: "/renderpr/renderpr-command-token",
+        SECRETS_ACCESS_ROLE_ARN: secretsAccessRoleArn,
         SCREENSHOT_BUCKET: screenshotBucket.bucketName,
+        CLOUDFRONT_DOMAIN: screenshotDistribution.distributionDomainName,
+        CLOUDFRONT_KEY_PAIR_ID: cfPublicKey.publicKeyId,
+        CLOUDFRONT_PRIVATE_KEY_PARAM: cloudfrontKeyParamName,
         IDLE_TIMEOUT: this.node.tryGetContext("idleTimeoutSeconds") ?? "900",
         POLL_INTERVAL: this.node.tryGetContext("pollIntervalSeconds") ?? "10",
       },
@@ -431,6 +519,11 @@ export class RenderprStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ScreenshotBucketName", {
       value: screenshotBucket.bucketName,
       description: "S3 bucket for PR review screenshots",
+    });
+
+    new cdk.CfnOutput(this, "ScreenshotDistributionDomain", {
+      value: screenshotDistribution.distributionDomainName,
+      description: "CloudFront domain serving signed screenshot URLs",
     });
   }
 }

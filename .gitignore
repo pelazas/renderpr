@@ -34,6 +34,10 @@ cdk/dist/
 cdk/*.tsbuildinfo
 cdk/cdk.context.json
 
+# CloudFront signing public key (deployment-specific; private key lives in SSM)
+cloudfront-public-key.pem
+cdk/cloudfront-public-key.pem
+
 # IDE
 .vscode/
 .idea/

@@ -73,6 +73,16 @@ jobs:
         if: steps.filter.outputs.infra == 'true'
         run: npm ci
 
+      # The CloudFront URL-signing public key is read by the CDK stack at synth
+      # (cdk/cloudfront-public-key.pem). It is not secret and is kept out of git,
+      # so materialize it from a repo variable. The matching private key lives in
+      # SSM (created by scripts/setup-cloudfront-key.sh).
+      - name: Materialize CloudFront signing public key
+        if: steps.filter.outputs.infra == 'true'
+        env:
+          CLOUDFRONT_PUBLIC_KEY: ${{ vars.CLOUDFRONT_PUBLIC_KEY }}
+        run: printf '%s\n' "$CLOUDFRONT_PUBLIC_KEY" > cloudfront-public-key.pem
+
       - name: Deploy
         if: steps.filter.outputs.infra == 'true'
         env:
