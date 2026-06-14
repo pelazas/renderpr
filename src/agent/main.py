@@ -33,7 +33,13 @@ from src.agent.config import (
 )
 from src.agent.discovery import discover_frontend
 from src.agent.env_inject import build_injected_env, write_env_local
-from src.agent.mock_server import BACKUP_SUFFIX, write_dev_origin_allowlist, write_server_mocks
+from src.agent.mock_server import (
+    BACKUP_SUFFIX,
+    write_dev_origin_allowlist,
+    write_server_mocks,
+    write_unmocked_api_fallbacks,
+    write_unmocked_banner,
+)
 from src.agent.polling import ChangeSession
 from src.agent.renderpr_config import ConfigError, load_config
 from src.agent.secrets import load_repo_secrets
@@ -786,9 +792,15 @@ def run() -> None:
         signal.signal(signal.SIGTERM, _shutdown)
         signal.signal(signal.SIGINT, _shutdown)
 
+        _framework_name = discovery["launch_profile"].framework
         _runtime_generated_files.update(
-            write_dev_origin_allowlist(Path(REPO_DIR), public_ip, discovery["launch_profile"].framework)
+            write_dev_origin_allowlist(Path(REPO_DIR), public_ip, _framework_name)
         )
+        # Make unmocked API routes degrade to empty data + an explanatory in-app
+        # banner instead of crashing when the previewer browses a route the PR
+        # didn't touch (so no data was mocked for it).
+        _runtime_generated_files.update(write_unmocked_api_fallbacks(Path(REPO_DIR), _framework_name))
+        _runtime_generated_files.update(write_unmocked_banner(Path(REPO_DIR), _framework_name))
 
         update_progress(1)
         _start_dev_server(

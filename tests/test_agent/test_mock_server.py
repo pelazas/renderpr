@@ -5,8 +5,65 @@ from src.agent.mock_server import (
     write_dev_origin_allowlist,
     write_next_allowed_origin,
     write_server_mocks,
+    write_unmocked_api_fallbacks,
+    write_unmocked_banner,
     write_vite_allowed_hosts,
 )
+
+
+def _make_api_route(tmp_path, rel, body="export async function GET() { return Response.json([]); }"):
+    route = tmp_path / rel
+    route.parent.mkdir(parents=True, exist_ok=True)
+    route.write_text(body)
+    return route
+
+
+def test_unmocked_fallback_replaces_route_with_empty_and_header(tmp_path):
+    route = _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    generated = write_unmocked_api_fallbacks(tmp_path, "next")
+
+    content = route.read_text()
+    assert "Response.json([]" in content
+    assert 'x-renderpr-unmocked": "/api/users"' in content
+    assert "src/app/api/users/route.ts" in generated
+    assert "src/app/api/users/route.ts.renderpr.bak" in generated
+
+
+def test_unmocked_fallback_skips_auth_and_explicit_mocks(tmp_path):
+    _make_api_route(tmp_path, "src/app/api/auth/[...nextauth]/route.ts", "export const GET = 1;")
+    _make_api_route(tmp_path, "src/app/api/posts/route.ts", "export const GET = 2;")
+    mocked = _make_api_route(tmp_path, "src/app/api/users/route.ts", "export const GET = 3;")
+
+    write_unmocked_api_fallbacks(tmp_path, "next", mocks={"local": {"/api/users": {"body": []}}})
+
+    assert (tmp_path / "src/app/api/auth/[...nextauth]/route.ts").read_text() == "export const GET = 1;"
+    assert mocked.read_text() == "export const GET = 3;"
+    assert "x-renderpr-unmocked" in (tmp_path / "src/app/api/posts/route.ts").read_text()
+
+
+def test_unmocked_fallback_skipped_for_non_next(tmp_path):
+    _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    assert write_unmocked_api_fallbacks(tmp_path, "vite") == []
+
+
+def test_unmocked_banner_injects_script_and_writes_file(tmp_path):
+    layout = tmp_path / "src/app/layout.tsx"
+    layout.parent.mkdir(parents=True)
+    layout.write_text('<html><body className="x">{children}</body></html>')
+
+    generated = write_unmocked_banner(tmp_path, "next")
+
+    assert '<script src="/__renderpr-unmocked.js"></script>' in layout.read_text()
+    assert (tmp_path / "public/__renderpr-unmocked.js").exists()
+    assert "src/app/layout.tsx" in generated
+    assert "public/__renderpr-unmocked.js" in generated
+
+
+def test_unmocked_banner_skips_without_body(tmp_path):
+    layout = tmp_path / "src/app/layout.tsx"
+    layout.parent.mkdir(parents=True)
+    layout.write_text("export default function L() { return null; }")
+    assert write_unmocked_banner(tmp_path, "next") == []
 
 
 def test_write_server_mocks_skipped_for_non_next_framework(tmp_path):

@@ -11,6 +11,7 @@ import boto3
 from playwright.sync_api import Page, TimeoutError, sync_playwright
 
 from src.agent.config import LOGIN_WALL_URL_MARKERS, PLAYWRIGHT_CLICK_TIMEOUT, PLAYWRIGHT_NAVIGATION_TIMEOUT, REPO_DIR, RETRY_MAX_ATTEMPTS, SETTLE_AFTER_NAVIGATION_MS, VIEWPORTS, VIEWPORT_LABELS
+from src.agent.mock_server import API_FALLBACK_HEADER
 
 VIEWPORT_ORDER: Final[list[int]] = [vp["width"] for vp in VIEWPORTS]
 
@@ -155,15 +156,13 @@ def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url
     context = browser.new_context(storage_state=storage_state) if storage_state else browser.new_context()  # type: ignore[arg-type]
 
     mock_entries = _flatten_mocks(mocks)
-    if mock_entries:
-        def handle_mock_route(route):
-            request = route.request
-            parsed = urlparse(request.url)
-            mock = mock_entries.get(parsed.path)
 
-            if mock is None:
-                return route.continue_()
+    def handle_mock_route(route):
+        request = route.request
+        parsed = urlparse(request.url)
+        mock = mock_entries.get(parsed.path)
 
+        if mock is not None:
             logger.info("Mock matched %s %s -> %d", request.method, parsed.path, mock["status"])
             return route.fulfill(
                 status=mock["status"],
@@ -171,7 +170,22 @@ def _launch_session(p, storage_state: dict | None, mocks: dict | None, entry_url
                 body=json.dumps(mock["body"]),
             )
 
-        context.route("**/*", handle_mock_route)
+        # Catch-all: an unmocked data endpoint would otherwise hit the real
+        # (often broken) handler and crash the page. Return empty data plus the
+        # fallback header so the route renders and the banner can explain why.
+        if parsed.path.startswith("/api/") and not parsed.path.startswith("/api/auth"):
+            logger.info("Unmocked API fallback (screenshot) for %s", parsed.path)
+            return route.fulfill(
+                status=200,
+                content_type="application/json",
+                body="[]",
+                headers={API_FALLBACK_HEADER: parsed.path},
+            )
+
+        return route.continue_()
+
+    context.route("**/*", handle_mock_route)
+    if mock_entries:
         logger.info("Mock routes registered for %d endpoint(s): %s", len(mock_entries), list(mock_entries.keys()))
 
     page = context.new_page()

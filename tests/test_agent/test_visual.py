@@ -210,6 +210,7 @@ class TestCaptureScreenshots:
             def on(self, event, handler): pass
 
         class Context:
+            def route(self, pattern, handler): pass
             def new_page(self): return WaitPage()
 
         class Browser:
@@ -289,6 +290,7 @@ class TestCaptureScreenshots:
             def on(self, event, handler): pass
 
         class Context:
+            def route(self, pattern, handler): pass
             def new_page(self): return FailingPage()
 
         class Browser:
@@ -551,6 +553,71 @@ class TestCaptureScreenshotsWithMocks:
         assert captured["fulfilled"] is None
         assert captured["continued"] is True
 
+    def test_unmocked_api_path_gets_empty_fallback(self, tmp_path, monkeypatch):
+        from src.agent import visual as visual_mod
+
+        captured = {"handler": None, "fulfilled": None, "continued": False}
+
+        class MockRequest:
+            url = "http://127.0.0.1:3000/api/orders"
+            method = "GET"
+
+        class MockRoute:
+            request = MockRequest()
+
+            def fulfill(self, **kw):
+                captured["fulfilled"] = kw
+
+            def continue_(self):
+                captured["continued"] = True
+
+        class MockPage:
+            def set_viewport_size(self, size): pass
+            def goto(self, url, **kw): pass
+            def wait_for_timeout(self, ms): pass
+            def evaluate(self, expr): return "complete"
+            def screenshot(self, path, **kw): Path(path).touch()
+            def click(self, selector, **kw): pass
+            def on(self, event, handler): pass
+            def add_init_script(self, script): pass
+
+        class MockContext:
+            def route(self, pattern, handler):
+                captured["handler"] = handler
+
+            def new_page(self):
+                return MockPage()
+
+        class MockBrowser:
+            def new_context(self): return MockContext()
+            def close(self): pass
+
+        class MockPlaywright:
+            class chromium:
+                @staticmethod
+                def launch(): return MockBrowser()
+
+        class MockSyncPlaywright:
+            def __enter__(self): return MockPlaywright()
+            def __exit__(self, *a): pass
+
+        monkeypatch.setattr("src.agent.visual.sync_playwright", lambda: MockSyncPlaywright())
+
+        # No mocks at all — the catch-all must still register and stub /api.
+        visual_mod.capture_screenshots(
+            "http://localhost:3000",
+            screenshot_dir=tmp_path,
+            routes=[{"path": "/", "actions": [], "reason": "test"}],
+        )
+
+        assert captured["handler"] is not None
+        captured["handler"](MockRoute())
+
+        assert captured["continued"] is False
+        assert captured["fulfilled"]["status"] == 200
+        assert captured["fulfilled"]["body"] == "[]"
+        assert captured["fulfilled"]["headers"]["x-renderpr-unmocked"] == "/api/orders"
+
     def test_hydration_diagnostics_registered(self, tmp_path):
         """capture_screenshots must register a pageerror handler and
         call page.evaluate to inspect document.readyState after navigation,
@@ -583,6 +650,8 @@ class TestCaptureScreenshotsWithMocks:
                         @staticmethod
                         def new_context():
                             class Ctx:
+                                @staticmethod
+                                def route(pattern, handler): pass
                                 @staticmethod
                                 def new_page():
                                     return MockPg()

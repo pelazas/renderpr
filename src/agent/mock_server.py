@@ -25,6 +25,164 @@ VITE_CONFIG_NAMES = (
 # the Playwright interception in visual.py.
 _SERVER_MOCK_FRAMEWORKS = frozenset({"next"})
 
+# Header stamped on every catch-all fallback response so the in-app banner can
+# tell the user which endpoint wasn't mocked.
+API_FALLBACK_HEADER = "x-renderpr-unmocked"
+_AUTH_API_PREFIX = "api/auth"
+_ROUTE_FILE_NAMES = ("route.ts", "route.js", "route.tsx", "route.jsx")
+_BANNER_REL = "public/__renderpr-unmocked.js"
+_LAYOUT_CANDIDATES = ("src/app/layout.tsx", "src/app/layout.jsx", "src/app/layout.js")
+
+# Vanilla client script: wraps fetch, and when a response carries the fallback
+# header, shows a dismissible "this route isn't mocked" notice in the middle of
+# the page. Served statically from /public so there's nothing to escape inline.
+_BANNER_JS = """(function () {
+  if (window.__renderprUnmockedInit) return;
+  window.__renderprUnmockedInit = true;
+  var seen = {};
+  var orig = window.fetch;
+  window.fetch = function () {
+    return orig.apply(this, arguments).then(function (res) {
+      try {
+        var p = res.headers.get("x-renderpr-unmocked");
+        if (p && !seen[p]) { seen[p] = true; render(); }
+      } catch (e) {}
+      return res;
+    });
+  };
+  function render() {
+    var paths = Object.keys(seen);
+    var id = "__renderpr-unmocked-banner";
+    var box = document.getElementById(id);
+    if (!box) {
+      box = document.createElement("div");
+      box.id = id;
+      box.style.cssText = "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:2147483647;max-width:420px;width:calc(100vw - 32px);background:#1e1b4b;color:#e0e7ff;font:14px/1.5 system-ui,-apple-system,sans-serif;padding:20px 22px;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.4);border:1px solid #4338ca";
+      document.body.appendChild(box);
+    }
+    var list = paths.map(function (p) {
+      return "<code style='background:#312e81;padding:1px 6px;border-radius:5px;color:#c7d2fe'>" + p + "</code>";
+    }).join(" ");
+    box.innerHTML =
+      "<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>" +
+        "<strong style='color:#fff'>renderpr preview</strong>" +
+        "<button onclick=\\"document.getElementById('" + id + "').remove()\\" style='background:none;border:0;color:#a5b4fc;font-size:18px;cursor:pointer;line-height:1'>&times;</button>" +
+      "</div>" +
+      "<div>The route " + list + " " + (paths.length > 1 ? "aren't" : "isn't") +
+      " mocked because your PR didn't change this area. Showing empty data \\u2014 this isn't a bug in your code.</div>";
+  }
+})();
+"""
+
+
+def _route_file_to_api_path(route_rel: Path) -> str | None:
+    parts = route_rel.parts
+    if len(parts) < 4 or parts[0] != "src" or parts[1] != "app" or parts[2] != "api":
+        return None
+    middle = parts[3:-1]  # segments between 'api' and the route.* filename
+    return "/api/" + "/".join(middle) if middle else "/api"
+
+
+def _explicit_mock_paths(mocks: dict | None) -> set[str]:
+    paths: set[str] = set()
+    if not mocks:
+        return paths
+    for endpoints in mocks.values():
+        if not isinstance(endpoints, dict):
+            continue
+        for api_path in endpoints:
+            if isinstance(api_path, str) and api_path.startswith("/"):
+                paths.add(api_path)
+    return paths
+
+
+def _fallback_route_source(api_path: str) -> str:
+    return (
+        "const __renderprUnmocked = () =>\n"
+        f'  Response.json([], {{ status: 200, headers: {{ "{API_FALLBACK_HEADER}": "{api_path}" }} }});\n'
+        "export const GET = __renderprUnmocked;\n"
+        "export const POST = __renderprUnmocked;\n"
+        "export const PUT = __renderprUnmocked;\n"
+        "export const PATCH = __renderprUnmocked;\n"
+        "export const DELETE = __renderprUnmocked;\n"
+    )
+
+
+def write_unmocked_api_fallbacks(repo_dir: Path | str, framework: str = "next", mocks: dict | None = None) -> list[str]:
+    """Replace every unmocked `src/app/api/**/route.*` handler with a benign
+    fallback that returns `[]` plus the fallback header, so navigating to a route
+    whose data wasn't mocked renders empty instead of crashing. Auth routes and
+    explicitly-mocked endpoints are left untouched.
+    """
+    if framework not in _SERVER_MOCK_FRAMEWORKS:
+        return []
+
+    repo_path = Path(repo_dir)
+    api_dir = repo_path / "src" / "app" / "api"
+    if not api_dir.is_dir():
+        return []
+
+    explicit = _explicit_mock_paths(mocks)
+    generated: list[str] = []
+
+    for route_file in sorted(api_dir.rglob("route.*")):
+        if route_file.name not in _ROUTE_FILE_NAMES:
+            continue
+        route_rel = route_file.relative_to(repo_path)
+        api_path = _route_file_to_api_path(route_rel)
+        if api_path is None or api_path.lstrip("/").startswith(_AUTH_API_PREFIX) or api_path in explicit:
+            continue
+
+        backup = _backup_file(route_file)
+        if backup is not None:
+            generated.append(str(backup.relative_to(repo_path)))
+        route_file.write_text(_fallback_route_source(api_path))
+        generated.append(str(route_rel))
+        logger.info("Unmocked API fallback written for %s", api_path)
+
+    return generated
+
+
+def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list[str]:
+    """Inject a small client script that shows an in-page notice when a route's
+    data came from an unmocked-fallback response. Best-effort: skips cleanly if
+    there's no recognizable root layout `<body>` to attach it to."""
+    if framework not in _SERVER_MOCK_FRAMEWORKS:
+        return []
+
+    repo_path = Path(repo_dir)
+    layout = next((repo_path / name for name in _LAYOUT_CANDIDATES if (repo_path / name).exists()), None)
+    if layout is None:
+        logger.info("No root layout found; skipping unmocked banner")
+        return []
+
+    content = layout.read_text()
+    if _BANNER_REL.split("/")[-1] in content:
+        return []
+    match = re.search(r"<body[^>]*>", content)
+    if not match:
+        logger.info("Layout <body> not found; skipping unmocked banner")
+        return []
+
+    generated: list[str] = []
+    banner = repo_path / _BANNER_REL
+    banner.parent.mkdir(parents=True, exist_ok=True)
+    banner_backup = _backup_file(banner)
+    if banner_backup is not None:
+        generated.append(str(banner_backup.relative_to(repo_path)))
+    banner.write_text(_BANNER_JS)
+    generated.append(_BANNER_REL)
+
+    layout_backup = _backup_file(layout)
+    if layout_backup is not None:
+        generated.append(str(layout_backup.relative_to(repo_path)))
+    insert_at = match.end()
+    tag = '\n        <script src="/__renderpr-unmocked.js"></script>'
+    layout.write_text(content[:insert_at] + tag + content[insert_at:])
+    generated.append(str(layout.relative_to(repo_path)))
+    logger.info("Unmocked banner injected into %s", layout.relative_to(repo_path))
+    return generated
+
 
 def _backup_file(path: Path) -> Path | None:
     if not path.exists():
