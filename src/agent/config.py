@@ -83,6 +83,12 @@ PLAYWRIGHT_NAVIGATION_TIMEOUT: int = 15000
 PLAYWRIGHT_CLICK_TIMEOUT: int = 5000
 SETTLE_AFTER_NAVIGATION_MS: int = 1000
 
+# When a PR's change is confined to one element (e.g. a navbar), the screenshot
+# is cropped to that element plus this padding. If the element covers more than
+# this fraction of the viewport it's treated as a page-wide change (no crop).
+CHANGED_REGION_MAX_AREA_FRACTION: float = 0.65
+CHANGED_REGION_PADDING_PX: int = 24
+
 REPO_DIR: str = "/app/repo"
 LLM_MODEL: str = "google/gemini-2.5-flash"
 OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
