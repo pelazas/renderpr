@@ -1,0 +1,16 @@
+{
+  "name": "renderpr-e2e-astro",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "packageManager": "yarn@4.5.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "astro": "^4.16.0",
+    "@astrojs/node": "^8.3.0"
+  }
+}

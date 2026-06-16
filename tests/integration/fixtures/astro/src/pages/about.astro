@@ -1,0 +1,16 @@
+---
+import Base from '../layouts/Base.astro';
+import ItemList from '../components/ItemList.astro';
+
+// Second page: exercises routing + the shared ItemList component with a
+// static array (no API fetch, so it renders independently of the backend).
+const items = [
+  { id: 1, name: 'About A' },
+  { id: 2, name: 'About B' },
+];
+---
+
+<Base title="About">
+  <h1>About</h1>
+  <ItemList items={items} />
+</Base>

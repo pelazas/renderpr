@@ -1,0 +1,14 @@
+---
+import Base from '../layouts/Base.astro';
+import ItemList from '../components/ItemList.astro';
+
+// SSR per-request: fetch the internal API on every render. Without RenderPR's
+// mock writer replacing /api/items, the dead backend makes this 500.
+const res = await fetch(new URL('/api/items', Astro.url));
+const items = await res.json();
+---
+
+<Base title="Home">
+  <h1>Items</h1>
+  <ItemList items={items} />
+</Base>
