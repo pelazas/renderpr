@@ -9,12 +9,16 @@ same-origin ``/api/...`` requests to these on-disk handlers.
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from src.agent.mock_server import (
+    API_ERROR_HEADER,
+    API_FALLBACK_HEADER,
     MockWriter,
     _AUTH_API_PREFIX,
     _backup_file,
+    _explicit_mock_paths,
     register_mock_writer,
     write_vite_allowed_hosts,
 )
@@ -22,6 +26,11 @@ from src.agent.mock_server import (
 logger = logging.getLogger(__name__)
 
 _SERVER_FILE_NAMES = ("+server.ts", "+server.js")
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+# Sibling module the original handler is moved to when we wrap a changed route.
+# SvelteKit only treats ``+server.*`` files as routes, so a plain
+# ``_renderpr_orig_server.ts`` sibling is import-only and non-routable.
+_ORIG_MODULE_STEM = "_renderpr_orig_server"
 
 
 def _server_file_to_api_path(route_rel: Path) -> str | None:
@@ -44,6 +53,117 @@ def _mock_server_path(api_path: str) -> Path | None:
     if not parts or parts[0] != "api" or any(part in {".", ".."} for part in parts):
         return None
     return Path("src/routes") / Path(*parts) / "+server.ts"
+
+
+def _detect_handler_methods(source: str) -> list[str]:
+    """HTTP method handlers exported by a SvelteKit ``+server`` module, best-effort."""
+    found: list[str] = []
+    for method in _HTTP_METHODS:
+        patterns = (
+            rf"export\s+async\s+function\s+{method}\b",
+            rf"export\s+function\s+{method}\b",
+            rf"export\s+const\s+{method}\b",
+            rf"export\s*\{{[^}}]*\b{method}\b[^}}]*\}}",
+        )
+        if any(re.search(p, source) for p in patterns):
+            found.append(method)
+    return found
+
+
+def _server_handler_wrapper_source(api_path: str, methods: list[str]) -> str:
+    """Source that runs the original handlers (moved to a sibling module) and falls
+    back to empty data only when they error — a thrown exception or a 5xx response
+    (e.g. a DB-backed route that try/catches into a 500 because the preview has no
+    database). A working/changed handler still renders its real output."""
+    lines: list[str] = [
+        "// @ts-nocheck",
+        "import { json } from '@sveltejs/kit';",
+        f"import * as __orig from './{_ORIG_MODULE_STEM}';",
+        f"export * from './{_ORIG_MODULE_STEM}';",
+        "const __renderprMsg = (e) =>",
+        '  String((e && e.message) || e || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200);',
+        "const __renderprFallback = (msg) =>",
+        "  json([], {",
+        "    status: 200,",
+        "    headers: {",
+        f'      "{API_FALLBACK_HEADER}": "{api_path}",',
+        f'      "{API_ERROR_HEADER}": msg,',
+        "    },",
+        "  });",
+        "const __renderprWrap = (fn) =>",
+        "  async (...args) => {",
+        "    try {",
+        "      const res = await fn(...args);",
+        '      if (res && typeof res.status === "number" && res.status >= 500) {',
+        f'        console.error("[renderpr] handler for {api_path} returned status " + res.status);',
+        '        return __renderprFallback("HTTP " + res.status);',
+        "      }",
+        "      return res;",
+        "    } catch (err) {",
+        f'      console.error("[renderpr] handler for {api_path} threw:", err);',
+        "      return __renderprFallback(__renderprMsg(err));",
+        "    }",
+        "  };",
+    ]
+    for method in methods:
+        lines.append(f"export const {method} = __renderprWrap(__orig.{method});")
+    return "\n".join(lines) + "\n"
+
+
+def _fallback_server_source(api_path: str) -> str:
+    return (
+        "import { json } from '@sveltejs/kit';\n"
+        "const __renderprUnmocked = () =>\n"
+        f'  json([], {{ status: 200, headers: {{ "{API_FALLBACK_HEADER}": "{api_path}" }} }});\n'
+        "export const GET = __renderprUnmocked;\n"
+        "export const POST = __renderprUnmocked;\n"
+        "export const PUT = __renderprUnmocked;\n"
+        "export const PATCH = __renderprUnmocked;\n"
+        "export const DELETE = __renderprUnmocked;\n"
+    )
+
+
+def _blind_stub_route(
+    repo_path: Path, route_file: Path, route_rel: Path, api_path: str
+) -> list[str]:
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    route_file.write_text(_fallback_server_source(api_path))
+    generated.append(str(route_rel))
+    return generated
+
+
+def _wrap_changed_route(
+    repo_path: Path, route_file: Path, route_rel: Path, api_path: str
+) -> list[str]:
+    """Guard a PR-changed endpoint instead of stubbing it: move the real handlers
+    to a sibling module and replace the endpoint with a wrapper that runs them,
+    falling back to empty data only on a thrown exception or a 5xx response."""
+    source = route_file.read_text()
+    methods = _detect_handler_methods(source)
+    if not methods:
+        logger.info(
+            "Changed route %s has no detectable handlers; blind-stubbing", api_path
+        )
+        return _blind_stub_route(repo_path, route_file, route_rel, api_path)
+
+    orig_module = route_file.with_name(f"{_ORIG_MODULE_STEM}{route_file.suffix}")
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    orig_module.write_text(source)
+    generated.append(str(orig_module.relative_to(repo_path)))
+    route_file.write_text(_server_handler_wrapper_source(api_path, methods))
+    generated.append(str(route_rel))
+    logger.info(
+        "Changed route %s wrapped (methods: %s); real handler runs with an error guard",
+        api_path,
+        ",".join(methods),
+    )
+    return generated
 
 
 class SvelteKitMockWriter(MockWriter):
@@ -125,6 +245,48 @@ class SvelteKitMockWriter(MockWriter):
                 logger.info(
                     "Server mock route written: %s for %s", route_rel, api_path
                 )
+
+        return generated
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        """Make every unmocked ``src/routes/api/**/+server.*`` endpoint degrade
+        gracefully. Auth routes and explicitly-mocked endpoints are left untouched.
+        PR-changed endpoints are wrapped (real handler runs); the rest are stubbed."""
+        repo_path = Path(repo_dir)
+        api_dir = repo_path / "src" / "routes" / "api"
+        if not api_dir.is_dir():
+            return []
+
+        explicit = _explicit_mock_paths(mocks)
+        changed = self.changed_api_paths(diff)
+        generated: list[str] = []
+
+        candidates = sorted(api_dir.rglob("+server.ts")) + sorted(
+            api_dir.rglob("+server.js")
+        )
+        for route_file in sorted(candidates):
+            if route_file.name not in _SERVER_FILE_NAMES:
+                continue
+            route_rel = route_file.relative_to(repo_path)
+            api_path = _server_file_to_api_path(route_rel)
+            if (
+                api_path is None
+                or api_path.lstrip("/").startswith(_AUTH_API_PREFIX)
+                or api_path in explicit
+            ):
+                continue
+
+            if api_path in changed:
+                generated.extend(
+                    _wrap_changed_route(repo_path, route_file, route_rel, api_path)
+                )
+            else:
+                generated.extend(
+                    _blind_stub_route(repo_path, route_file, route_rel, api_path)
+                )
+                logger.info("Unmocked API fallback written for %s", api_path)
 
         return generated
 
