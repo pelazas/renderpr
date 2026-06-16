@@ -22,6 +22,19 @@ logger = logging.getLogger(__name__)
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# Per-framework prefix a var must carry to be exposed to client-side code.
+# ``None`` means the framework has no client-exposure prefix convention (the
+# value reaches the app purely via process env / explicit server access).
+FRAMEWORK_PUBLIC_PREFIXES: dict[str, str | None] = {
+    "next": "NEXT_PUBLIC_",
+    "vite": "VITE_",
+    "sveltekit": "PUBLIC_",
+    "astro": "PUBLIC_",
+    "cra": "REACT_APP_",
+    "remix": None,
+    "spa": None,
+}
+
 
 def find_env_example(frontend_dir: Path | str, override: str | None = None) -> Path | None:
     directory = Path(frontend_dir)
@@ -70,6 +83,7 @@ def build_injected_env(
     frontend_dir: Path | str,
     config_env: dict,
     secrets: dict[str, str],
+    framework: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Return ``(injected_env, missing_required)``.
 
@@ -88,6 +102,24 @@ def build_injected_env(
         logger.warning("Declared env vars without a provided value: %s", missing)
     if injected:
         logger.info("Injecting %d env var(s): %s", len(injected), sorted(injected.keys()))
+    if framework is not None and framework in FRAMEWORK_PUBLIC_PREFIXES:
+        prefix = FRAMEWORK_PUBLIC_PREFIXES[framework]
+        if prefix is None:
+            if framework == "remix":
+                logger.info(
+                    "Remix does not auto-load .env.local; injected vars are still "
+                    "provided via the dev server's process env.",
+                )
+        else:
+            for key in injected:
+                if not key.startswith(prefix):
+                    logger.warning(
+                        "Injected env var %r lacks the %r prefix, so it won't be "
+                        "exposed to the client for framework %r.",
+                        key,
+                        prefix,
+                        framework,
+                    )
     return injected, missing
 
 
