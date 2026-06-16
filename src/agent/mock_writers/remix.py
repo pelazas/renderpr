@@ -9,11 +9,16 @@ banner host is ``app/root.tsx``. See GitHub issue #47 for the full contract.
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from src.agent.mock_server import (
+    API_ERROR_HEADER,
+    API_FALLBACK_HEADER,
     MockWriter,
+    _AUTH_API_PREFIX,
     _backup_file,
+    _explicit_mock_paths,
     register_mock_writer,
     write_vite_allowed_hosts,
 )
@@ -24,6 +29,7 @@ _ROUTES_DIR = ("app", "routes")
 # Sibling-module stem the original handler is moved to when we wrap a changed
 # route; the leading underscore keeps the segment non-routable in Remix.
 _ORIG_SEGMENT = "_renderpr_orig"
+_REMIX_HANDLERS = ("loader", "action")
 
 
 def _flat_name_for_api_path(api_path: str) -> str | None:
@@ -62,11 +68,93 @@ def _api_path_for_flat_name(stem: str) -> str:
     return "/" + "/".join(segments)
 
 
+def _discover_api_route_files(repo_path: Path) -> list[Path]:
+    """Existing Remix resource routes ``app/routes/api.*.{ts,js}``.
+
+    Excludes our own ``._renderpr_orig`` sibling modules so a re-run doesn't
+    treat a previously-moved original as a fresh endpoint.
+    """
+    routes_dir = repo_path / Path(*_ROUTES_DIR)
+    if not routes_dir.is_dir():
+        return []
+    found: list[Path] = []
+    for path in sorted(routes_dir.glob("api.*")):
+        if path.suffix not in (".ts", ".js") or not path.is_file():
+            continue
+        if f".{_ORIG_SEGMENT}" in path.stem:
+            continue
+        found.append(path)
+    return found
+
+
 def _server_mock_source(body: str, status: int) -> str:
     return (
         "import { json } from '@remix-run/node';\n"
         f"export const loader = () => json({body}, {{ status: {status} }});\n"
     )
+
+
+def _blind_stub_source(api_path: str) -> str:
+    return (
+        "import { json } from '@remix-run/node';\n"
+        "export const loader = () => json([], { status: 200, headers: { "
+        f"'{API_FALLBACK_HEADER}': '{api_path}' }} }});\n"
+        "export const action = () => json([], { status: 200, headers: { "
+        f"'{API_FALLBACK_HEADER}': '{api_path}' }} }});\n"
+    )
+
+
+def _detect_remix_handlers(source: str) -> list[str]:
+    """Which of ``loader``/``action`` a resource route exports, best-effort."""
+    found: list[str] = []
+    for name in _REMIX_HANDLERS:
+        patterns = (
+            rf"export\s+const\s+{name}\b",
+            rf"export\s+async\s+function\s+{name}\b",
+            rf"export\s+function\s+{name}\b",
+            rf"export\s*\{{[^}}]*\b{name}\b[^}}]*\}}",
+        )
+        if any(re.search(p, source) for p in patterns):
+            found.append(name)
+    return found
+
+
+def _wrapper_source(api_path: str, orig_stem: str, handlers: list[str]) -> str:
+    """Wrapper that runs the original loader/action (moved to a sibling module)
+    and falls back to empty data only on a thrown exception or a >=500 response."""
+    lines = [
+        "// @ts-nocheck",
+        "import { json } from '@remix-run/node';",
+        f"import * as __orig from './{orig_stem}';",
+        f"export * from './{orig_stem}';",
+        "const __renderprMsg = (e) =>",
+        '  String((e && e.message) || e || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200);',
+        "const __renderprFallback = (msg) =>",
+        "  json([], {",
+        "    status: 200,",
+        "    headers: {",
+        f"      '{API_FALLBACK_HEADER}': '{api_path}',",
+        f"      '{API_ERROR_HEADER}': msg,",
+        "    },",
+        "  });",
+        "const __renderprWrap = (fn) =>",
+        "  async (...args) => {",
+        "    try {",
+        "      const res = await fn(...args);",
+        '      if (res && typeof res.status === "number" && res.status >= 500) {',
+        f'        console.error("[renderpr] handler for {api_path} returned status " + res.status);',
+        '        return __renderprFallback("HTTP " + res.status);',
+        "      }",
+        "      return res;",
+        "    } catch (err) {",
+        f'      console.error("[renderpr] handler for {api_path} threw:", err);',
+        "      return __renderprFallback(__renderprMsg(err));",
+        "    }",
+        "  };",
+    ]
+    for name in handlers:
+        lines.append(f"export const {name} = __renderprWrap(__orig.{name});")
+    return "\n".join(lines) + "\n"
 
 
 class RemixMockWriter(MockWriter):
@@ -157,6 +245,70 @@ class RemixMockWriter(MockWriter):
                 generated.append(str(route_rel))
                 logger.info("Server mock route written: %s for %s", route_rel, api_path)
 
+        return generated
+
+    def write_unmocked_fallbacks(
+        self, repo_dir, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        repo_path = Path(repo_dir)
+        route_files = _discover_api_route_files(repo_path)
+        if not route_files:
+            return []
+
+        explicit = _explicit_mock_paths(mocks)
+        changed = self.changed_api_paths(diff)
+        generated: list[str] = []
+
+        for route_file in route_files:
+            api_path = _api_path_for_flat_name(route_file.stem)
+            if (
+                api_path.lstrip("/").startswith(_AUTH_API_PREFIX)
+                or api_path in explicit
+            ):
+                continue
+
+            if api_path in changed:
+                generated.extend(self._wrap_changed(repo_path, route_file, api_path))
+            else:
+                generated.extend(self._blind_stub(repo_path, route_file, api_path))
+                logger.info("Unmocked API fallback written for %s", api_path)
+
+        return generated
+
+    def _blind_stub(self, repo_path: Path, route_file: Path, api_path: str) -> list[str]:
+        generated: list[str] = []
+        backup = _backup_file(route_file)
+        if backup is not None:
+            generated.append(str(backup.relative_to(repo_path)))
+        route_file.write_text(_blind_stub_source(api_path))
+        generated.append(str(route_file.relative_to(repo_path)))
+        return generated
+
+    def _wrap_changed(self, repo_path: Path, route_file: Path, api_path: str) -> list[str]:
+        source = route_file.read_text()
+        handlers = _detect_remix_handlers(source)
+        if not handlers:
+            logger.info(
+                "Changed route %s has no detectable loader/action; blind-stubbing",
+                api_path,
+            )
+            return self._blind_stub(repo_path, route_file, api_path)
+
+        orig_stem = f"{route_file.stem}.{_ORIG_SEGMENT}"
+        orig_module = route_file.with_name(f"{orig_stem}{route_file.suffix}")
+        generated: list[str] = []
+        backup = _backup_file(route_file)
+        if backup is not None:
+            generated.append(str(backup.relative_to(repo_path)))
+        orig_module.write_text(source)
+        generated.append(str(orig_module.relative_to(repo_path)))
+        route_file.write_text(_wrapper_source(api_path, orig_stem, handlers))
+        generated.append(str(route_file.relative_to(repo_path)))
+        logger.info(
+            "Changed route %s wrapped (handlers: %s); real handler runs with an error guard",
+            api_path,
+            ",".join(handlers),
+        )
         return generated
 
 
