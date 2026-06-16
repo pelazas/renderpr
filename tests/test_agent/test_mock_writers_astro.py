@@ -1,6 +1,5 @@
 import json
 
-import pytest
 
 from src.agent.mock_server import get_mock_writer, restore_runtime_files
 

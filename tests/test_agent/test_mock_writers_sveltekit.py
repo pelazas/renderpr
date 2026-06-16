@@ -1,4 +1,3 @@
-import json
 
 from src.agent.mock_server import (
     get_mock_writer,

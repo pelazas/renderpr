@@ -2,7 +2,6 @@
 
 import json
 
-import pytest
 
 from src.agent.mock_server import (
     API_ERROR_HEADER,
