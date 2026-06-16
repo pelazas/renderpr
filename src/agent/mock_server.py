@@ -19,12 +19,13 @@ Each writer method returns the runtime-generated relative paths it produced
 via :func:`restore_runtime_files`.
 
 Next.js (:class:`NextMockWriter`) ships the full on-disk mocking behavior. The
-Vite-family frameworks (vite/sveltekit/remix/astro) implement only the
-dev-origin allowlist — SvelteKit/Remix reuse the Vite ``server.allowedHosts``
-patch, Astro patches ``vite.server.allowedHosts`` in its own config (Phase 1).
-Server-side *data* mocking for those frameworks is Phase 2. cra/spa stay
-registered no-ops (their data fetching is intercepted in the browser by
-visual.py).
+Vite-family server-rendered frameworks (sveltekit/astro/remix) live in the
+``mock_writers`` package, where they do their own full on-disk mocking (server
+mocks, unmocked-API fallbacks, banner) plus the dev-origin allowlist —
+SvelteKit/Remix reuse the Vite ``server.allowedHosts`` patch, Astro patches
+``vite.server.allowedHosts`` in its own config. The plain ``vite`` writer only
+implements the allowlist. cra/spa stay registered no-ops (their data fetching is
+intercepted in the browser by visual.py).
 """
 
 import json
@@ -684,43 +685,8 @@ class ViteMockWriter(MockWriter):
         return write_vite_allowed_hosts(repo_dir, public_ip)
 
 
-class SvelteKitMockWriter(MockWriter):
-    """SvelteKit runs on a Vite dev server, so its dev-origin allowlist is the
-    Vite server.allowedHosts patch. Server-side data mocking is out of scope here
-    (Phase 2); every other method stays a no-op."""
-
-    framework = "sveltekit"
-
-    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
-        return write_vite_allowed_hosts(repo_dir, public_ip)
-
-
-class RemixMockWriter(MockWriter):
-    """Modern Remix runs on Vite, so its dev-origin allowlist is the Vite
-    server.allowedHosts patch (same as SvelteKit). Other methods stay no-ops."""
-
-    framework = "remix"
-
-    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
-        return write_vite_allowed_hosts(repo_dir, public_ip)
-
-
-class AstroMockWriter(MockWriter):
-    """Astro proxies Vite, but the allowlist belongs under vite.server in
-    astro.config.* (falling back to vite.config.* when absent). Other methods
-    stay no-ops."""
-
-    framework = "astro"
-
-    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
-        return write_astro_allowed_hosts(repo_dir, public_ip)
-
-
 register_mock_writer("next", NextMockWriter())
 register_mock_writer("vite", ViteMockWriter())
-register_mock_writer("sveltekit", SvelteKitMockWriter())
-register_mock_writer("remix", RemixMockWriter())
-register_mock_writer("astro", AstroMockWriter())
 # Remaining stubs: registered so the registry is the single source of truth, but
 # every method is a base-class no-op. SPA/CRA frameworks fetch client-side and
 # are fully covered by the Playwright interception in visual.py, and CRA's dev
@@ -753,3 +719,9 @@ def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list
 
 def write_dev_origin_allowlist(repo_dir: Path | str, public_ip: str, framework: str) -> list[str]:
     return get_mock_writer(framework).write_dev_origin_allowlist(repo_dir, public_ip)
+
+
+# Register the Vite-family server-side writers (SvelteKit/Astro/Remix). Imported
+# last so all shared helpers/constants above are bound before the submodules
+# import them; registration happens inside each module.
+from src.agent import mock_writers  # noqa: E402,F401
