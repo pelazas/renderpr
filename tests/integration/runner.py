@@ -33,7 +33,7 @@ import httpx
 from src.agent import config, discovery, mock_server, routes
 from src.agent.main import _resolve_ready_port, _start_dev_process
 
-from tests.integration.report import BLOCKED, FAIL, PASS, FixtureResult
+from tests.integration.report import FAIL, PASS, FixtureResult
 from tests.integration.spec_types import FixtureSpec
 
 # Per-request HTTP timeout. The first SSR compile of a route can take several
