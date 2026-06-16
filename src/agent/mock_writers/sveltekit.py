@@ -17,6 +17,7 @@ from src.agent.mock_server import (
     API_FALLBACK_HEADER,
     MockWriter,
     _AUTH_API_PREFIX,
+    _BANNER_JS,
     _backup_file,
     _explicit_mock_paths,
     register_mock_writer,
@@ -31,6 +32,8 @@ _HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
 # SvelteKit only treats ``+server.*`` files as routes, so a plain
 # ``_renderpr_orig_server.ts`` sibling is import-only and non-routable.
 _ORIG_MODULE_STEM = "_renderpr_orig_server"
+_APP_HTML_REL = "src/app.html"
+_BANNER_STATIC_REL = "static/__renderpr-unmocked.js"
 
 
 def _server_file_to_api_path(route_rel: Path) -> str | None:
@@ -288,6 +291,42 @@ class SvelteKitMockWriter(MockWriter):
                 )
                 logger.info("Unmocked API fallback written for %s", api_path)
 
+        return generated
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        """Inject the in-app banner script. Host is ``src/app.html``; the script is
+        served statically from ``static/__renderpr-unmocked.js``. Best-effort: skips
+        if there's no ``app.html`` or no ``</body>`` to attach to."""
+        repo_path = Path(repo_dir)
+        app_html = repo_path / _APP_HTML_REL
+        if not app_html.exists():
+            logger.info("No src/app.html found; skipping unmocked banner")
+            return []
+
+        content = app_html.read_text()
+        if _BANNER_STATIC_REL.split("/")[-1] in content:
+            return []
+        idx = content.find("</body>")
+        if idx == -1:
+            logger.info("app.html </body> not found; skipping unmocked banner")
+            return []
+
+        generated: list[str] = []
+        banner = repo_path / _BANNER_STATIC_REL
+        banner.parent.mkdir(parents=True, exist_ok=True)
+        banner_backup = _backup_file(banner)
+        if banner_backup is not None:
+            generated.append(str(banner_backup.relative_to(repo_path)))
+        banner.write_text(_BANNER_JS)
+        generated.append(_BANNER_STATIC_REL)
+
+        html_backup = _backup_file(app_html)
+        if html_backup is not None:
+            generated.append(str(html_backup.relative_to(repo_path)))
+        tag = '\n    <script src="/__renderpr-unmocked.js"></script>'
+        app_html.write_text(content[:idx] + tag + content[idx:])
+        generated.append(str(app_html.relative_to(repo_path)))
+        logger.info("Unmocked banner injected into %s", _APP_HTML_REL)
         return generated
 
     def write_dev_origin_allowlist(
