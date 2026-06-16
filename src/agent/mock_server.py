@@ -22,8 +22,9 @@ VITE_CONFIG_NAMES = (
 # Frameworks whose server process (RSC/SSR) fetches data outside the browser,
 # so a browser-level page.route() mock can't intercept it — these need on-disk
 # mock route handlers. SPA frameworks fetch client-side and are fully covered by
-# the Playwright interception in visual.py.
-_SERVER_MOCK_FRAMEWORKS = frozenset({"next"})
+# the Playwright interception in visual.py. (Informational: today only "next"
+# does on-disk generation; the mock-writer registry below is the source of
+# truth for per-framework behavior.)
 
 # Header stamped on every catch-all fallback response so the in-app banner can
 # tell the user which endpoint wasn't mocked.
@@ -571,8 +572,8 @@ def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> N
 class NextMockWriter(MockWriter):
     """Next.js writer carrying the on-disk preview-servicing logic.
 
-    Wraps the module-level Next helpers; the previous ``_SERVER_MOCK_FRAMEWORKS``
-    gate is gone — the gate is now simply which writer you got from the registry.
+    Wraps the module-level Next helpers; the previous framework gate is gone —
+    the gate is now simply which writer you got from the registry.
     """
 
     framework = "next"
@@ -597,7 +598,26 @@ class NextMockWriter(MockWriter):
         return changed_api_paths(diff)
 
 
+class ViteMockWriter(MockWriter):
+    """Vite stub: only the dev-origin allowlist does anything (best-effort
+    server.allowedHosts patch); server mocks / fallbacks / banner are no-ops
+    because SPA data fetching is intercepted at the browser layer in visual.py."""
+
+    framework = "vite"
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_vite_allowed_hosts(repo_dir, public_ip)
+
+
 register_mock_writer("next", NextMockWriter())
+register_mock_writer("vite", ViteMockWriter())
+# Phase 0 stubs: registered so the registry is the single source of truth, but
+# every method is a base-class no-op (no on-disk generation, no allowlist). Real
+# implementations land in later phases. Note: detect_framework emits "sveltekit"
+# / "astro" (never "vite"), so their dev-origin allowlist intentionally stays a
+# no-op here — wiring them to a Vite allowedHosts patch is a Phase 1 decision.
+for _stub_framework in ("sveltekit", "astro", "remix", "cra", "spa"):
+    register_mock_writer(_stub_framework, MockWriter())
 
 
 # --- Backward-compat module shims -------------------------------------------

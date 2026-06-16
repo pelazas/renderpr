@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from src.agent.mock_server import (
     MockWriter,
     changed_api_paths,
@@ -325,3 +327,65 @@ def test_register_and_get_mock_writer_roundtrip():
         from src.agent import mock_server
 
         mock_server._MOCK_WRITERS.pop("registry-test-fw", None)
+
+
+# --- Stub writers (Phase 0: no on-disk generation) --------------------------
+
+_STUB_FRAMEWORKS = ("sveltekit", "astro", "remix", "cra", "spa", "vite")
+
+
+def _populated_api_tree(tmp_path):
+    """A repo with a populated src/app/api tree + a root layout, so a writer that
+    *did* generate files would visibly create some."""
+    _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    _make_api_route(tmp_path, "src/app/api/posts/route.ts")
+    layout = tmp_path / "src/app/layout.tsx"
+    layout.parent.mkdir(parents=True, exist_ok=True)
+    layout.write_text("export default function L({children}){return <html><body>{children}</body></html>}")
+    return sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("framework", _STUB_FRAMEWORKS)
+def test_stub_writers_generate_nothing(tmp_path, framework):
+    before = _populated_api_tree(tmp_path)
+    writer = get_mock_writer(framework)
+
+    assert writer.write_server_mocks(
+        tmp_path, {"localhost": {"/api/users": {"body": [{"id": 1}]}}}
+    ) == []
+    assert writer.write_unmocked_fallbacks(
+        tmp_path, mocks=None, diff=_diff_touching("src/app/api/users/route.ts")
+    ) == []
+    assert writer.write_banner(tmp_path) == []
+    assert writer.changed_api_paths(_diff_touching("src/app/api/users/route.ts")) == set()
+
+    after = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+    assert after == before  # no files created or modified-in-place
+
+
+def test_vite_writer_allowlist_mapping(tmp_path):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    generated = get_mock_writer("vite").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert "vite.config.ts" in generated
+    assert "allowedHosts: ['54.1.2.3']" in cfg.read_text()
+
+
+def test_vite_writer_server_mocks_noop_even_with_vite_config(tmp_path):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({})\n")
+    _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    assert get_mock_writer("vite").write_server_mocks(
+        tmp_path, {"localhost": {"/api/users": {"body": []}}}
+    ) == []
+
+
+@pytest.mark.parametrize("framework", ("sveltekit", "astro"))
+def test_sveltekit_astro_allowlist_parity_noop(tmp_path, framework):
+    # Regression: detect_framework emits sveltekit/astro (never vite), so even
+    # with a Vite-shaped config present their allowlist MUST stay a no-op — they
+    # do NOT inherit vite's allowedHosts patch in Phase 0.
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    assert get_mock_writer(framework).write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
+    assert "allowedHosts" not in cfg.read_text()
