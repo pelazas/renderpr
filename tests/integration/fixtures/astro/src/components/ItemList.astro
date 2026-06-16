@@ -1,0 +1,15 @@
+---
+// ItemList component — shared between pages. Renders each item's name.
+interface Item {
+  id?: number;
+  name: string;
+}
+const { items = [] } = Astro.props as { items: Item[] };
+---
+
+<section data-testid="item-list">
+  <p>ItemList component</p>
+  <ul class="item-list">
+    {items.map((item) => <li class="item">{item.name}</li>)}
+  </ul>
+</section>

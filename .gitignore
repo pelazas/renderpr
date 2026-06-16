@@ -54,3 +54,7 @@ Thumbs.db
 .env.local
 *.env
 *.pem
+
+# Phase 3 e2e harness run output (root-owned, container-generated)
+tests/integration/_out*
+.pnpm-store/

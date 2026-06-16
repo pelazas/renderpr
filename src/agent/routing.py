@@ -43,6 +43,10 @@ class RoutingStrategy:
     """Base strategy: a single-page app with no file-system routing."""
 
     name = "spa"
+    # File extensions the import-graph scanner should consider as "source" when
+    # walking importers for this framework. Frameworks with non-JS page files
+    # (Astro, SvelteKit) extend this so the BFS can reach their pages.
+    source_extensions: tuple[str, ...] = SOURCE_EXTENSIONS
 
     def file_to_route(self, file_path: str) -> str | None:
         return None
@@ -79,6 +83,31 @@ class RoutingStrategy:
                 yield str(f.relative_to(repo_path))
 
 
+_NEXT_INTERCEPT_RE = re.compile(r"^\(\.+\).+|^\(\.{3}\).+")
+_NEXT_GROUP_RE = re.compile(r"^\(.+\)$")
+
+
+def _normalize_next_segments(inner: str) -> str | None:
+    """Map App Router segments between `app/` and `page`/`layout` to a URL path.
+
+    Drops route-group `(group)` and `@slot` parallel-route segments (they don't
+    appear in the URL). Returns None for intercepting routes `(.)`, `(..)`,
+    `(...)` (not screenshottable). `inner` is the path between `app` and the
+    final file, e.g. "/(marketing)/about" -> "/about".
+    """
+    raw_segments = [s for s in inner.split("/") if s]
+    out: list[str] = []
+    for seg in raw_segments:
+        if _NEXT_INTERCEPT_RE.match(seg):
+            return None
+        if _NEXT_GROUP_RE.match(seg):
+            continue
+        if seg.startswith("@"):
+            continue
+        out.append(seg)
+    return "/" + "/".join(out) if out else "/"
+
+
 class NextAppRouterStrategy(RoutingStrategy):
     name = "next-app"
 
@@ -90,21 +119,27 @@ class NextAppRouterStrategy(RoutingStrategy):
 
     def file_to_route(self, file_path: str) -> str | None:
         normalized = file_path.replace("\\", "/")
+        # route.{ts,tsx,js,jsx} files are API handlers, not screenshottable pages.
+        if re.search(rf"(?:^|/)app(?:/[^/]+)*/route\.{_JS}$", normalized):
+            return None
         match = re.search(rf"(?:^|/)app((?:/[^/]+)*)/page\.{_JS}$", normalized)
         if match:
-            return match.group(1) or "/"
+            return _normalize_next_segments(match.group(1))
         if re.search(rf"(?:^|/)app/page\.{_JS}$", normalized):
             return "/"
         return None
 
     def is_page_file(self, file_path: str) -> bool:
-        return bool(re.search(rf"(?:^|/)app(?:/[^/]+)*/page\.{_JS}$", file_path.replace("\\", "/")))
+        return self.file_to_route(file_path) is not None
 
     def is_layout_file(self, file_path: str) -> tuple[bool, str]:
         normalized = file_path.replace("\\", "/")
         match = re.search(rf"(?:^|/)app((?:/[^/]+)*)/layout\.{_JS}$", normalized)
         if match:
-            return True, match.group(1) or "/"
+            normalized_route = _normalize_next_segments(match.group(1))
+            if normalized_route is None:
+                return False, ""
+            return True, normalized_route
         if re.search(rf"(?:^|/)app/layout\.{_JS}$", normalized):
             return True, "/"
         return False, ""
@@ -171,6 +206,7 @@ class NextPagesRouterStrategy(RoutingStrategy):
 
 class AstroStrategy(RoutingStrategy):
     name = "astro"
+    source_extensions = SOURCE_EXTENSIONS + (".astro",)
 
     _PAGE_RE = re.compile(r"(?:^|/)(?:src/)?pages/(.+)\.(?:astro|md|mdx)$")
 
@@ -202,33 +238,56 @@ class AstroStrategy(RoutingStrategy):
 
 class SvelteKitStrategy(RoutingStrategy):
     name = "sveltekit"
+    source_extensions = SOURCE_EXTENSIONS + (".svelte",)
 
-    _PAGE_RE = re.compile(r"(?:^|/)src/routes/(.*)\+page\.svelte$")
-    _LAYOUT_RE = re.compile(r"(?:^|/)src/routes/(.*)\+layout\.svelte$")
+    _PAGE_SUFFIXES: Final[tuple[str, ...]] = (
+        "+page.svelte", "+page.ts", "+page.js",
+        "+page.server.ts", "+page.server.js", "+page.md",
+    )
+    _PAGE_RE = re.compile(r"(?:^|/)src/routes/(.*)\+page(?:\.server)?\.(?:svelte|ts|js|md)$")
+    _LAYOUT_RE = re.compile(r"(?:^|/)src/routes/(.*)\+layout(?:\.server)?\.(?:svelte|ts|js)$")
 
-    def _route_from_match(self, inner: str) -> str:
-        segments = [s for s in inner.split("/") if s and not (s.startswith("(") and s.endswith(")"))]
+    def _route_from_match(self, inner: str) -> str | None:
+        """Map the dir part before +page to a URL. Route groups `(group)` and
+        optional `[[param]]`/rest `[...param]` segments are dropped (the latter
+        yield the concrete parent URL); a required `[param]` makes it dynamic.
+        """
+        segments: list[str] = []
+        for s in inner.split("/"):
+            if not s:
+                continue
+            if s.startswith("(") and s.endswith(")"):
+                continue  # route group
+            if s.startswith("[[") and s.endswith("]]"):
+                continue  # optional param -> drop, yield concrete URL
+            if s.startswith("[...") and s.endswith("]"):
+                continue  # rest/splat param -> drop, yield concrete URL
+            if s.startswith("[") and s.endswith("]"):
+                return None  # required dynamic param
+            segments.append(s)
         return "/" + "/".join(segments) if segments else "/"
 
     def file_to_route(self, file_path: str) -> str | None:
         match = self._PAGE_RE.search(file_path.replace("\\", "/"))
         if not match:
             return None
-        route = self._route_from_match(match.group(1))
-        return None if _is_dynamic(route) else route
+        return self._route_from_match(match.group(1))
 
     def is_layout_file(self, file_path: str) -> tuple[bool, str]:
         match = self._LAYOUT_RE.search(file_path.replace("\\", "/"))
         if not match:
             return False, ""
-        return True, self._route_from_match(match.group(1))
+        route = self._route_from_match(match.group(1))
+        if route is None:
+            return False, ""
+        return True, route
 
     def is_global_file(self, file_path: str) -> bool:
         return file_path.replace("\\", "/").endswith(("svelte.config.js", "vite.config.ts", "vite.config.js", "src/app.css"))
 
     def discover_all_routes(self, repo_path: Path) -> list[str]:
         routes: set[str] = set()
-        for rel in self._walk(repo_path, ("+page.svelte",)):
+        for rel in self._walk(repo_path, self._PAGE_SUFFIXES):
             route = self.file_to_route(rel)
             if route:
                 routes.add(route)
@@ -242,22 +301,65 @@ class SvelteKitStrategy(RoutingStrategy):
         }
 
 
+def _remix_token_to_route(token: str) -> str | None:
+    """Convert a Remix flat-route token (the part under app/routes/, no extension)
+    to a URL path, or None if it's dynamic/non-screenshottable.
+
+    Handles trailing `/route` and `/index` folder forms, `[.]`-style escapes,
+    layout opt-out (trailing `_`), pathless layouts (leading `_`), `_index`,
+    optional `(segment)` segments, and `$param`/splat (`$`) dynamics.
+    """
+    # (1) strip trailing folder forms: foo/route -> foo, foo/index -> foo
+    for suffix in ("/route", "/index"):
+        if token.endswith(suffix):
+            token = token[: -len(suffix)]
+
+    # (2) protect `[...]` escapes (e.g. `[.]` -> literal `.`) before splitting on `.`
+    escapes: list[str] = []
+
+    def _stash(m: re.Match) -> str:
+        escapes.append(m.group(1))
+        return f"\x00{len(escapes) - 1}\x00"
+
+    protected = re.sub(r"\[(.*?)\]", _stash, token)
+
+    def _restore(s: str) -> str:
+        return re.sub(r"\x00(\d+)\x00", lambda m: escapes[int(m.group(1))], s)
+
+    # (3) split on `.` and process each segment
+    out: list[str] = []
+    for raw in protected.split("."):
+        if not raw:
+            continue
+        # pathless layout (leading `_`); `_index` contributes the index (/)
+        if raw.startswith("_"):
+            if _restore(raw) == "_index":
+                continue
+            continue
+        # optional/param-group segments like (optional) or ($lang) are dropped
+        if raw.startswith("(") and raw.endswith(")"):
+            continue
+        # layout opt-out: trailing `_` -> strip it, keep the segment
+        seg = raw[:-1] if raw.endswith("_") else raw
+        restored = _restore(seg)
+        # dynamic params ($param) and splat ($) are not screenshottable
+        if "$" in restored:
+            return None
+        out.append(restored)
+
+    return "/" + "/".join(out) if out else "/"
+
+
 class RemixStrategy(RoutingStrategy):
     name = "remix"
 
-    _ROUTE_RE = re.compile(rf"(?:^|/)app/routes/(.+?)(?:/route)?\.{_JS}$")
+    _ROUTE_RE = re.compile(rf"(?:^|/)app/routes/(.+?)\.{_JS}$")
 
     def file_to_route(self, file_path: str) -> str | None:
         match = self._ROUTE_RE.search(file_path.replace("\\", "/"))
         if not match:
             return None
-        token = match.group(1)
-        if token in ("_index", "_index/index"):
-            return "/"
-        segments = [s for s in token.split(".") if not s.startswith("_")]
-        if any(_is_dynamic(s) for s in segments):
-            return None
-        return "/" + "/".join(segments) if segments else "/"
+        return _remix_token_to_route(match.group(1))
 
     def is_global_file(self, file_path: str) -> bool:
         normalized = file_path.replace("\\", "/")
@@ -281,9 +383,55 @@ class RemixStrategy(RoutingStrategy):
         }
 
 
+class NextHybridStrategy(RoutingStrategy):
+    """Next.js repos that have BOTH app/ and pages/ directories.
+
+    Composes the App Router and Pages Router strategies: a file is resolved by
+    trying the App Router first, then Pages; route discovery and the boolean
+    predicates union both.
+    """
+
+    name = "next-hybrid"
+
+    def __init__(self) -> None:
+        self._app = NextAppRouterStrategy()
+        self._pages = NextPagesRouterStrategy()
+        self.source_extensions = tuple(
+            dict.fromkeys(self._app.source_extensions + self._pages.source_extensions)
+        )
+
+    def file_to_route(self, file_path: str) -> str | None:
+        route = self._app.file_to_route(file_path)
+        if route is not None:
+            return route
+        return self._pages.file_to_route(file_path)
+
+    def is_page_file(self, file_path: str) -> bool:
+        return self._app.is_page_file(file_path) or self._pages.is_page_file(file_path)
+
+    def is_layout_file(self, file_path: str) -> tuple[bool, str]:
+        is_layout, prefix = self._app.is_layout_file(file_path)
+        if is_layout:
+            return is_layout, prefix
+        return self._pages.is_layout_file(file_path)
+
+    def is_global_file(self, file_path: str) -> bool:
+        return self._app.is_global_file(file_path) or self._pages.is_global_file(file_path)
+
+    def discover_all_routes(self, repo_path: Path) -> list[str]:
+        return sorted(
+            set(self._app.discover_all_routes(repo_path))
+            | set(self._pages.discover_all_routes(repo_path))
+        )
+
+    def prompt_context(self) -> dict:
+        return self._app.prompt_context()
+
+
 _STRATEGIES: dict[str, type[RoutingStrategy]] = {
     "next-app": NextAppRouterStrategy,
     "next-pages": NextPagesRouterStrategy,
+    "next-hybrid": NextHybridStrategy,
     "astro": AstroStrategy,
     "sveltekit": SvelteKitStrategy,
     "remix": RemixStrategy,
@@ -291,9 +439,13 @@ _STRATEGIES: dict[str, type[RoutingStrategy]] = {
 
 
 def _resolve_next_variant(repo_path: Path) -> str:
-    if (repo_path / "app").exists() or (repo_path / "src" / "app").exists():
+    has_app = (repo_path / "app").exists() or (repo_path / "src" / "app").exists()
+    has_pages = (repo_path / "pages").exists() or (repo_path / "src" / "pages").exists()
+    if has_app and has_pages:
+        return "next-hybrid"
+    if has_app:
         return "next-app"
-    if (repo_path / "pages").exists() or (repo_path / "src" / "pages").exists():
+    if has_pages:
         return "next-pages"
     return "next-app"
 

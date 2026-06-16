@@ -3,6 +3,7 @@ import pytest
 from src.agent.routing import (
     AstroStrategy,
     NextAppRouterStrategy,
+    NextHybridStrategy,
     NextPagesRouterStrategy,
     RemixStrategy,
     RoutingStrategy,
@@ -29,6 +30,39 @@ class TestNextAppRouter:
         (tmp_path / "app" / "about").mkdir()
         (tmp_path / "app" / "about" / "page.tsx").write_text("x")
         assert NextAppRouterStrategy().discover_all_routes(tmp_path) == ["/", "/about"]
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("app/(marketing)/about/page.tsx", "/about"),
+            ("src/app/(marketing)/about/page.tsx", "/about"),
+            ("app/(group)/page.tsx", "/"),
+            ("app/@modal/photo/page.tsx", "/photo"),  # parallel slot dropped
+            ("app/(.)photo/page.tsx", None),  # intercepting -> non-screenshottable
+            ("app/(..)photo/page.tsx", None),
+            ("app/(...)photo/page.tsx", None),
+            ("app/api/x/route.ts", None),  # API route handler
+            ("app/dashboard/route.tsx", None),
+            ("app/dashboard/page.tsx", "/dashboard"),
+        ],
+    )
+    def test_route_group_slot_intercepting_and_route_handlers(self, path, expected):
+        assert NextAppRouterStrategy().file_to_route(path) == expected
+
+    def test_layout_strips_route_group(self):
+        s = NextAppRouterStrategy()
+        assert s.is_layout_file("app/(marketing)/layout.tsx") == (True, "/")
+        assert s.is_layout_file("app/(marketing)/about/layout.tsx") == (True, "/about")
+
+    def test_layout_intercepting_is_not_layout(self):
+        assert NextAppRouterStrategy().is_layout_file("app/(.)photo/layout.tsx") == (False, "")
+
+    def test_discover_drops_route_groups(self, tmp_path):
+        (tmp_path / "app" / "(marketing)" / "about").mkdir(parents=True)
+        (tmp_path / "app" / "(marketing)" / "about" / "page.tsx").write_text("x")
+        (tmp_path / "app" / "api" / "x").mkdir(parents=True)
+        (tmp_path / "app" / "api" / "x" / "route.ts").write_text("x")
+        assert NextAppRouterStrategy().discover_all_routes(tmp_path) == ["/about"]
 
 
 class TestNextPagesRouter:
@@ -83,6 +117,31 @@ class TestSvelteKit:
     def test_layout(self):
         assert SvelteKitStrategy().is_layout_file("src/routes/about/+layout.svelte") == (True, "/about")
 
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("src/routes/[[lang]]/about/+page.svelte", "/about"),  # optional param dropped
+            ("src/routes/[...rest]/+page.svelte", "/"),  # rest param dropped
+            ("src/routes/blog/[slug]/+page.svelte", None),  # required param dynamic
+            ("src/routes/about/+page.server.ts", "/about"),  # server page discovered
+            ("src/routes/about/+page.ts", "/about"),
+            ("src/routes/about/+page.md", "/about"),
+        ],
+    )
+    def test_broadened_pages_and_params(self, path, expected):
+        assert SvelteKitStrategy().file_to_route(path) == expected
+
+    def test_discover_includes_server_pages(self, tmp_path):
+        (tmp_path / "src" / "routes" / "about").mkdir(parents=True)
+        (tmp_path / "src" / "routes" / "about" / "+page.server.ts").write_text("x")
+        (tmp_path / "src" / "routes" / "+page.svelte").write_text("x")
+        assert SvelteKitStrategy().discover_all_routes(tmp_path) == ["/", "/about"]
+
+    def test_source_extensions(self):
+        assert ".svelte" in SvelteKitStrategy().source_extensions
+        assert ".astro" in AstroStrategy().source_extensions
+        assert RoutingStrategy().source_extensions == (".ts", ".tsx", ".js", ".jsx")
+
 
 class TestRemix:
     @pytest.mark.parametrize(
@@ -98,6 +157,22 @@ class TestRemix:
     def test_file_to_route(self, path, expected):
         assert RemixStrategy().file_to_route(path) == expected
 
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("app/routes/blog_.post.tsx", "/blog/post"),  # layout opt-out trailing _
+            ("app/routes/concerts.trending[.]json.tsx", "/concerts/trending.json"),  # escaped dot
+            ("app/routes/($lang).about.tsx", "/about"),  # optional segment dropped
+            ("app/routes/_index.tsx", "/"),
+            ("app/routes/_auth.login.tsx", "/login"),  # pathless layout dropped
+            ("app/routes/blog.post.tsx", "/blog/post"),  # plain dotted still works
+            ("app/routes/files.$.tsx", None),  # splat is dynamic
+            ("app/routes/_index/index.tsx", "/"),  # folder index form
+        ],
+    )
+    def test_flat_route_parsing(self, path, expected):
+        assert RemixStrategy().file_to_route(path) == expected
+
 
 class TestSpaFallback:
     def test_yields_nothing(self, tmp_path):
@@ -105,6 +180,29 @@ class TestSpaFallback:
         assert s.file_to_route("src/App.tsx") is None
         assert s.discover_all_routes(tmp_path) == []
         assert s.is_page_file("src/App.tsx") is False
+
+
+class TestNextHybrid:
+    def test_resolves_app_then_pages(self):
+        s = NextHybridStrategy()
+        assert s.file_to_route("app/dashboard/page.tsx") == "/dashboard"
+        assert s.file_to_route("pages/about.tsx") == "/about"
+        assert s.file_to_route("components/Button.tsx") is None
+
+    def test_predicates_union(self):
+        s = NextHybridStrategy()
+        assert s.is_page_file("pages/about.tsx") is True
+        assert s.is_page_file("app/x/page.tsx") is True
+        assert s.is_layout_file("app/x/layout.tsx") == (True, "/x")
+        assert s.is_global_file("app/globals.css") is True
+        assert s.is_global_file("pages/_app.tsx") is True
+
+    def test_discover_unions_both(self, tmp_path):
+        (tmp_path / "app" / "dash").mkdir(parents=True)
+        (tmp_path / "app" / "dash" / "page.tsx").write_text("x")
+        (tmp_path / "pages").mkdir()
+        (tmp_path / "pages" / "about.tsx").write_text("x")
+        assert NextHybridStrategy().discover_all_routes(tmp_path) == ["/about", "/dash"]
 
 
 class TestGetStrategy:
@@ -115,6 +213,11 @@ class TestGetStrategy:
     def test_next_pages_when_only_pages_dir(self, tmp_path):
         (tmp_path / "pages").mkdir()
         assert get_strategy("next", tmp_path).name == "next-pages"
+
+    def test_next_hybrid_when_both_present(self, tmp_path):
+        (tmp_path / "app").mkdir()
+        (tmp_path / "pages").mkdir()
+        assert get_strategy("next", tmp_path).name == "next-hybrid"
 
     def test_next_defaults_to_app(self, tmp_path):
         assert get_strategy("next", tmp_path).name == "next-app"

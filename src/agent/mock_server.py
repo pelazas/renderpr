@@ -1,3 +1,33 @@
+"""On-disk preview-servicing mechanisms, dispatched per framework.
+
+The preview needs several on-disk patches so a PR can be rendered without its
+real backend: server mocks, unmocked-API fallbacks, an in-app banner, a
+dev-origin/host allowlist, and changed-API detection. Which of these run is a
+per-framework decision, expressed via a **mock-writer registry**:
+
+- :class:`MockWriter` is the strategy interface; the base class is an all-no-op
+  writer and is also what :func:`get_mock_writer` hands back for any framework
+  with no registered writer (lookups never raise).
+- :func:`register_mock_writer` / :func:`get_mock_writer` are the registry API.
+- The four module-level functions (:func:`write_server_mocks`,
+  :func:`write_unmocked_api_fallbacks`, :func:`write_unmocked_banner`,
+  :func:`write_dev_origin_allowlist`) are backward-compat shims that dispatch
+  through the registry; external callers import and (in tests) monkeypatch them.
+
+Each writer method returns the runtime-generated relative paths it produced
+(including ``.renderpr.bak`` backups) so the orchestrator can restore them later
+via :func:`restore_runtime_files`.
+
+Next.js (:class:`NextMockWriter`) ships the full on-disk mocking behavior. The
+Vite-family server-rendered frameworks (sveltekit/astro/remix) live in the
+``mock_writers`` package, where they do their own full on-disk mocking (server
+mocks, unmocked-API fallbacks, banner) plus the dev-origin allowlist —
+SvelteKit/Remix reuse the Vite ``server.allowedHosts`` patch, Astro patches
+``vite.server.allowedHosts`` in its own config. The plain ``vite`` writer only
+implements the allowlist. cra/spa stay registered no-ops (their data fetching is
+intercepted in the browser by visual.py).
+"""
+
 import json
 import logging
 import re
@@ -19,11 +49,19 @@ VITE_CONFIG_NAMES = (
     "vite.config.js",
     "vite.config.mjs",
 )
+ASTRO_CONFIG_NAMES = (
+    "astro.config.ts",
+    "astro.config.mts",
+    "astro.config.mjs",
+    "astro.config.js",
+    "astro.config.cjs",
+)
 # Frameworks whose server process (RSC/SSR) fetches data outside the browser,
 # so a browser-level page.route() mock can't intercept it — these need on-disk
 # mock route handlers. SPA frameworks fetch client-side and are fully covered by
-# the Playwright interception in visual.py.
-_SERVER_MOCK_FRAMEWORKS = frozenset({"next"})
+# the Playwright interception in visual.py. (Informational: today only "next"
+# does on-disk generation; the mock-writer registry below is the source of
+# truth for per-framework behavior.)
 
 # Header stamped on every catch-all fallback response so the in-app banner can
 # tell the user which endpoint wasn't mocked.
@@ -95,6 +133,60 @@ _BANNER_JS = """(function () {
   }
 })();
 """
+
+
+class MockWriter:
+    """Per-framework strategy for the on-disk preview-servicing mechanisms.
+
+    The orchestrator never special-cases a framework name; it looks up a writer
+    via :func:`get_mock_writer` and the writer it gets back *is* the gate. The
+    base class is an all-no-op writer (returns ``[]`` / ``set()``), which is also
+    the fallback handed out for any framework with no registered writer.
+
+    Each method returns the runtime-generated relative paths it produced (incl.
+    any ``.renderpr.bak`` backups) so the orchestrator can track and later
+    restore them via :func:`restore_runtime_files`.
+    """
+
+    framework: str = ""
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        return []
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        return []
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        return []
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return []
+
+    def changed_api_paths(self, diff: str | None) -> set[str]:
+        return set()
+
+
+_MOCK_WRITERS: dict[str, MockWriter] = {}
+# Shared no-op writer handed out for any unregistered framework; lookups never
+# raise, so callers can dispatch through the registry unconditionally.
+_NOOP_WRITER = MockWriter()
+
+
+def register_mock_writer(framework: str, writer: MockWriter) -> None:
+    _MOCK_WRITERS[framework] = writer
+
+
+def get_mock_writer(framework: str) -> MockWriter:
+    """Return the writer registered for ``framework``.
+
+    Never raises: an unknown (or ``None``) framework yields the shared no-op
+    :class:`MockWriter`, so the orchestrator can always dispatch through it.
+    """
+    return _MOCK_WRITERS.get(framework, _NOOP_WRITER)
 
 
 def _route_file_to_api_path(route_rel: Path) -> str | None:
@@ -250,9 +342,8 @@ def _wrap_changed_route(repo_path: Path, route_file: Path, route_rel: Path, api_
     return generated
 
 
-def write_unmocked_api_fallbacks(
+def _next_write_unmocked_api_fallbacks(
     repo_dir: Path | str,
-    framework: str = "next",
     mocks: dict | None = None,
     diff: str | None = None,
 ) -> list[str]:
@@ -264,9 +355,6 @@ def write_unmocked_api_fallbacks(
     their real handler still runs, so a genuine break surfaces, and only a thrown
     exception degrades to empty data. Untouched routes get the benign `[]` stub.
     """
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        return []
-
     repo_path = Path(repo_dir)
     api_dir = repo_path / "src" / "app" / "api"
     if not api_dir.is_dir():
@@ -293,13 +381,10 @@ def write_unmocked_api_fallbacks(
     return generated
 
 
-def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list[str]:
+def _next_write_unmocked_banner(repo_dir: Path | str) -> list[str]:
     """Inject a small client script that shows an in-page notice when a route's
     data came from an unmocked-fallback response. Best-effort: skips cleanly if
     there's no recognizable root layout `<body>` to attach it to."""
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        return []
-
     repo_path = Path(repo_dir)
     layout = next((repo_path / name for name in _LAYOUT_CANDIDATES if (repo_path / name).exists()), None)
     if layout is None:
@@ -350,13 +435,8 @@ def _mock_route_path(api_path: str) -> Path | None:
     return Path("src/app") / Path(*parts) / "route.ts"
 
 
-def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str = "next", diff: str | None = None) -> list[str]:
+def _next_write_server_mocks(repo_dir: Path | str, mocks: dict | None, diff: str | None = None) -> list[str]:
     if not mocks:
-        return []
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        # SPA/other frameworks fetch client-side; visual.py's page.route()
-        # interception already covers them, so don't write Next route handlers.
-        logger.info("Skipping server mock files for framework %s (browser-layer mocks cover it)", framework)
         return []
 
     repo_path = Path(repo_dir)
@@ -488,19 +568,43 @@ def write_vite_allowed_hosts(repo_dir: Path | str, public_ip: str) -> list[str]:
     return generated
 
 
-def write_dev_origin_allowlist(repo_dir: Path | str, public_ip: str, framework: str) -> list[str]:
-    """Allow the Fargate task's public IP as a dev-server origin, per framework.
+def write_astro_allowed_hosts(repo_dir: Path | str, public_ip: str) -> list[str]:
+    """Best-effort: let an Astro dev server serve the public IP.
 
-    Next uses allowedDevOrigins; Vite uses server.allowedHosts (best-effort); CRA
-    already handles it via DANGEROUSLY_DISABLE_HOST_CHECK; other frameworks need
-    nothing or aren't supported, so they degrade to a no-op.
+    Astro proxies Vite, so the allowlist lives under `vite.server.allowedHosts`
+    in `astro.config.*`. As with the Vite patch, we only touch a recognized
+    `defineConfig({ ... })` shape and skip otherwise rather than risk corruption.
+    Falls back to patching `vite.config.*` directly when there's no astro config.
     """
-    if framework == "next":
-        return write_next_allowed_origin(repo_dir, public_ip)
-    if framework == "vite":
+    if not public_ip or public_ip == "localhost":
+        return []
+
+    repo_path = Path(repo_dir)
+    existing = _find_config(repo_path, ASTRO_CONFIG_NAMES)
+    if existing is None:
         return write_vite_allowed_hosts(repo_dir, public_ip)
-    logger.info("No dev-origin allowlist needed for framework %s", framework)
-    return []
+
+    content = existing.read_text()
+    if "allowedHosts" in content:
+        return []
+
+    match = re.search(r"defineConfig\s*\(\s*\{", content)
+    if not match:
+        logger.info("Astro config shape not recognized; skipping allowedHosts")
+        return []
+
+    backup = _backup_file(existing)
+    generated: list[str] = []
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+
+    insert_at = match.end()
+    injection = f"\n  vite: {{ server: {{ allowedHosts: ['{public_ip}'] }} }},"
+    content = content[:insert_at] + injection + content[insert_at:]
+    existing.write_text(content)
+    generated.append(str(existing.relative_to(repo_path)))
+    logger.info("Astro config patched with vite.server.allowedHosts for %s", public_ip)
+    return generated
 
 
 def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> None:
@@ -536,3 +640,88 @@ def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> N
             logger.info("Deleted runtime-generated file: %s", rel)
         except OSError:
             logger.warning("Failed to delete runtime file %s", rel, exc_info=True)
+
+
+# --- Framework writers ------------------------------------------------------
+
+
+class NextMockWriter(MockWriter):
+    """Next.js writer carrying the on-disk preview-servicing logic.
+
+    Wraps the module-level Next helpers; the previous framework gate is gone —
+    the gate is now simply which writer you got from the registry.
+    """
+
+    framework = "next"
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        return _next_write_server_mocks(repo_dir, mocks, diff=diff)
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        return _next_write_unmocked_api_fallbacks(repo_dir, mocks=mocks, diff=diff)
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        return _next_write_unmocked_banner(repo_dir)
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_next_allowed_origin(repo_dir, public_ip)
+
+    def changed_api_paths(self, diff: str | None) -> set[str]:
+        return changed_api_paths(diff)
+
+
+class ViteMockWriter(MockWriter):
+    """Vite stub: only the dev-origin allowlist does anything (best-effort
+    server.allowedHosts patch); server mocks / fallbacks / banner are no-ops
+    because SPA data fetching is intercepted at the browser layer in visual.py."""
+
+    framework = "vite"
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_vite_allowed_hosts(repo_dir, public_ip)
+
+
+register_mock_writer("next", NextMockWriter())
+register_mock_writer("vite", ViteMockWriter())
+# Remaining stubs: registered so the registry is the single source of truth, but
+# every method is a base-class no-op. SPA/CRA frameworks fetch client-side and
+# are fully covered by the Playwright interception in visual.py, and CRA's dev
+# server gets its host binding from build_dev_env rather than an allowlist patch.
+for _stub_framework in ("cra", "spa"):
+    register_mock_writer(_stub_framework, MockWriter())
+
+
+# --- Backward-compat module shims -------------------------------------------
+# External callers (main.py, visual.py, tests) import these module-level names
+# and monkeypatch some of them; they dispatch through the registry so the
+# framework gate lives in one place.
+
+
+def write_server_mocks(
+    repo_dir: Path | str, mocks: dict | None, framework: str = "next", diff: str | None = None
+) -> list[str]:
+    return get_mock_writer(framework).write_server_mocks(repo_dir, mocks, diff=diff)
+
+
+def write_unmocked_api_fallbacks(
+    repo_dir: Path | str, framework: str = "next", mocks: dict | None = None, diff: str | None = None
+) -> list[str]:
+    return get_mock_writer(framework).write_unmocked_fallbacks(repo_dir, mocks=mocks, diff=diff)
+
+
+def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list[str]:
+    return get_mock_writer(framework).write_banner(repo_dir)
+
+
+def write_dev_origin_allowlist(repo_dir: Path | str, public_ip: str, framework: str) -> list[str]:
+    return get_mock_writer(framework).write_dev_origin_allowlist(repo_dir, public_ip)
+
+
+# Register the Vite-family server-side writers (SvelteKit/Astro/Remix). Imported
+# last so all shared helpers/constants above are bound before the submodules
+# import them; registration happens inside each module.
+from src.agent import mock_writers  # noqa: E402,F401

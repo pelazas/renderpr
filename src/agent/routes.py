@@ -110,19 +110,30 @@ def _routes_under_prefix(prefix: str, all_routes: list[str]) -> list[str]:
     return [r for r in all_routes if r == prefix or r.startswith(target)]
 
 
-def _find_importers(stems: list[str], exclude_paths: set[str]) -> list[str]:
+def _find_importers(
+    stems: list[str],
+    exclude_paths: set[str],
+    source_extensions: tuple[str, ...] = SOURCE_EXTENSIONS,
+) -> list[str]:
     repo_path = Path(REPO_DIR)
     if not repo_path.exists():
         logger.warning("Repo directory %s does not exist for import scanning", REPO_DIR)
         return []
 
-    patterns = [re.compile(rf"""["'][^"']*{re.escape(s)}["']""") for s in stems]
+    # Anchor the stem as a path-final component or directory import: it must be
+    # preceded by the opening quote or a `/`/`.` and followed by a quote, `/`,
+    # or `.`. This keeps `index` from matching `reindex` and lets directory
+    # imports like `../components/Modal` resolve.
+    patterns = [
+        re.compile(rf"""["'](?:[^"']*[./])?{re.escape(s)}["'/.]""")
+        for s in stems
+    ]
 
     importers: list[str] = []
     for f in repo_path.rglob("*"):
         if any(part in EXCLUDED_DIRS for part in f.relative_to(repo_path).parts):
             continue
-        if f.suffix not in SOURCE_EXTENSIONS:
+        if f.suffix not in source_extensions:
             continue
         rel = str(f.relative_to(repo_path))
         if rel in exclude_paths:
@@ -167,7 +178,7 @@ def _bfs_to_pages(
                 continue
 
             stem = Path(src).stem
-            importers = _find_importers([stem], visited)
+            importers = _find_importers([stem], visited, strategy.source_extensions)
             for imp in importers:
                 if imp not in visited:
                     next_layer.append(imp)

@@ -62,6 +62,54 @@ def test_build_injected_env_excludes_undeclared_secrets(tmp_path):
     assert missing == []
 
 
+def test_build_injected_env_warns_when_var_lacks_framework_prefix(tmp_path, caplog):
+    (tmp_path / ".env.example").write_text("API_URL=\nVITE_API_URL=\n")
+    secrets = {"API_URL": "http://x", "VITE_API_URL": "http://y"}
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        injected, missing = build_injected_env(tmp_path, {}, secrets, framework="vite")
+    assert injected == {"API_URL": "http://x", "VITE_API_URL": "http://y"}
+    assert missing == []
+    exposure_warnings = [r.getMessage() for r in caplog.records if "won't be exposed" in r.getMessage()]
+    # Exactly the non-prefixed var is warned about; the VITE_-prefixed one is not.
+    assert any("'API_URL'" in m for m in exposure_warnings)
+    assert not any("'VITE_API_URL'" in m for m in exposure_warnings)
+
+
+def test_build_injected_env_no_warning_for_prefixed_var(tmp_path, caplog):
+    (tmp_path / ".env.example").write_text("VITE_API_URL=\n")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        build_injected_env(tmp_path, {}, {"VITE_API_URL": "http://y"}, framework="vite")
+    assert not any("won't be exposed" in r.getMessage() for r in caplog.records)
+
+
+def test_build_injected_env_default_framework_no_prefix_warning(tmp_path, caplog):
+    """Back-compat guard: framework=None (default) emits no prefix warning."""
+    (tmp_path / ".env.example").write_text("API_URL=\n")
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        build_injected_env(tmp_path, {}, {"API_URL": "http://x"})
+    assert not any("won't be exposed" in r.getMessage() for r in caplog.records)
+
+
+def test_build_injected_env_remix_info_log(tmp_path, caplog):
+    (tmp_path / ".env.example").write_text("API_URL=\n")
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        build_injected_env(tmp_path, {}, {"API_URL": "http://x"}, framework="remix")
+    assert any(
+        ".env.local" in r.getMessage() and r.levelno == logging.INFO and "Remix" in r.getMessage()
+        for r in caplog.records
+    )
+    # Remix must not emit prefix exposure warnings.
+    assert not any("won't be exposed" in r.getMessage() for r in caplog.records)
+
+
 def test_write_env_local_quotes_and_returns_relative_path(tmp_path):
     repo = tmp_path
     frontend = tmp_path / "packages" / "web"

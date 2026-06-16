@@ -1,8 +1,14 @@
 import json
 
+import pytest
+
 from src.agent.mock_server import (
+    MockWriter,
     changed_api_paths,
+    get_mock_writer,
+    register_mock_writer,
     restore_runtime_files,
+    write_astro_allowed_hosts,
     write_dev_origin_allowlist,
     write_next_allowed_origin,
     write_server_mocks,
@@ -105,6 +111,24 @@ def test_write_vite_allowed_hosts_patches_define_config(tmp_path):
 
 def test_write_vite_allowed_hosts_skips_when_no_config(tmp_path):
     assert write_vite_allowed_hosts(tmp_path, "54.1.2.3") == []
+
+
+def test_write_astro_allowed_hosts_patches_define_config(tmp_path):
+    cfg = tmp_path / "astro.config.ts"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({\n  integrations: [],\n})\n"
+    )
+    generated = write_astro_allowed_hosts(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "vite: { server: { allowedHosts: ['54.1.2.3'] } }" in content
+    assert "astro.config.ts" in generated
+
+
+def test_write_astro_allowed_hosts_skips_localhost(tmp_path):
+    cfg = tmp_path / "astro.config.ts"
+    cfg.write_text("import { defineConfig } from 'astro/config'\nexport default defineConfig({})\n")
+    assert write_astro_allowed_hosts(tmp_path, "localhost") == []
+    assert "allowedHosts" not in cfg.read_text()
 
 
 def test_write_dev_origin_allowlist_dispatches_by_framework(tmp_path):
@@ -291,3 +315,157 @@ def test_write_server_mocks_skips_changed_route(tmp_path):
 
     assert generated == []
     assert not (tmp_path / "src/app/api/users/route.ts").exists()
+
+
+# --- Mock-writer registry ---------------------------------------------------
+
+
+def test_get_mock_writer_unknown_returns_noop_never_raises(tmp_path):
+    writer = get_mock_writer("totally-made-up-framework")
+    assert isinstance(writer, MockWriter)
+    # All methods are real no-ops and must not raise on any input.
+    assert writer.write_server_mocks(tmp_path, {"x": {"/api/y": {"body": []}}}) == []
+    assert writer.write_unmocked_fallbacks(tmp_path) == []
+    assert writer.write_banner(tmp_path) == []
+    assert writer.write_dev_origin_allowlist(tmp_path, "1.2.3.4") == []
+    assert writer.changed_api_paths(_diff_touching("src/app/api/users/route.ts")) == set()
+
+
+def test_get_mock_writer_none_returns_noop(tmp_path):
+    assert isinstance(get_mock_writer(None), MockWriter)
+    assert get_mock_writer(None).changed_api_paths("anything") == set()
+
+
+def test_register_and_get_mock_writer_roundtrip():
+    sentinel = MockWriter()
+    sentinel.framework = "registry-test-fw"
+    register_mock_writer("registry-test-fw", sentinel)
+    try:
+        assert get_mock_writer("registry-test-fw") is sentinel
+    finally:
+        from src.agent import mock_server
+
+        mock_server._MOCK_WRITERS.pop("registry-test-fw", None)
+
+
+# --- Stub writers (Phase 0: no on-disk generation) --------------------------
+
+_STUB_FRAMEWORKS = ("cra", "spa", "vite")
+
+
+def _populated_api_tree(tmp_path):
+    """A repo with a populated src/app/api tree + a root layout, so a writer that
+    *did* generate files would visibly create some."""
+    _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    _make_api_route(tmp_path, "src/app/api/posts/route.ts")
+    layout = tmp_path / "src/app/layout.tsx"
+    layout.parent.mkdir(parents=True, exist_ok=True)
+    layout.write_text("export default function L({children}){return <html><body>{children}</body></html>}")
+    return sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+
+
+@pytest.mark.parametrize("framework", _STUB_FRAMEWORKS)
+def test_stub_writers_generate_nothing(tmp_path, framework):
+    before = _populated_api_tree(tmp_path)
+    writer = get_mock_writer(framework)
+
+    assert writer.write_server_mocks(
+        tmp_path, {"localhost": {"/api/users": {"body": [{"id": 1}]}}}
+    ) == []
+    assert writer.write_unmocked_fallbacks(
+        tmp_path, mocks=None, diff=_diff_touching("src/app/api/users/route.ts")
+    ) == []
+    assert writer.write_banner(tmp_path) == []
+    assert writer.changed_api_paths(_diff_touching("src/app/api/users/route.ts")) == set()
+
+    after = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file())
+    assert after == before  # no files created or modified-in-place
+
+
+def test_vite_writer_allowlist_mapping(tmp_path):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    generated = get_mock_writer("vite").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert "vite.config.ts" in generated
+    assert "allowedHosts: ['54.1.2.3']" in cfg.read_text()
+
+
+def test_vite_writer_server_mocks_noop_even_with_vite_config(tmp_path):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({})\n")
+    _make_api_route(tmp_path, "src/app/api/users/route.ts")
+    assert get_mock_writer("vite").write_server_mocks(
+        tmp_path, {"localhost": {"/api/users": {"body": []}}}
+    ) == []
+
+
+def test_registry_changed_paths_dispatch_next_vs_vite():
+    # Mirrors main.py's `get_mock_writer(_framework).changed_api_paths(diff)`:
+    # next resolves the changed route's API path; vite (a stub) yields set().
+    diff = _diff_touching("src/app/api/users/route.ts")
+    assert get_mock_writer("next").changed_api_paths(diff) == {"/api/users"}
+    assert get_mock_writer("vite").changed_api_paths(diff) == set()
+
+
+@pytest.mark.parametrize("framework", ("sveltekit", "remix"))
+def test_sveltekit_remix_patch_vite_config_allowlist(tmp_path, framework):
+    # Phase 1 behavior change (replaces the Phase-0 parity no-op lock):
+    # SvelteKit and Remix run on Vite, so their dev-origin allowlist now patches
+    # vite.config.* server.allowedHosts (reusing write_vite_allowed_hosts).
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    generated = get_mock_writer(framework).write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "allowedHosts: ['54.1.2.3']" in content
+    assert "plugins: []" in content
+    assert "vite.config.ts" in generated
+
+
+def test_astro_patches_astro_config_vite_allowlist(tmp_path):
+    # Astro proxies Vite; the allowlist belongs under vite.server in astro.config.
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({\n  integrations: [],\n})\n"
+    )
+    generated = get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "vite: { server: { allowedHosts: ['54.1.2.3'] } }" in content
+    assert "integrations: []" in content
+    assert "astro.config.mjs" in generated
+
+
+def test_astro_falls_back_to_vite_config(tmp_path):
+    # No astro.config present: fall back to patching vite.config.* directly.
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({})\n")
+    generated = get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert "vite.config.ts" in generated
+    assert "allowedHosts: ['54.1.2.3']" in cfg.read_text()
+
+
+def test_astro_skips_unrecognized_config_shape(tmp_path):
+    # Conservative guard: an astro.config with no defineConfig({ shape is skipped.
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text("export default {}\n")
+    assert get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
+    assert "allowedHosts" not in cfg.read_text()
+
+
+@pytest.mark.parametrize("framework", ("sveltekit", "remix"))
+def test_sveltekit_remix_allowlist_idempotent(tmp_path, framework):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    writer = get_mock_writer(framework)
+    writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    # Re-running when allowedHosts is already present is a no-op.
+    assert writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
+
+
+def test_astro_allowlist_idempotent(tmp_path):
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({})\n"
+    )
+    writer = get_mock_writer("astro")
+    writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
