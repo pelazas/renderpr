@@ -350,7 +350,7 @@ def test_register_and_get_mock_writer_roundtrip():
 
 # --- Stub writers (Phase 0: no on-disk generation) --------------------------
 
-_STUB_FRAMEWORKS = ("sveltekit", "astro", "remix", "cra", "spa", "vite")
+_STUB_FRAMEWORKS = ("cra", "spa", "vite")
 
 
 def _populated_api_tree(tmp_path):
