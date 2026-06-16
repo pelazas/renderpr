@@ -283,6 +283,41 @@ def _write_unmocked_fallbacks(
     return generated
 
 
+def _write_banner(repo_dir: Path | str) -> list[str]:
+    """Write the static banner script + an Astro middleware that injects it into
+    HTML responses. The middleware is **create-when-absent only**: if
+    ``src/middleware.ts`` already exists we never merge (corruption risk) — we log
+    and skip, still returning the banner JS path."""
+    repo_path = Path(repo_dir)
+    generated: list[str] = []
+
+    banner = repo_path / _BANNER_REL
+    middleware = repo_path / _MIDDLEWARE_REL
+    # Idempotent: a previous run already wrote the banner (and either created or
+    # deliberately skipped the middleware), so there's nothing left to do.
+    if banner.exists() and banner.read_text() == _BANNER_JS:
+        return []
+
+    banner.parent.mkdir(parents=True, exist_ok=True)
+    banner_backup = _backup_file(banner)
+    if banner_backup is not None:
+        generated.append(str(banner_backup.relative_to(repo_path)))
+    banner.write_text(_BANNER_JS)
+    generated.append(_BANNER_REL)
+
+    if middleware.exists():
+        logger.info(
+            "%s already exists; skipping middleware injection to avoid corruption", _MIDDLEWARE_REL
+        )
+        return generated
+
+    middleware.parent.mkdir(parents=True, exist_ok=True)
+    middleware.write_text(_MIDDLEWARE_SOURCE)
+    generated.append(_MIDDLEWARE_REL)
+    logger.info("Unmocked banner middleware created at %s", _MIDDLEWARE_REL)
+    return generated
+
+
 class AstroMockWriter(MockWriter):
     """Astro writer carrying the on-disk preview-servicing logic."""
 
@@ -297,6 +332,9 @@ class AstroMockWriter(MockWriter):
         self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
     ) -> list[str]:
         return _write_unmocked_fallbacks(repo_dir, mocks=mocks, diff=diff)
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        return _write_banner(repo_dir)
 
     def write_dev_origin_allowlist(self, repo_dir, public_ip):
         return write_astro_allowed_hosts(repo_dir, public_ip)
