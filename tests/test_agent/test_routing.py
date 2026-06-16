@@ -30,6 +30,39 @@ class TestNextAppRouter:
         (tmp_path / "app" / "about" / "page.tsx").write_text("x")
         assert NextAppRouterStrategy().discover_all_routes(tmp_path) == ["/", "/about"]
 
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("app/(marketing)/about/page.tsx", "/about"),
+            ("src/app/(marketing)/about/page.tsx", "/about"),
+            ("app/(group)/page.tsx", "/"),
+            ("app/@modal/photo/page.tsx", "/photo"),  # parallel slot dropped
+            ("app/(.)photo/page.tsx", None),  # intercepting -> non-screenshottable
+            ("app/(..)photo/page.tsx", None),
+            ("app/(...)photo/page.tsx", None),
+            ("app/api/x/route.ts", None),  # API route handler
+            ("app/dashboard/route.tsx", None),
+            ("app/dashboard/page.tsx", "/dashboard"),
+        ],
+    )
+    def test_route_group_slot_intercepting_and_route_handlers(self, path, expected):
+        assert NextAppRouterStrategy().file_to_route(path) == expected
+
+    def test_layout_strips_route_group(self):
+        s = NextAppRouterStrategy()
+        assert s.is_layout_file("app/(marketing)/layout.tsx") == (True, "/")
+        assert s.is_layout_file("app/(marketing)/about/layout.tsx") == (True, "/about")
+
+    def test_layout_intercepting_is_not_layout(self):
+        assert NextAppRouterStrategy().is_layout_file("app/(.)photo/layout.tsx") == (False, "")
+
+    def test_discover_drops_route_groups(self, tmp_path):
+        (tmp_path / "app" / "(marketing)" / "about").mkdir(parents=True)
+        (tmp_path / "app" / "(marketing)" / "about" / "page.tsx").write_text("x")
+        (tmp_path / "app" / "api" / "x").mkdir(parents=True)
+        (tmp_path / "app" / "api" / "x" / "route.ts").write_text("x")
+        assert NextAppRouterStrategy().discover_all_routes(tmp_path) == ["/about"]
+
 
 class TestNextPagesRouter:
     @pytest.mark.parametrize(

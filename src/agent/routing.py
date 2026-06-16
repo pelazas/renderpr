@@ -79,6 +79,31 @@ class RoutingStrategy:
                 yield str(f.relative_to(repo_path))
 
 
+_NEXT_INTERCEPT_RE = re.compile(r"^\(\.+\).+|^\(\.{3}\).+")
+_NEXT_GROUP_RE = re.compile(r"^\(.+\)$")
+
+
+def _normalize_next_segments(inner: str) -> str | None:
+    """Map App Router segments between `app/` and `page`/`layout` to a URL path.
+
+    Drops route-group `(group)` and `@slot` parallel-route segments (they don't
+    appear in the URL). Returns None for intercepting routes `(.)`, `(..)`,
+    `(...)` (not screenshottable). `inner` is the path between `app` and the
+    final file, e.g. "/(marketing)/about" -> "/about".
+    """
+    raw_segments = [s for s in inner.split("/") if s]
+    out: list[str] = []
+    for seg in raw_segments:
+        if _NEXT_INTERCEPT_RE.match(seg):
+            return None
+        if _NEXT_GROUP_RE.match(seg):
+            continue
+        if seg.startswith("@"):
+            continue
+        out.append(seg)
+    return "/" + "/".join(out) if out else "/"
+
+
 class NextAppRouterStrategy(RoutingStrategy):
     name = "next-app"
 
@@ -90,21 +115,27 @@ class NextAppRouterStrategy(RoutingStrategy):
 
     def file_to_route(self, file_path: str) -> str | None:
         normalized = file_path.replace("\\", "/")
+        # route.{ts,tsx,js,jsx} files are API handlers, not screenshottable pages.
+        if re.search(rf"(?:^|/)app(?:/[^/]+)*/route\.{_JS}$", normalized):
+            return None
         match = re.search(rf"(?:^|/)app((?:/[^/]+)*)/page\.{_JS}$", normalized)
         if match:
-            return match.group(1) or "/"
+            return _normalize_next_segments(match.group(1))
         if re.search(rf"(?:^|/)app/page\.{_JS}$", normalized):
             return "/"
         return None
 
     def is_page_file(self, file_path: str) -> bool:
-        return bool(re.search(rf"(?:^|/)app(?:/[^/]+)*/page\.{_JS}$", file_path.replace("\\", "/")))
+        return self.file_to_route(file_path) is not None
 
     def is_layout_file(self, file_path: str) -> tuple[bool, str]:
         normalized = file_path.replace("\\", "/")
         match = re.search(rf"(?:^|/)app((?:/[^/]+)*)/layout\.{_JS}$", normalized)
         if match:
-            return True, match.group(1) or "/"
+            normalized_route = _normalize_next_segments(match.group(1))
+            if normalized_route is None:
+                return False, ""
+            return True, normalized_route
         if re.search(rf"(?:^|/)app/layout\.{_JS}$", normalized):
             return True, "/"
         return False, ""
