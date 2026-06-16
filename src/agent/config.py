@@ -24,7 +24,7 @@ RETRY_MAX_ATTEMPTS: int = 3
 RETRY_WINDOW_SECONDS: int = 30
 DEV_SERVER_PORT: int = 3000
 DEV_SERVER_HOST: str = "localhost"
-DEV_SERVER_START_TIMEOUT: int = 60
+DEV_SERVER_START_TIMEOUT: int = 120
 DEV_SERVER_POLL_INTERVAL: int = 2
 
 # Diff-based frontend detection
@@ -43,6 +43,7 @@ LOCKFILES: Final[dict[str, str]] = {
     "bun.lockb": "bun",
     "bun.lock": "bun",
     "package-lock.json": "npm",
+    "npm-shrinkwrap.json": "npm",
 }
 DEFAULT_PACKAGE_MANAGER: str = "npm"
 
@@ -51,7 +52,7 @@ DEFAULT_PACKAGE_MANAGER: str = "npm"
 FRAMEWORK_DEFAULT_PORTS: Final[dict[str, int]] = {
     "next": 3000,
     "cra": 3000,
-    "remix": 3000,
+    "remix": 5173,
     "vite": 5173,
     "sveltekit": 5173,
     "astro": 4321,
@@ -59,7 +60,7 @@ FRAMEWORK_DEFAULT_PORTS: Final[dict[str, int]] = {
 }
 
 # Ports probed (in order) when the dev server's URL can't be sniffed.
-DEV_SERVER_CANDIDATE_PORTS: Final[tuple[int, ...]] = (3000, 5173, 4321, 8080, 4200)
+DEV_SERVER_CANDIDATE_PORTS: Final[tuple[int, ...]] = (3000, 5173, 5174, 4321, 4322, 8080, 4200)
 
 # Matches the "Local: http://localhost:PORT" banner dev servers print on boot.
 DEV_SERVER_URL_REGEX: str = r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d+)"
