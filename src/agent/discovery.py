@@ -60,13 +60,18 @@ def find_workspace_root(package_json_path: str | None) -> str | None:
     current = pkg_path.parent
     while True:
         candidate = current / "package.json"
-        if candidate.exists():
-            try:
-                data = json.loads(candidate.read_text())
-                if "workspaces" in data and candidate != pkg_path:
-                    return str(candidate)
-            except (json.JSONDecodeError, OSError):
-                pass
+        if candidate != pkg_path:
+            if candidate.exists():
+                try:
+                    data = json.loads(candidate.read_text())
+                    if "workspaces" in data:
+                        return str(candidate)
+                except (json.JSONDecodeError, OSError):
+                    pass
+            # pnpm declares its workspace in a sidecar file rather than the
+            # package.json `workspaces` key; treat its presence as a root marker.
+            if (current / "pnpm-workspace.yaml").exists():
+                return str(candidate)
         if current == repo_path or current.parent == current:
             break
         current = current.parent

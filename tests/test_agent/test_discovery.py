@@ -198,6 +198,44 @@ class TestFindWorkspaceRoot:
         result = find_workspace_root(str(pkg))
         assert result is None
 
+    def test_pnpm_workspace_yaml_is_a_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        root_pkg = tmp_path / "package.json"
+        root_pkg.write_text('{"name": "monorepo"}')  # no workspaces key
+        (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'packages/*'\n")
+        web_pkg = tmp_path / "packages" / "web" / "package.json"
+        web_pkg.parent.mkdir(parents=True)
+        web_pkg.write_text('{"name": "web"}')
+
+        from src.agent.discovery import find_workspace_root
+        result = find_workspace_root(str(web_pkg))
+        assert result == str(root_pkg)
+
+    def test_pnpm_workspace_yaml_without_root_package_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - 'packages/*'\n")
+        web_pkg = tmp_path / "packages" / "web" / "package.json"
+        web_pkg.parent.mkdir(parents=True)
+        web_pkg.write_text('{"name": "web"}')
+
+        from src.agent.discovery import find_workspace_root
+        result = find_workspace_root(str(web_pkg))
+        # Workspace root recognized even with no root package.json; the install
+        # dir is still resolvable via the returned path's parent.
+        assert result == str(tmp_path / "package.json")
+
+    def test_pnpm_workspace_yaml_at_pkg_dir_not_self_referential(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.discovery.REPO_DIR", str(tmp_path))
+        # A single-package repo whose own dir has pnpm-workspace.yaml shouldn't
+        # report itself as a distinct workspace root.
+        pkg = tmp_path / "package.json"
+        pkg.write_text('{"name": "solo"}')
+        (tmp_path / "pnpm-workspace.yaml").write_text("packages:\n  - '.'\n")
+
+        from src.agent.discovery import find_workspace_root
+        result = find_workspace_root(str(pkg))
+        assert result is None
+
 
 class TestVerifyDevScript:
     def test_dev_script_exists(self, tmp_path):
