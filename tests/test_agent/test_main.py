@@ -1085,6 +1085,42 @@ class TestCaptureScreenshotsMockWiring:
         assert captured["capture_called"] is True
         assert "src/app/api/users/route.ts" in _runtime_generated_files
 
+    @pytest.mark.parametrize(
+        ("framework", "expected"),
+        [("next", {"/api/users"}), ("vite", set())],
+    )
+    def test_changed_paths_dispatched_through_registry(self, monkeypatch, framework, expected):
+        captured = {}
+
+        def fake_capture(url, screenshot_dir=None, routes=None, mocks=None, **kw):
+            captured["changed_paths"] = kw.get("changed_paths")
+            return []
+
+        diff = (
+            "diff --git a/src/app/api/users/route.ts b/src/app/api/users/route.ts\n"
+            "--- a/src/app/api/users/route.ts\n"
+            "+++ b/src/app/api/users/route.ts\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        )
+
+        monkeypatch.setattr("src.agent.visual.capture_screenshots", fake_capture)
+        monkeypatch.setattr("src.agent.visual.upload_screenshots", lambda *a, **kw: [])
+        monkeypatch.setattr("src.agent.routes.infer_changed_region", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.main._dev_server_url", "http://localhost:3000")
+        monkeypatch.setattr("src.agent.main.REPO_DIR", "/tmp")
+        monkeypatch.setattr("src.agent.main._framework", framework)
+
+        from src.agent.main import _capture_screenshots
+
+        _capture_screenshots(
+            diff,
+            {"openrouter_api_key": "sk-or-fake"},
+            routes=[{"path": "/", "reason": "test", "actions": []}],
+            mocks={},
+        )
+
+        assert captured["changed_paths"] == expected
+
 
 class TestPostComment:
     def test_append_live_preview_link(self):

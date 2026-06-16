@@ -380,6 +380,14 @@ def test_vite_writer_server_mocks_noop_even_with_vite_config(tmp_path):
     ) == []
 
 
+def test_registry_changed_paths_dispatch_next_vs_vite():
+    # Mirrors main.py's `get_mock_writer(_framework).changed_api_paths(diff)`:
+    # next resolves the changed route's API path; vite (a stub) yields set().
+    diff = _diff_touching("src/app/api/users/route.ts")
+    assert get_mock_writer("next").changed_api_paths(diff) == {"/api/users"}
+    assert get_mock_writer("vite").changed_api_paths(diff) == set()
+
+
 @pytest.mark.parametrize("framework", ("sveltekit", "astro"))
 def test_sveltekit_astro_allowlist_parity_noop(tmp_path, framework):
     # Regression: detect_framework emits sveltekit/astro (never vite), so even

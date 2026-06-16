@@ -598,7 +598,7 @@ def _capture_screenshots(
     routes: list[dict] | None = None,
     mocks: dict | None = None,
 ) -> tuple[list[Path], list[tuple[str, str]], list[dict]]:
-    from src.agent.mock_server import changed_api_paths
+    from src.agent.mock_server import get_mock_writer
     from src.agent.routes import build_repo_tree, infer_changed_region, infer_routes
     from src.agent.visual import capture_screenshots, upload_screenshots
 
@@ -617,7 +617,7 @@ def _capture_screenshots(
     # Routes the PR changed are served by their real (error-guarded) handler, so
     # the browser-layer catch-all must let those requests through instead of
     # stubbing them. Only meaningful for Next, where handlers live in-repo.
-    changed_paths = changed_api_paths(diff) if _framework == "next" else set()
+    changed_paths = get_mock_writer(_framework).changed_api_paths(diff)
 
     # When the change is confined to one element (e.g. a navbar), crop the
     # screenshot to it; page-wide/ambiguous changes return None -> full page.
