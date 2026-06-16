@@ -7,12 +7,14 @@ from ``@sveltejs/kit``; SvelteKit's internal ``event.fetch`` resolves
 same-origin ``/api/...`` requests to these on-disk handlers.
 """
 
+import json
 import logging
 from pathlib import Path
 
 from src.agent.mock_server import (
     MockWriter,
     _AUTH_API_PREFIX,
+    _backup_file,
     register_mock_writer,
     write_vite_allowed_hosts,
 )
@@ -74,6 +76,57 @@ class SvelteKitMockWriter(MockWriter):
                 continue
             paths.add(api_path)
         return paths
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        if not mocks:
+            return []
+
+        repo_path = Path(repo_dir)
+        changed = self.changed_api_paths(diff)
+        generated: list[str] = []
+
+        for endpoints in mocks.values():
+            if not isinstance(endpoints, dict):
+                continue
+            for api_path, mock_data in endpoints.items():
+                if (
+                    not isinstance(api_path, str)
+                    or not isinstance(mock_data, dict)
+                    or "body" not in mock_data
+                ):
+                    continue
+                if api_path in changed:
+                    # The PR changed this route; let its real (wrapped) handler run
+                    # rather than masking it with a synthetic mock body.
+                    logger.info(
+                        "Skipping server mock for changed route %s; real handler runs",
+                        api_path,
+                    )
+                    continue
+                route_rel = _mock_server_path(api_path)
+                if route_rel is None:
+                    continue
+
+                route_path = repo_path / route_rel
+                route_path.parent.mkdir(parents=True, exist_ok=True)
+                backup = _backup_file(route_path)
+                if backup is not None:
+                    generated.append(str(backup.relative_to(repo_path)))
+
+                status = int(mock_data.get("status", 200))
+                body = json.dumps(mock_data["body"])
+                route_path.write_text(
+                    "import { json } from '@sveltejs/kit';\n"
+                    f"export const GET = () => json({body}, {{ status: {status} }});\n"
+                )
+                generated.append(str(route_rel))
+                logger.info(
+                    "Server mock route written: %s for %s", route_rel, api_path
+                )
+
+        return generated
 
     def write_dev_origin_allowlist(
         self, repo_dir: Path | str, public_ip: str
