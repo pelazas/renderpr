@@ -383,9 +383,55 @@ class RemixStrategy(RoutingStrategy):
         }
 
 
+class NextHybridStrategy(RoutingStrategy):
+    """Next.js repos that have BOTH app/ and pages/ directories.
+
+    Composes the App Router and Pages Router strategies: a file is resolved by
+    trying the App Router first, then Pages; route discovery and the boolean
+    predicates union both.
+    """
+
+    name = "next-hybrid"
+
+    def __init__(self) -> None:
+        self._app = NextAppRouterStrategy()
+        self._pages = NextPagesRouterStrategy()
+        self.source_extensions = tuple(
+            dict.fromkeys(self._app.source_extensions + self._pages.source_extensions)
+        )
+
+    def file_to_route(self, file_path: str) -> str | None:
+        route = self._app.file_to_route(file_path)
+        if route is not None:
+            return route
+        return self._pages.file_to_route(file_path)
+
+    def is_page_file(self, file_path: str) -> bool:
+        return self._app.is_page_file(file_path) or self._pages.is_page_file(file_path)
+
+    def is_layout_file(self, file_path: str) -> tuple[bool, str]:
+        is_layout, prefix = self._app.is_layout_file(file_path)
+        if is_layout:
+            return is_layout, prefix
+        return self._pages.is_layout_file(file_path)
+
+    def is_global_file(self, file_path: str) -> bool:
+        return self._app.is_global_file(file_path) or self._pages.is_global_file(file_path)
+
+    def discover_all_routes(self, repo_path: Path) -> list[str]:
+        return sorted(
+            set(self._app.discover_all_routes(repo_path))
+            | set(self._pages.discover_all_routes(repo_path))
+        )
+
+    def prompt_context(self) -> dict:
+        return self._app.prompt_context()
+
+
 _STRATEGIES: dict[str, type[RoutingStrategy]] = {
     "next-app": NextAppRouterStrategy,
     "next-pages": NextPagesRouterStrategy,
+    "next-hybrid": NextHybridStrategy,
     "astro": AstroStrategy,
     "sveltekit": SvelteKitStrategy,
     "remix": RemixStrategy,
@@ -393,9 +439,13 @@ _STRATEGIES: dict[str, type[RoutingStrategy]] = {
 
 
 def _resolve_next_variant(repo_path: Path) -> str:
-    if (repo_path / "app").exists() or (repo_path / "src" / "app").exists():
+    has_app = (repo_path / "app").exists() or (repo_path / "src" / "app").exists()
+    has_pages = (repo_path / "pages").exists() or (repo_path / "src" / "pages").exists()
+    if has_app and has_pages:
+        return "next-hybrid"
+    if has_app:
         return "next-app"
-    if (repo_path / "pages").exists() or (repo_path / "src" / "pages").exists():
+    if has_pages:
         return "next-pages"
     return "next-app"
 

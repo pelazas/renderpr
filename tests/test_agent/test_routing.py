@@ -3,6 +3,7 @@ import pytest
 from src.agent.routing import (
     AstroStrategy,
     NextAppRouterStrategy,
+    NextHybridStrategy,
     NextPagesRouterStrategy,
     RemixStrategy,
     RoutingStrategy,
@@ -181,6 +182,29 @@ class TestSpaFallback:
         assert s.is_page_file("src/App.tsx") is False
 
 
+class TestNextHybrid:
+    def test_resolves_app_then_pages(self):
+        s = NextHybridStrategy()
+        assert s.file_to_route("app/dashboard/page.tsx") == "/dashboard"
+        assert s.file_to_route("pages/about.tsx") == "/about"
+        assert s.file_to_route("components/Button.tsx") is None
+
+    def test_predicates_union(self):
+        s = NextHybridStrategy()
+        assert s.is_page_file("pages/about.tsx") is True
+        assert s.is_page_file("app/x/page.tsx") is True
+        assert s.is_layout_file("app/x/layout.tsx") == (True, "/x")
+        assert s.is_global_file("app/globals.css") is True
+        assert s.is_global_file("pages/_app.tsx") is True
+
+    def test_discover_unions_both(self, tmp_path):
+        (tmp_path / "app" / "dash").mkdir(parents=True)
+        (tmp_path / "app" / "dash" / "page.tsx").write_text("x")
+        (tmp_path / "pages").mkdir()
+        (tmp_path / "pages" / "about.tsx").write_text("x")
+        assert NextHybridStrategy().discover_all_routes(tmp_path) == ["/about", "/dash"]
+
+
 class TestGetStrategy:
     def test_next_app_when_app_dir_present(self, tmp_path):
         (tmp_path / "app").mkdir()
@@ -189,6 +213,11 @@ class TestGetStrategy:
     def test_next_pages_when_only_pages_dir(self, tmp_path):
         (tmp_path / "pages").mkdir()
         assert get_strategy("next", tmp_path).name == "next-pages"
+
+    def test_next_hybrid_when_both_present(self, tmp_path):
+        (tmp_path / "app").mkdir()
+        (tmp_path / "pages").mkdir()
+        assert get_strategy("next", tmp_path).name == "next-hybrid"
 
     def test_next_defaults_to_app(self, tmp_path):
         assert get_strategy("next", tmp_path).name == "next-app"
