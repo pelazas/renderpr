@@ -17,6 +17,7 @@ from src.agent.mock_server import (
     API_FALLBACK_HEADER,
     MockWriter,
     _AUTH_API_PREFIX,
+    _BANNER_JS,
     _backup_file,
     _explicit_mock_paths,
     register_mock_writer,
@@ -30,6 +31,10 @@ _ROUTES_DIR = ("app", "routes")
 # route; the leading underscore keeps the segment non-routable in Remix.
 _ORIG_SEGMENT = "_renderpr_orig"
 _REMIX_HANDLERS = ("loader", "action")
+_ROOT_CANDIDATES = ("app/root.tsx", "app/root.jsx")
+_BANNER_REL = "public/__renderpr-unmocked.js"
+_BANNER_NAME = _BANNER_REL.split("/")[-1]
+_SCRIPT_TAG = '\n        <script src="/__renderpr-unmocked.js"></script>'
 
 
 def _flat_name_for_api_path(api_path: str) -> str | None:
@@ -309,6 +314,47 @@ class RemixMockWriter(MockWriter):
             api_path,
             ",".join(handlers),
         )
+        return generated
+
+    def write_banner(self, repo_dir) -> list[str]:
+        repo_path = Path(repo_dir)
+        root = next(
+            (repo_path / name for name in _ROOT_CANDIDATES if (repo_path / name).exists()),
+            None,
+        )
+        if root is None:
+            logger.info("No app/root found; skipping unmocked banner")
+            return []
+
+        content = root.read_text()
+        if _BANNER_NAME in content:
+            return []
+
+        scripts = re.search(r"<Scripts\b", content)
+        if scripts:
+            insert_at = scripts.start()
+        else:
+            body = re.search(r"</body>", content)
+            if not body:
+                logger.info("root <Scripts>/</body> not found; skipping unmocked banner")
+                return []
+            insert_at = body.start()
+
+        generated: list[str] = []
+        banner = repo_path / _BANNER_REL
+        banner.parent.mkdir(parents=True, exist_ok=True)
+        banner_backup = _backup_file(banner)
+        if banner_backup is not None:
+            generated.append(str(banner_backup.relative_to(repo_path)))
+        banner.write_text(_BANNER_JS)
+        generated.append(_BANNER_REL)
+
+        root_backup = _backup_file(root)
+        if root_backup is not None:
+            generated.append(str(root_backup.relative_to(repo_path)))
+        root.write_text(content[:insert_at] + _SCRIPT_TAG + content[insert_at:])
+        generated.append(str(root.relative_to(repo_path)))
+        logger.info("Unmocked banner injected into %s", root.relative_to(repo_path))
         return generated
 
 
