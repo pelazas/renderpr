@@ -78,17 +78,61 @@ def detect_framework(package_json_path: Path | str) -> str:
     return "spa"
 
 
-def build_install_command(package_manager: str, has_lockfile: bool) -> list[str]:
+def _parse_package_manager_field(package_json_path: Path | str) -> tuple[str, int] | None:
+    """Parse package.json's ``packageManager`` field into (name, major version).
+
+    Corepack convention: ``"yarn@4.5.0"`` → ("yarn", 4), ``"pnpm@9"`` → ("pnpm", 9).
+    A trailing ``+sha512...`` integrity hash is ignored. Returns None when the
+    field is absent or doesn't carry a parseable ``name@major`` shape.
+    """
+    try:
+        data = json.loads(Path(package_json_path).read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    field = data.get("packageManager")
+    if not isinstance(field, str) or "@" not in field:
+        return None
+    name, _, version = field.partition("@")
+    version = version.split("+", 1)[0]
+    major_str = version.split(".", 1)[0]
+    if not name or not major_str.isdigit():
+        return None
+    return name, int(major_str)
+
+
+def detect_yarn_major(
+    install_dir: Path | str, package_json_path: Path | str
+) -> int | None:
+    """Best-effort Yarn major version, or None when it can't be determined.
+
+    The ``packageManager`` field is authoritative; failing that, a ``.yarnrc.yml``
+    in install_dir signals Yarn Berry (v2+), so we return 2 as a conservative
+    lower bound. Returns None when there's no Yarn signal at all.
+    """
+    parsed = _parse_package_manager_field(package_json_path)
+    if parsed is not None and parsed[0] == "yarn":
+        return parsed[1]
+    if (Path(install_dir) / ".yarnrc.yml").exists():
+        return 2
+    return None
+
+
+def build_install_command(
+    package_manager: str, has_lockfile: bool, yarn_major: int | None = None
+) -> list[str]:
     """The command that installs dependencies reproducibly for this PM.
 
     Uses the frozen/CI variant when a lockfile exists, falling back to a plain
-    install otherwise.
+    install otherwise. Yarn Berry (v2+) replaced ``--frozen-lockfile`` with
+    ``--immutable``; classic Yarn and an unknown version keep the legacy flag.
     """
     if package_manager == "npm":
         return ["npm", "ci"] if has_lockfile else ["npm", "install"]
-    if has_lockfile:
-        return [package_manager, "install", "--frozen-lockfile"]
-    return [package_manager, "install"]
+    if not has_lockfile:
+        return [package_manager, "install"]
+    if package_manager == "yarn" and yarn_major is not None and yarn_major >= 2:
+        return [package_manager, "install", "--immutable"]
+    return [package_manager, "install", "--frozen-lockfile"]
 
 
 def build_dev_command(package_manager: str, framework: str) -> list[str]:
@@ -126,10 +170,15 @@ def build_launch_profile(
     """
     package_manager, has_lockfile = detect_package_manager(install_dir)
     framework = detect_framework(package_json_path)
+    yarn_major = (
+        detect_yarn_major(install_dir, package_json_path)
+        if package_manager == "yarn"
+        else None
+    )
     profile = LaunchProfile(
         package_manager=package_manager,
         framework=framework,
-        install_command=build_install_command(package_manager, has_lockfile),
+        install_command=build_install_command(package_manager, has_lockfile, yarn_major),
         dev_command=build_dev_command(package_manager, framework),
         dev_env=build_dev_env(framework),
         default_port=FRAMEWORK_DEFAULT_PORTS.get(framework, FRAMEWORK_DEFAULT_PORTS["spa"]),
