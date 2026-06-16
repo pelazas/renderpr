@@ -139,6 +139,26 @@ def test_changed_endpoint_wrapped(tmp_path):
     assert "src/pages/api/users._renderpr_orig.ts" in generated
 
 
+def test_unmocked_wrap_idempotent_preserves_original(tmp_path):
+    """A second fallback pass must NOT re-wrap the wrapper and clobber the saved
+    original handler (regression for the sentinel-guard fix)."""
+    src = "export async function GET() { return new Response('[1]'); }\n"
+    _make_endpoint(tmp_path, "src/pages/api/users.ts", src)
+    diff = _diff_touching("src/pages/api/users.ts")
+    WRITER.write_unmocked_fallbacks(tmp_path, diff=diff)
+    second = WRITER.write_unmocked_fallbacks(tmp_path, diff=diff)
+    orig = tmp_path / "src/pages/api/users._renderpr_orig.ts"
+    assert orig.read_text() == src
+    assert second == []
+
+
+def test_unmocked_blind_stub_idempotent(tmp_path):
+    """A second pass over an already-stubbed endpoint is a no-op (sentinel guard)."""
+    _make_endpoint(tmp_path, "src/pages/api/posts.ts")
+    WRITER.write_unmocked_fallbacks(tmp_path)
+    assert WRITER.write_unmocked_fallbacks(tmp_path) == []
+
+
 def test_changed_endpoint_no_handler_blind_stubs(tmp_path):
     _make_endpoint(tmp_path, "src/pages/api/users.ts", "const x = 1; // no exports")
     diff = _diff_touching("src/pages/api/users.ts")

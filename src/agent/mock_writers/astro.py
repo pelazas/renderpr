@@ -274,6 +274,12 @@ def _write_unmocked_fallbacks(
         if api_path is None or api_path.lstrip("/").startswith(_AUTH_API_PREFIX) or api_path in explicit:
             continue
 
+        # Idempotency: a route we already stubbed/wrapped on a prior run carries
+        # our fallback-header sentinel; re-processing it would clobber the saved
+        # original, so leave it untouched.
+        if API_FALLBACK_HEADER in route_file.read_text():
+            continue
+
         if api_path in changed:
             generated.extend(_wrap_changed_endpoint(repo_path, route_file, route_rel, api_path))
         else:

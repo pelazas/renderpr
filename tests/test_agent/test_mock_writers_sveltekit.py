@@ -190,6 +190,29 @@ def test_unmocked_wraps_changed_route(tmp_path):
     assert "src/routes/api/users/+server.ts" in generated
 
 
+def test_unmocked_wrap_idempotent_preserves_original(tmp_path):
+    """A second fallback pass must NOT re-wrap the wrapper and clobber the saved
+    original handler (regression for the sentinel-guard fix)."""
+    orig_src = (
+        "import { json } from '@sveltejs/kit';\n"
+        "export async function GET() { return json([1]); }\n"
+    )
+    _make_server_file(tmp_path, "src/routes/api/users/+server.ts", orig_src)
+    diff = _diff_touching("src/routes/api/users/+server.ts")
+    WRITER.write_unmocked_fallbacks(tmp_path, diff=diff)
+    second = WRITER.write_unmocked_fallbacks(tmp_path, diff=diff)
+    sibling = tmp_path / "src/routes/api/users/_renderpr_orig_server.ts"
+    assert sibling.read_text() == orig_src
+    assert second == []
+
+
+def test_unmocked_blind_stub_idempotent(tmp_path):
+    """A second pass over an already-stubbed route is a no-op (sentinel guard)."""
+    _make_server_file(tmp_path, "src/routes/api/posts/+server.ts")
+    WRITER.write_unmocked_fallbacks(tmp_path)
+    assert WRITER.write_unmocked_fallbacks(tmp_path) == []
+
+
 def test_unmocked_changed_no_handlers_blind_stubs(tmp_path):
     route = _make_server_file(
         tmp_path, "src/routes/api/users/+server.ts", "const x = 1; // no exports\n"
