@@ -1,3 +1,34 @@
+"""On-disk preview-servicing mechanisms, dispatched per framework.
+
+The preview needs several on-disk patches so a PR can be rendered without its
+real backend: server mocks, unmocked-API fallbacks, an in-app banner, a
+dev-origin/host allowlist, and changed-API detection. Which of these run is a
+per-framework decision, expressed via a **mock-writer registry**:
+
+- :class:`MockWriter` is the strategy interface; the base class is an all-no-op
+  writer and is also what :func:`get_mock_writer` hands back for any framework
+  with no registered writer (lookups never raise).
+- :func:`register_mock_writer` / :func:`get_mock_writer` are the registry API.
+- The four module-level functions (:func:`write_server_mocks`,
+  :func:`write_unmocked_api_fallbacks`, :func:`write_unmocked_banner`,
+  :func:`write_dev_origin_allowlist`) are backward-compat shims that dispatch
+  through the registry; external callers import and (in tests) monkeypatch them.
+
+Each writer method returns the runtime-generated relative paths it produced
+(including ``.renderpr.bak`` backups) so the orchestrator can restore them later
+via :func:`restore_runtime_files`.
+
+Phase 0 ships real behavior only for Next.js (:class:`NextMockWriter`); vite has
+a single non-no-op method (the allowlist), and sveltekit/astro/remix/cra/spa are
+registered no-ops.
+
+TODO(Phase 1): sveltekit/astro allowedHosts gap. ``detect_framework`` emits
+"sveltekit"/"astro" (never "vite"), so their dev-origin allowlist is currently a
+no-op even though they run on a Vite dev server. Wiring them to a Vite
+``server.allowedHosts`` patch is a deliberate Phase 1 decision (a parity
+regression test locks the current no-op so the change is explicit).
+"""
+
 import json
 import logging
 import re
