@@ -18,15 +18,13 @@ Each writer method returns the runtime-generated relative paths it produced
 (including ``.renderpr.bak`` backups) so the orchestrator can restore them later
 via :func:`restore_runtime_files`.
 
-Phase 0 ships real behavior only for Next.js (:class:`NextMockWriter`); vite has
-a single non-no-op method (the allowlist), and sveltekit/astro/remix/cra/spa are
-registered no-ops.
-
-TODO(Phase 1): sveltekit/astro allowedHosts gap. ``detect_framework`` emits
-"sveltekit"/"astro" (never "vite"), so their dev-origin allowlist is currently a
-no-op even though they run on a Vite dev server. Wiring them to a Vite
-``server.allowedHosts`` patch is a deliberate Phase 1 decision (a parity
-regression test locks the current no-op so the change is explicit).
+Next.js (:class:`NextMockWriter`) ships the full on-disk mocking behavior. The
+Vite-family frameworks (vite/sveltekit/remix/astro) implement only the
+dev-origin allowlist — SvelteKit/Remix reuse the Vite ``server.allowedHosts``
+patch, Astro patches ``vite.server.allowedHosts`` in its own config (Phase 1).
+Server-side *data* mocking for those frameworks is Phase 2. cra/spa stay
+registered no-ops (their data fetching is intercepted in the browser by
+visual.py).
 """
 
 import json
@@ -49,6 +47,13 @@ VITE_CONFIG_NAMES = (
     "vite.config.mts",
     "vite.config.js",
     "vite.config.mjs",
+)
+ASTRO_CONFIG_NAMES = (
+    "astro.config.ts",
+    "astro.config.mts",
+    "astro.config.mjs",
+    "astro.config.js",
+    "astro.config.cjs",
 )
 # Frameworks whose server process (RSC/SSR) fetches data outside the browser,
 # so a browser-level page.route() mock can't intercept it — these need on-disk
@@ -562,6 +567,45 @@ def write_vite_allowed_hosts(repo_dir: Path | str, public_ip: str) -> list[str]:
     return generated
 
 
+def write_astro_allowed_hosts(repo_dir: Path | str, public_ip: str) -> list[str]:
+    """Best-effort: let an Astro dev server serve the public IP.
+
+    Astro proxies Vite, so the allowlist lives under `vite.server.allowedHosts`
+    in `astro.config.*`. As with the Vite patch, we only touch a recognized
+    `defineConfig({ ... })` shape and skip otherwise rather than risk corruption.
+    Falls back to patching `vite.config.*` directly when there's no astro config.
+    """
+    if not public_ip or public_ip == "localhost":
+        return []
+
+    repo_path = Path(repo_dir)
+    existing = _find_config(repo_path, ASTRO_CONFIG_NAMES)
+    if existing is None:
+        return write_vite_allowed_hosts(repo_dir, public_ip)
+
+    content = existing.read_text()
+    if "allowedHosts" in content:
+        return []
+
+    match = re.search(r"defineConfig\s*\(\s*\{", content)
+    if not match:
+        logger.info("Astro config shape not recognized; skipping allowedHosts")
+        return []
+
+    backup = _backup_file(existing)
+    generated: list[str] = []
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+
+    insert_at = match.end()
+    injection = f"\n  vite: {{ server: {{ allowedHosts: ['{public_ip}'] }} }},"
+    content = content[:insert_at] + injection + content[insert_at:]
+    existing.write_text(content)
+    generated.append(str(existing.relative_to(repo_path)))
+    logger.info("Astro config patched with vite.server.allowedHosts for %s", public_ip)
+    return generated
+
+
 def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> None:
     repo_path = Path(repo_dir)
     generated = list(dict.fromkeys(generated_files))
@@ -640,14 +684,48 @@ class ViteMockWriter(MockWriter):
         return write_vite_allowed_hosts(repo_dir, public_ip)
 
 
+class SvelteKitMockWriter(MockWriter):
+    """SvelteKit runs on a Vite dev server, so its dev-origin allowlist is the
+    Vite server.allowedHosts patch. Server-side data mocking is out of scope here
+    (Phase 2); every other method stays a no-op."""
+
+    framework = "sveltekit"
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_vite_allowed_hosts(repo_dir, public_ip)
+
+
+class RemixMockWriter(MockWriter):
+    """Modern Remix runs on Vite, so its dev-origin allowlist is the Vite
+    server.allowedHosts patch (same as SvelteKit). Other methods stay no-ops."""
+
+    framework = "remix"
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_vite_allowed_hosts(repo_dir, public_ip)
+
+
+class AstroMockWriter(MockWriter):
+    """Astro proxies Vite, but the allowlist belongs under vite.server in
+    astro.config.* (falling back to vite.config.* when absent). Other methods
+    stay no-ops."""
+
+    framework = "astro"
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_astro_allowed_hosts(repo_dir, public_ip)
+
+
 register_mock_writer("next", NextMockWriter())
 register_mock_writer("vite", ViteMockWriter())
-# Phase 0 stubs: registered so the registry is the single source of truth, but
-# every method is a base-class no-op (no on-disk generation, no allowlist). Real
-# implementations land in later phases. Note: detect_framework emits "sveltekit"
-# / "astro" (never "vite"), so their dev-origin allowlist intentionally stays a
-# no-op here — wiring them to a Vite allowedHosts patch is a Phase 1 decision.
-for _stub_framework in ("sveltekit", "astro", "remix", "cra", "spa"):
+register_mock_writer("sveltekit", SvelteKitMockWriter())
+register_mock_writer("remix", RemixMockWriter())
+register_mock_writer("astro", AstroMockWriter())
+# Remaining stubs: registered so the registry is the single source of truth, but
+# every method is a base-class no-op. SPA/CRA frameworks fetch client-side and
+# are fully covered by the Playwright interception in visual.py, and CRA's dev
+# server gets its host binding from build_dev_env rather than an allowlist patch.
+for _stub_framework in ("cra", "spa"):
     register_mock_writer(_stub_framework, MockWriter())
 
 
