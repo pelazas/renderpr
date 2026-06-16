@@ -273,22 +273,65 @@ class SvelteKitStrategy(RoutingStrategy):
         }
 
 
+def _remix_token_to_route(token: str) -> str | None:
+    """Convert a Remix flat-route token (the part under app/routes/, no extension)
+    to a URL path, or None if it's dynamic/non-screenshottable.
+
+    Handles trailing `/route` and `/index` folder forms, `[.]`-style escapes,
+    layout opt-out (trailing `_`), pathless layouts (leading `_`), `_index`,
+    optional `(segment)` segments, and `$param`/splat (`$`) dynamics.
+    """
+    # (1) strip trailing folder forms: foo/route -> foo, foo/index -> foo
+    for suffix in ("/route", "/index"):
+        if token.endswith(suffix):
+            token = token[: -len(suffix)]
+
+    # (2) protect `[...]` escapes (e.g. `[.]` -> literal `.`) before splitting on `.`
+    escapes: list[str] = []
+
+    def _stash(m: re.Match) -> str:
+        escapes.append(m.group(1))
+        return f"\x00{len(escapes) - 1}\x00"
+
+    protected = re.sub(r"\[(.*?)\]", _stash, token)
+
+    def _restore(s: str) -> str:
+        return re.sub(r"\x00(\d+)\x00", lambda m: escapes[int(m.group(1))], s)
+
+    # (3) split on `.` and process each segment
+    out: list[str] = []
+    for raw in protected.split("."):
+        if not raw:
+            continue
+        # pathless layout (leading `_`); `_index` contributes the index (/)
+        if raw.startswith("_"):
+            if _restore(raw) == "_index":
+                continue
+            continue
+        # optional/param-group segments like (optional) or ($lang) are dropped
+        if raw.startswith("(") and raw.endswith(")"):
+            continue
+        # layout opt-out: trailing `_` -> strip it, keep the segment
+        seg = raw[:-1] if raw.endswith("_") else raw
+        restored = _restore(seg)
+        # dynamic params ($param) and splat ($) are not screenshottable
+        if "$" in restored:
+            return None
+        out.append(restored)
+
+    return "/" + "/".join(out) if out else "/"
+
+
 class RemixStrategy(RoutingStrategy):
     name = "remix"
 
-    _ROUTE_RE = re.compile(rf"(?:^|/)app/routes/(.+?)(?:/route)?\.{_JS}$")
+    _ROUTE_RE = re.compile(rf"(?:^|/)app/routes/(.+?)\.{_JS}$")
 
     def file_to_route(self, file_path: str) -> str | None:
         match = self._ROUTE_RE.search(file_path.replace("\\", "/"))
         if not match:
             return None
-        token = match.group(1)
-        if token in ("_index", "_index/index"):
-            return "/"
-        segments = [s for s in token.split(".") if not s.startswith("_")]
-        if any(_is_dynamic(s) for s in segments):
-            return None
-        return "/" + "/".join(segments) if segments else "/"
+        return _remix_token_to_route(match.group(1))
 
     def is_global_file(self, file_path: str) -> bool:
         normalized = file_path.replace("\\", "/")

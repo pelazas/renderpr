@@ -131,6 +131,22 @@ class TestRemix:
     def test_file_to_route(self, path, expected):
         assert RemixStrategy().file_to_route(path) == expected
 
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("app/routes/blog_.post.tsx", "/blog/post"),  # layout opt-out trailing _
+            ("app/routes/concerts.trending[.]json.tsx", "/concerts/trending.json"),  # escaped dot
+            ("app/routes/($lang).about.tsx", "/about"),  # optional segment dropped
+            ("app/routes/_index.tsx", "/"),
+            ("app/routes/_auth.login.tsx", "/login"),  # pathless layout dropped
+            ("app/routes/blog.post.tsx", "/blog/post"),  # plain dotted still works
+            ("app/routes/files.$.tsx", None),  # splat is dynamic
+            ("app/routes/_index/index.tsx", "/"),  # folder index form
+        ],
+    )
+    def test_flat_route_parsing(self, path, expected):
+        assert RemixStrategy().file_to_route(path) == expected
+
 
 class TestSpaFallback:
     def test_yields_nothing(self, tmp_path):
