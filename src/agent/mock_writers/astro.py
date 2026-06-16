@@ -149,6 +149,140 @@ def _write_server_mocks(repo_dir: Path | str, mocks: dict | None, diff: str | No
     return generated
 
 
+def _blind_stub_source(api_path: str) -> str:
+    return (
+        "const __renderprUnmocked = () =>\n"
+        "  new Response(JSON.stringify([]), { status: 200, headers: { "
+        "'content-type': 'application/json', "
+        f"'{API_FALLBACK_HEADER}': '{api_path}' }} }});\n"
+        "export const GET = __renderprUnmocked;\n"
+        "export const POST = __renderprUnmocked;\n"
+        "export const PUT = __renderprUnmocked;\n"
+        "export const PATCH = __renderprUnmocked;\n"
+        "export const DELETE = __renderprUnmocked;\n"
+    )
+
+
+def _detect_handler_methods(source: str) -> list[str]:
+    """HTTP method handlers exported by an Astro endpoint module, best-effort."""
+    found: list[str] = []
+    for method in _HTTP_METHODS:
+        patterns = (
+            rf"export\s+async\s+function\s+{method}\b",
+            rf"export\s+function\s+{method}\b",
+            rf"export\s+const\s+{method}\b",
+            rf"export\s*\{{[^}}]*\b{method}\b[^}}]*\}}",
+        )
+        if any(re.search(p, source) for p in patterns):
+            found.append(method)
+    return found
+
+
+def _wrapper_source(api_path: str, methods: list[str], orig_import: str) -> str:
+    lines = [
+        "// @ts-nocheck",
+        f'import * as __orig from "./{orig_import}";',
+        f'export * from "./{orig_import}";',
+        "const __renderprMsg = (e) =>",
+        '  String((e && e.message) || e || "error").replace(/[^\\x20-\\x7E]/g, " ").slice(0, 200);',
+        "const __renderprFallback = (msg) =>",
+        "  new Response(JSON.stringify([]), {",
+        "    status: 200,",
+        "    headers: {",
+        "      'content-type': 'application/json',",
+        f"      '{API_FALLBACK_HEADER}': '{api_path}',",
+        f"      '{API_ERROR_HEADER}': msg,",
+        "    },",
+        "  });",
+        "const __renderprWrap = (fn) =>",
+        "  async (...args) => {",
+        "    try {",
+        "      const res = await fn(...args);",
+        '      if (res && typeof res.status === "number" && res.status >= 500) {',
+        f'        console.error("[renderpr] handler for {api_path} returned status " + res.status);',
+        '        return __renderprFallback("HTTP " + res.status);',
+        "      }",
+        "      return res;",
+        "    } catch (err) {",
+        f'      console.error("[renderpr] handler for {api_path} threw:", err);',
+        "      return __renderprFallback(__renderprMsg(err));",
+        "    }",
+        "  };",
+    ]
+    for method in methods:
+        lines.append(f"export const {method} = __renderprWrap((__orig as any).{method});")
+    return "\n".join(lines) + "\n"
+
+
+def _blind_stub_endpoint(repo_path: Path, route_file: Path, route_rel: Path, api_path: str) -> list[str]:
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    route_file.write_text(_blind_stub_source(api_path))
+    generated.append(str(route_rel))
+    return generated
+
+
+def _wrap_changed_endpoint(repo_path: Path, route_file: Path, route_rel: Path, api_path: str) -> list[str]:
+    """Guard a PR-changed endpoint: move the real handler to a sibling module and
+    replace the endpoint with a wrapper that runs it, falling back to empty data
+    only on a thrown exception or a 5xx response (logged + error header)."""
+    source = route_file.read_text()
+    methods = _detect_handler_methods(source)
+    if not methods:
+        logger.info("Changed endpoint %s has no detectable handlers; blind-stubbing", api_path)
+        return _blind_stub_endpoint(repo_path, route_file, route_rel, api_path)
+
+    orig_stem = f"{route_file.stem}{_ORIG_MODULE_SUFFIX}"
+    orig_module = route_file.with_name(f"{orig_stem}{route_file.suffix}")
+    generated: list[str] = []
+    backup = _backup_file(route_file)
+    if backup is not None:
+        generated.append(str(backup.relative_to(repo_path)))
+    orig_module.write_text(source)
+    generated.append(str(orig_module.relative_to(repo_path)))
+    route_file.write_text(_wrapper_source(api_path, methods, orig_stem))
+    generated.append(str(route_rel))
+    logger.info("Changed endpoint %s wrapped (methods: %s)", api_path, ",".join(methods))
+    return generated
+
+
+def _write_unmocked_fallbacks(
+    repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+) -> list[str]:
+    """Make every unmocked ``src/pages/api/**/*.{ts,js}`` endpoint degrade
+    gracefully. Auth + explicitly-mocked endpoints are left untouched; PR-changed
+    ones are wrapped (real handler runs with an error guard), the rest blind-stubbed."""
+    repo_path = Path(repo_dir)
+    api_dir = repo_path / "src" / "pages" / "api"
+    if not api_dir.is_dir():
+        return []
+
+    explicit = _explicit_mock_paths(mocks)
+    changed = _changed_api_paths(diff)
+    generated: list[str] = []
+
+    for route_file in sorted(api_dir.rglob("*")):
+        if not route_file.is_file() or route_file.suffix not in _API_FILE_SUFFIXES:
+            continue
+        if route_file.stem.endswith(_ORIG_MODULE_SUFFIX):
+            # Sibling holding a wrapped endpoint's original handler; not routable.
+            continue
+        route_rel = route_file.relative_to(repo_path)
+        api_path = _api_file_to_api_path(route_rel)
+        if api_path is None or api_path.lstrip("/").startswith(_AUTH_API_PREFIX) or api_path in explicit:
+            continue
+
+        if api_path in changed:
+            generated.extend(_wrap_changed_endpoint(repo_path, route_file, route_rel, api_path))
+        else:
+            generated.extend(_blind_stub_endpoint(repo_path, route_file, route_rel, api_path))
+            logger.info("Unmocked API fallback written for %s", api_path)
+
+    return generated
+
+
 class AstroMockWriter(MockWriter):
     """Astro writer carrying the on-disk preview-servicing logic."""
 
@@ -158,6 +292,11 @@ class AstroMockWriter(MockWriter):
         self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
     ) -> list[str]:
         return _write_server_mocks(repo_dir, mocks, diff=diff)
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        return _write_unmocked_fallbacks(repo_dir, mocks=mocks, diff=diff)
 
     def write_dev_origin_allowlist(self, repo_dir, public_ip):
         return write_astro_allowed_hosts(repo_dir, public_ip)
