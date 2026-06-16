@@ -1,7 +1,10 @@
 import json
 
 from src.agent.mock_server import (
+    MockWriter,
     changed_api_paths,
+    get_mock_writer,
+    register_mock_writer,
     restore_runtime_files,
     write_dev_origin_allowlist,
     write_next_allowed_origin,
@@ -291,3 +294,34 @@ def test_write_server_mocks_skips_changed_route(tmp_path):
 
     assert generated == []
     assert not (tmp_path / "src/app/api/users/route.ts").exists()
+
+
+# --- Mock-writer registry ---------------------------------------------------
+
+
+def test_get_mock_writer_unknown_returns_noop_never_raises(tmp_path):
+    writer = get_mock_writer("totally-made-up-framework")
+    assert isinstance(writer, MockWriter)
+    # All methods are real no-ops and must not raise on any input.
+    assert writer.write_server_mocks(tmp_path, {"x": {"/api/y": {"body": []}}}) == []
+    assert writer.write_unmocked_fallbacks(tmp_path) == []
+    assert writer.write_banner(tmp_path) == []
+    assert writer.write_dev_origin_allowlist(tmp_path, "1.2.3.4") == []
+    assert writer.changed_api_paths(_diff_touching("src/app/api/users/route.ts")) == set()
+
+
+def test_get_mock_writer_none_returns_noop(tmp_path):
+    assert isinstance(get_mock_writer(None), MockWriter)
+    assert get_mock_writer(None).changed_api_paths("anything") == set()
+
+
+def test_register_and_get_mock_writer_roundtrip():
+    sentinel = MockWriter()
+    sentinel.framework = "registry-test-fw"
+    register_mock_writer("registry-test-fw", sentinel)
+    try:
+        assert get_mock_writer("registry-test-fw") is sentinel
+    finally:
+        from src.agent import mock_server
+
+        mock_server._MOCK_WRITERS.pop("registry-test-fw", None)

@@ -97,6 +97,60 @@ _BANNER_JS = """(function () {
 """
 
 
+class MockWriter:
+    """Per-framework strategy for the on-disk preview-servicing mechanisms.
+
+    The orchestrator never special-cases a framework name; it looks up a writer
+    via :func:`get_mock_writer` and the writer it gets back *is* the gate. The
+    base class is an all-no-op writer (returns ``[]`` / ``set()``), which is also
+    the fallback handed out for any framework with no registered writer.
+
+    Each method returns the runtime-generated relative paths it produced (incl.
+    any ``.renderpr.bak`` backups) so the orchestrator can track and later
+    restore them via :func:`restore_runtime_files`.
+    """
+
+    framework: str = ""
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        return []
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        return []
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        return []
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return []
+
+    def changed_api_paths(self, diff: str | None) -> set[str]:
+        return set()
+
+
+_MOCK_WRITERS: dict[str, MockWriter] = {}
+# Shared no-op writer handed out for any unregistered framework; lookups never
+# raise, so callers can dispatch through the registry unconditionally.
+_NOOP_WRITER = MockWriter()
+
+
+def register_mock_writer(framework: str, writer: MockWriter) -> None:
+    _MOCK_WRITERS[framework] = writer
+
+
+def get_mock_writer(framework: str) -> MockWriter:
+    """Return the writer registered for ``framework``.
+
+    Never raises: an unknown (or ``None``) framework yields the shared no-op
+    :class:`MockWriter`, so the orchestrator can always dispatch through it.
+    """
+    return _MOCK_WRITERS.get(framework, _NOOP_WRITER)
+
+
 def _route_file_to_api_path(route_rel: Path) -> str | None:
     parts = route_rel.parts
     if len(parts) < 4 or parts[0] != "src" or parts[1] != "app" or parts[2] != "api":
