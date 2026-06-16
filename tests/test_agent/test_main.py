@@ -45,6 +45,13 @@ class _MockCommandServer:
 
 def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
+    # AWS-backed helpers that run() invokes directly — mock them so the suite is
+    # hermetic and never reaches real SSM/ECS (without these, the tests only pass
+    # on a machine that happens to hold real renderpr AWS credentials).
+    monkeypatch.setattr("src.agent.main._fetch_command_token", lambda: "fake-command-token")
+    monkeypatch.setattr("src.agent.network.get_task_arn", lambda: "arn:aws:ecs:eu-west-1:0:task/abc")
+    monkeypatch.setattr("src.agent.registration.register_task", lambda *a, **kw: None)
+    monkeypatch.setattr("src.agent.registration.deregister_task", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
@@ -1194,6 +1201,16 @@ _BACKEND_DIFF = "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n@
 
 
 class TestDiscoveryIntegration:
+    @pytest.fixture(autouse=True)
+    def _no_real_aws(self, monkeypatch):
+        # These tests drive run() with their own partial mocks (they deliberately
+        # exercise real discovery), so neutralize the AWS-backed helpers run()
+        # calls directly — otherwise they reach real SSM/ECS.
+        monkeypatch.setattr("src.agent.main._fetch_command_token", lambda: "fake-command-token")
+        monkeypatch.setattr("src.agent.network.get_task_arn", lambda: "arn:aws:ecs:eu-west-1:0:task/abc")
+        monkeypatch.setattr("src.agent.registration.register_task", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.registration.deregister_task", lambda *a, **kw: None)
+
     def test_no_frontend_skips_and_posts_comment(self, monkeypatch):
         monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
         monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")

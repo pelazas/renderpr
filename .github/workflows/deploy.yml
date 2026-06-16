@@ -3,6 +3,8 @@ name: Deploy
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,6 +13,13 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # boto3 needs a region to construct clients, and dummy creds keep moto-backed
+    # tests hermetic (never reaching real AWS). Locally these come from the dev's
+    # AWS config; CI must set them explicitly.
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
     steps:
       - uses: actions/checkout@v4
 
@@ -21,14 +30,16 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r src/agent/requirements.txt
-          pip install pytest moto
+          pip install -r requirements.txt
 
       - name: Run tests
-        run: python -m pytest tests/ -v 2>&1 | tail -50
+        run: python -m pytest tests/ -q
 
   deploy:
     needs: test
+    # Only deploy on a push to main; on pull_request the test job runs as a gate
+    # but we never deploy PR code.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     defaults:
       run:
