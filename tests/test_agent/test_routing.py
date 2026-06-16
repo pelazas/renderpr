@@ -116,6 +116,31 @@ class TestSvelteKit:
     def test_layout(self):
         assert SvelteKitStrategy().is_layout_file("src/routes/about/+layout.svelte") == (True, "/about")
 
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("src/routes/[[lang]]/about/+page.svelte", "/about"),  # optional param dropped
+            ("src/routes/[...rest]/+page.svelte", "/"),  # rest param dropped
+            ("src/routes/blog/[slug]/+page.svelte", None),  # required param dynamic
+            ("src/routes/about/+page.server.ts", "/about"),  # server page discovered
+            ("src/routes/about/+page.ts", "/about"),
+            ("src/routes/about/+page.md", "/about"),
+        ],
+    )
+    def test_broadened_pages_and_params(self, path, expected):
+        assert SvelteKitStrategy().file_to_route(path) == expected
+
+    def test_discover_includes_server_pages(self, tmp_path):
+        (tmp_path / "src" / "routes" / "about").mkdir(parents=True)
+        (tmp_path / "src" / "routes" / "about" / "+page.server.ts").write_text("x")
+        (tmp_path / "src" / "routes" / "+page.svelte").write_text("x")
+        assert SvelteKitStrategy().discover_all_routes(tmp_path) == ["/", "/about"]
+
+    def test_source_extensions(self):
+        assert ".svelte" in SvelteKitStrategy().source_extensions
+        assert ".astro" in AstroStrategy().source_extensions
+        assert RoutingStrategy().source_extensions == (".ts", ".tsx", ".js", ".jsx")
+
 
 class TestRemix:
     @pytest.mark.parametrize(

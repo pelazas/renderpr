@@ -43,6 +43,10 @@ class RoutingStrategy:
     """Base strategy: a single-page app with no file-system routing."""
 
     name = "spa"
+    # File extensions the import-graph scanner should consider as "source" when
+    # walking importers for this framework. Frameworks with non-JS page files
+    # (Astro, SvelteKit) extend this so the BFS can reach their pages.
+    source_extensions: tuple[str, ...] = SOURCE_EXTENSIONS
 
     def file_to_route(self, file_path: str) -> str | None:
         return None
@@ -202,6 +206,7 @@ class NextPagesRouterStrategy(RoutingStrategy):
 
 class AstroStrategy(RoutingStrategy):
     name = "astro"
+    source_extensions = SOURCE_EXTENSIONS + (".astro",)
 
     _PAGE_RE = re.compile(r"(?:^|/)(?:src/)?pages/(.+)\.(?:astro|md|mdx)$")
 
@@ -233,33 +238,56 @@ class AstroStrategy(RoutingStrategy):
 
 class SvelteKitStrategy(RoutingStrategy):
     name = "sveltekit"
+    source_extensions = SOURCE_EXTENSIONS + (".svelte",)
 
-    _PAGE_RE = re.compile(r"(?:^|/)src/routes/(.*)\+page\.svelte$")
-    _LAYOUT_RE = re.compile(r"(?:^|/)src/routes/(.*)\+layout\.svelte$")
+    _PAGE_SUFFIXES: Final[tuple[str, ...]] = (
+        "+page.svelte", "+page.ts", "+page.js",
+        "+page.server.ts", "+page.server.js", "+page.md",
+    )
+    _PAGE_RE = re.compile(r"(?:^|/)src/routes/(.*)\+page(?:\.server)?\.(?:svelte|ts|js|md)$")
+    _LAYOUT_RE = re.compile(r"(?:^|/)src/routes/(.*)\+layout(?:\.server)?\.(?:svelte|ts|js)$")
 
-    def _route_from_match(self, inner: str) -> str:
-        segments = [s for s in inner.split("/") if s and not (s.startswith("(") and s.endswith(")"))]
+    def _route_from_match(self, inner: str) -> str | None:
+        """Map the dir part before +page to a URL. Route groups `(group)` and
+        optional `[[param]]`/rest `[...param]` segments are dropped (the latter
+        yield the concrete parent URL); a required `[param]` makes it dynamic.
+        """
+        segments: list[str] = []
+        for s in inner.split("/"):
+            if not s:
+                continue
+            if s.startswith("(") and s.endswith(")"):
+                continue  # route group
+            if s.startswith("[[") and s.endswith("]]"):
+                continue  # optional param -> drop, yield concrete URL
+            if s.startswith("[...") and s.endswith("]"):
+                continue  # rest/splat param -> drop, yield concrete URL
+            if s.startswith("[") and s.endswith("]"):
+                return None  # required dynamic param
+            segments.append(s)
         return "/" + "/".join(segments) if segments else "/"
 
     def file_to_route(self, file_path: str) -> str | None:
         match = self._PAGE_RE.search(file_path.replace("\\", "/"))
         if not match:
             return None
-        route = self._route_from_match(match.group(1))
-        return None if _is_dynamic(route) else route
+        return self._route_from_match(match.group(1))
 
     def is_layout_file(self, file_path: str) -> tuple[bool, str]:
         match = self._LAYOUT_RE.search(file_path.replace("\\", "/"))
         if not match:
             return False, ""
-        return True, self._route_from_match(match.group(1))
+        route = self._route_from_match(match.group(1))
+        if route is None:
+            return False, ""
+        return True, route
 
     def is_global_file(self, file_path: str) -> bool:
         return file_path.replace("\\", "/").endswith(("svelte.config.js", "vite.config.ts", "vite.config.js", "src/app.css"))
 
     def discover_all_routes(self, repo_path: Path) -> list[str]:
         routes: set[str] = set()
-        for rel in self._walk(repo_path, ("+page.svelte",)):
+        for rel in self._walk(repo_path, self._PAGE_SUFFIXES):
             route = self.file_to_route(rel)
             if route:
                 routes.add(route)
