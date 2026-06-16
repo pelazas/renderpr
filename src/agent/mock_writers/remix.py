@@ -7,11 +7,13 @@ routes export ``loader``/``action`` (not Next's per-HTTP-method exports), and th
 banner host is ``app/root.tsx``. See GitHub issue #47 for the full contract.
 """
 
+import json
 import logging
 from pathlib import Path
 
 from src.agent.mock_server import (
     MockWriter,
+    _backup_file,
     register_mock_writer,
     write_vite_allowed_hosts,
 )
@@ -60,6 +62,13 @@ def _api_path_for_flat_name(stem: str) -> str:
     return "/" + "/".join(segments)
 
 
+def _server_mock_source(body: str, status: int) -> str:
+    return (
+        "import { json } from '@remix-run/node';\n"
+        f"export const loader = () => json({body}, {{ status: {status} }});\n"
+    )
+
+
 class RemixMockWriter(MockWriter):
     """Remix writer: flat resource-route loaders, loader/action fallbacks, and a
     static banner injected into ``app/root.tsx``."""
@@ -104,6 +113,51 @@ class RemixMockWriter(MockWriter):
                 continue
             paths.add(_api_path_for_flat_name(stem))
         return paths
+
+    def write_server_mocks(
+        self, repo_dir, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        if not mocks:
+            return []
+
+        repo_path = Path(repo_dir)
+        changed = self.changed_api_paths(diff)
+        generated: list[str] = []
+
+        for endpoints in mocks.values():
+            if not isinstance(endpoints, dict):
+                continue
+            for api_path, mock_data in endpoints.items():
+                if (
+                    not isinstance(api_path, str)
+                    or not isinstance(mock_data, dict)
+                    or "body" not in mock_data
+                ):
+                    continue
+                if api_path in changed:
+                    logger.info(
+                        "Skipping server mock for changed route %s; real handler runs",
+                        api_path,
+                    )
+                    continue
+                stem = _flat_name_for_api_path(api_path)
+                if stem is None:
+                    continue
+
+                route_rel = Path(*_ROUTES_DIR) / f"{stem}.ts"
+                route_path = repo_path / route_rel
+                route_path.parent.mkdir(parents=True, exist_ok=True)
+                backup = _backup_file(route_path)
+                if backup is not None:
+                    generated.append(str(backup.relative_to(repo_path)))
+
+                status = int(mock_data.get("status", 200))
+                body = json.dumps(mock_data["body"])
+                route_path.write_text(_server_mock_source(body, status))
+                generated.append(str(route_rel))
+                logger.info("Server mock route written: %s for %s", route_rel, api_path)
+
+        return generated
 
 
 register_mock_writer("remix", RemixMockWriter())
