@@ -87,6 +87,60 @@ def _untrusted_subprocess_env(*overlays: dict[str, str]) -> dict[str, str]:
     return env
 
 
+# The unprivileged user that runs untrusted PR processes (must match the
+# `runner` user created in the Dockerfile). Running install/dev as this user
+# keeps them out of root's /proc and the ECS task-role credentials, so they
+# cannot read SSM secrets even via the metadata endpoint (threat-model F-1).
+RUNNER_UID = 10001
+RUNNER_GID = 10001
+RUNNER_HOME = "/home/runner"
+
+
+def _can_drop_privileges() -> bool:
+    """True only when we're root and so able to launch children as the runner
+    user. Outside the container (tests / local non-root) this is False and the
+    untrusted children run as the current user — degraded but non-fatal."""
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _runner_popen_kwargs() -> dict:
+    """Extra ``subprocess`` kwargs to run a child as the runner user, or ``{}``
+    when privileges can't be dropped."""
+    if _can_drop_privileges():
+        return {"user": RUNNER_UID, "group": RUNNER_GID}
+    logger.warning(
+        "Not running as root — untrusted install/dev processes will NOT be "
+        "dropped to the runner user (acceptable only outside the container)"
+    )
+    return {}
+
+
+def _runner_env_overlay() -> dict[str, str]:
+    """Env overlay for runner-owned children: a writable HOME (npm/pnpm/vite
+    caches) when we actually drop to the runner, otherwise nothing."""
+    return {"HOME": RUNNER_HOME} if _can_drop_privileges() else {}
+
+
+def _chown_to_runner(path: Path | str) -> None:
+    """Hand ``path`` to the runner so it can write node_modules / build output.
+    Root keeps write access (superuser); we also mark the tree a git
+    safe.directory so the root agent's later git calls don't trip the
+    dubious-ownership guard on a now runner-owned repo. No-op when not root."""
+    if not _can_drop_privileges():
+        return
+    try:
+        subprocess.run(
+            ["chown", "-R", f"{RUNNER_UID}:{RUNNER_GID}", str(path)],
+            check=True, capture_output=True, timeout=120,
+        )
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", str(path)],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        logger.warning("Failed to chown %s to the runner user", path, exc_info=True)
+
+
 def _fetch_command_token() -> str:
     param_name = os.environ.get("COMMAND_TOKEN_PARAM_NAME", "/renderpr/renderpr-command-token")
     ssm = boto3.client("ssm")
@@ -307,13 +361,21 @@ def _ensure_pnpm_hoisted(install_cwd: Path) -> list[str]:
     return generated
 
 
-def _run_install(install_command: list[str], install_cwd: Path, env: dict[str, str] | None = None) -> None:
+def _run_install(
+    install_command: list[str],
+    install_cwd: Path,
+    env: dict[str, str] | None = None,
+    user: int | None = None,
+    group: int | None = None,
+) -> None:
     label = " ".join(install_command)
     try:
         proc = subprocess.Popen(
             install_command,
             cwd=str(install_cwd),
             env=env,
+            user=user,
+            group=group,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -353,6 +415,8 @@ def _start_dev_process(
     dev_command: list[str],
     dev_cwd: Path,
     dev_env: dict[str, str],
+    user: int | None = None,
+    group: int | None = None,
 ) -> tuple[subprocess.Popen, dict]:
     """Launch the dev server and drain its stdout in a thread, sniffing the
     first printed "http://...:PORT" banner into the returned holder.
@@ -361,6 +425,8 @@ def _start_dev_process(
         dev_command,
         cwd=str(dev_cwd),
         env=dev_env,
+        user=user,
+        group=group,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -434,18 +500,26 @@ def _start_dev_server(
         except Exception:
             logger.warning("dependency cache check failed", exc_info=True)
 
+    # Untrusted PR processes (install hooks + dev server) run as the unprivileged
+    # runner user, so they can't read root's /proc/environ or the task-role
+    # credentials. Hand them the tree (root keeps access) and a writable HOME.
+    drop = _runner_popen_kwargs()
+    home = _runner_env_overlay()
+    _chown_to_runner(REPO_DIR)
+
     if not cache_restored:
         # Dependency install runs arbitrary PR code (postinstall hooks): give it
         # the credential-stripped env so it can't reach the task role.
-        _run_install(profile.install_command, install_cwd, env=_untrusted_subprocess_env())
+        _run_install(profile.install_command, install_cwd, env=_untrusted_subprocess_env(home), **drop)
         threading.Thread(target=_try_npm_cache_store, args=(install_cwd, cache_key), daemon=True).start()
 
     # Layer precedence: ambient (credential-stripped) env, then user-provided
-    # secrets/vars, then the framework launch profile's env (host flags etc.)
-    # which must win for a correct boot. The dev server is untrusted PR code, so
-    # it must not inherit the task-role credential pointers (finding F-1).
-    dev_env = _untrusted_subprocess_env(injected_env or {}, profile.dev_env)
-    _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env)
+    # secrets/vars, then the runner HOME, then the framework launch profile's env
+    # (host flags etc.) which must win for a correct boot. The dev server is
+    # untrusted PR code, so it must not inherit the task-role credential pointers
+    # (finding F-1).
+    dev_env = _untrusted_subprocess_env(injected_env or {}, home, profile.dev_env)
+    _dev_server_proc, sniffed = _start_dev_process(profile.dev_command, dev_cwd, dev_env, **drop)
 
     port = _resolve_ready_port(_dev_server_proc, sniffed, profile.default_port)
     if port is None:

@@ -176,6 +176,59 @@ class TestUntrustedSubprocessEnv:
         assert env["HOST"] == "0.0.0.0"  # later overlay wins over earlier and ambient
 
 
+class TestRunnerPrivilegeDrop:
+    def _wire(self, monkeypatch, can_drop):
+        import subprocess
+        import httpx
+        from src.agent import main as m
+
+        monkeypatch.setattr(m, "_can_drop_privileges", lambda: can_drop)
+        monkeypatch.setattr(m, "NPM_CACHE_ENABLED", False)  # force the install path
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+
+        run_calls: list[list] = []
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: (run_calls.append(list(a[0])), type("R", (), {"returncode": 0})())[1],
+        )
+        popen_calls: list[dict] = []
+
+        def mock_popen(*a, **kw):
+            popen_calls.append(kw)
+            return _mock_process()
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(httpx.Response(200)))
+        return popen_calls, run_calls
+
+    def test_drops_to_runner_when_root(self, monkeypatch):
+        from src.agent import main as m
+
+        popen_calls, run_calls = self._wire(monkeypatch, can_drop=True)
+        m._start_dev_server(_default_profile())
+
+        install_kw, dev_kw = popen_calls[0], popen_calls[1]
+        assert install_kw["user"] == m.RUNNER_UID and install_kw["group"] == m.RUNNER_GID
+        assert dev_kw["user"] == m.RUNNER_UID and dev_kw["group"] == m.RUNNER_GID
+        # Untrusted children get a writable HOME and never the credential pointers.
+        assert dev_kw["env"]["HOME"] == m.RUNNER_HOME
+        assert "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" not in dev_kw["env"]
+        # The repo tree is handed to the runner before any untrusted process runs.
+        assert any(c[:2] == ["chown", "-R"] for c in run_calls)
+
+    def test_no_drop_when_not_root(self, monkeypatch):
+        from src.agent import main as m
+
+        popen_calls, run_calls = self._wire(monkeypatch, can_drop=False)
+        m._start_dev_server(_default_profile())
+
+        install_kw, dev_kw = popen_calls[0], popen_calls[1]
+        assert install_kw.get("user") is None and install_kw.get("group") is None
+        assert dev_kw.get("user") is None and dev_kw.get("group") is None
+        assert dev_kw["env"].get("HOME") != m.RUNNER_HOME
+        assert not any(c[:2] == ["chown", "-R"] for c in run_calls)
+
+
 class TestGetInstallationToken:
     def test_token_success(self, monkeypatch: MonkeyPatch):
         monkeypatch.setattr(
