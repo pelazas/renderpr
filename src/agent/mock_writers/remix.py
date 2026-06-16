@@ -31,6 +31,11 @@ _ROUTES_DIR = ("app", "routes")
 # route; the leading underscore keeps the segment non-routable in Remix.
 _ORIG_SEGMENT = "_renderpr_orig"
 _REMIX_HANDLERS = ("loader", "action")
+# Sentinel present in every route artifact we generate (blind stub + wrapper):
+# both stamp the fallback header. A re-run uses it to recognize an
+# already-processed route and skip it instead of re-wrapping the wrapper (which
+# would clobber the saved original).
+_GENERATED_MARKER = API_FALLBACK_HEADER
 _ROOT_CANDIDATES = ("app/root.tsx", "app/root.jsx")
 _BANNER_REL = "public/__renderpr-unmocked.js"
 _BANNER_NAME = _BANNER_REL.split("/")[-1]
@@ -270,6 +275,12 @@ class RemixMockWriter(MockWriter):
                 api_path.lstrip("/").startswith(_AUTH_API_PREFIX)
                 or api_path in explicit
             ):
+                continue
+
+            # Idempotency: a route we already stubbed/wrapped on a prior run
+            # carries our fallback-header sentinel; re-processing it would clobber
+            # the saved original, so leave it untouched.
+            if _GENERATED_MARKER in route_file.read_text():
                 continue
 
             if api_path in changed:
