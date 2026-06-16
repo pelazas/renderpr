@@ -185,6 +185,11 @@ class TestRunnerPrivilegeDrop:
         monkeypatch.setattr(m, "_can_drop_privileges", lambda: can_drop)
         monkeypatch.setattr(m, "NPM_CACHE_ENABLED", False)  # force the install path
         monkeypatch.setattr("os.path.exists", lambda p: True)
+        # Pin a known, non-runner ambient HOME so the not-root assertion is
+        # deterministic: GitHub-hosted runners themselves run as a user whose HOME
+        # is /home/runner (== RUNNER_HOME), which would otherwise collide with the
+        # check that no runner HOME overlay was applied when privileges aren't dropped.
+        monkeypatch.setenv("HOME", "/home/ambient-user")
 
         run_calls: list[list] = []
         monkeypatch.setattr(
@@ -225,6 +230,8 @@ class TestRunnerPrivilegeDrop:
         install_kw, dev_kw = popen_calls[0], popen_calls[1]
         assert install_kw.get("user") is None and install_kw.get("group") is None
         assert dev_kw.get("user") is None and dev_kw.get("group") is None
+        # No runner HOME overlay: the child keeps the ambient HOME, not /home/runner.
+        assert dev_kw["env"].get("HOME") == "/home/ambient-user"
         assert dev_kw["env"].get("HOME") != m.RUNNER_HOME
         assert not any(c[:2] == ["chown", "-R"] for c in run_calls)
 
