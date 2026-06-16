@@ -103,10 +103,61 @@ def _changed_api_paths(diff: str | None) -> set[str]:
     return paths
 
 
+def _server_mock_source(body: str, status: int) -> str:
+    return (
+        "export const GET = () =>\n"
+        f"  new Response(JSON.stringify({body}), {{ status: {status}, "
+        "headers: { 'content-type': 'application/json' } });\n"
+    )
+
+
+def _write_server_mocks(repo_dir: Path | str, mocks: dict | None, diff: str | None = None) -> list[str]:
+    if not mocks:
+        return []
+
+    repo_path = Path(repo_dir)
+    changed = _changed_api_paths(diff)
+    generated: list[str] = []
+
+    for endpoints in mocks.values():
+        if not isinstance(endpoints, dict):
+            continue
+        for api_path, mock_data in endpoints.items():
+            if not isinstance(api_path, str) or not isinstance(mock_data, dict) or "body" not in mock_data:
+                continue
+            if api_path in changed:
+                # The PR changed this endpoint; let its real (wrapped) handler
+                # run rather than masking it with a synthetic mock body.
+                logger.info("Skipping server mock for changed route %s; real handler runs", api_path)
+                continue
+            route_rel = _mock_endpoint_path(api_path)
+            if route_rel is None:
+                continue
+
+            route_path = repo_path / route_rel
+            route_path.parent.mkdir(parents=True, exist_ok=True)
+            backup = _backup_file(route_path)
+            if backup is not None:
+                generated.append(str(backup.relative_to(repo_path)))
+
+            status = int(mock_data.get("status", 200))
+            body = json.dumps(mock_data["body"])
+            route_path.write_text(_server_mock_source(body, status))
+            generated.append(str(route_rel))
+            logger.info("Server mock endpoint written: %s for %s", route_rel, api_path)
+
+    return generated
+
+
 class AstroMockWriter(MockWriter):
     """Astro writer carrying the on-disk preview-servicing logic."""
 
     framework = "astro"
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        return _write_server_mocks(repo_dir, mocks, diff=diff)
 
     def write_dev_origin_allowlist(self, repo_dir, public_ip):
         return write_astro_allowed_hosts(repo_dir, public_ip)
