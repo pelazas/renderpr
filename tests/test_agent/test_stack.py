@@ -83,6 +83,80 @@ class TestDetectFramework:
         assert detect_framework(tmp_path / "nope.json") == "spa"
 
 
+class TestParsePackageManagerField:
+    @pytest.mark.parametrize(
+        "field,expected",
+        [
+            ("yarn@4.5.0", ("yarn", 4)),
+            ("yarn@1.22.19", ("yarn", 1)),
+            ("pnpm@9", ("pnpm", 9)),
+            ("yarn@3.6.1+sha512.abc", ("yarn", 3)),
+        ],
+    )
+    def test_parses_field(self, tmp_path, field, expected):
+        from src.agent.stack import _parse_package_manager_field
+        pkg = _write_pkg(tmp_path)
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = field
+        pkg.write_text(json.dumps(data))
+        assert _parse_package_manager_field(pkg) == expected
+
+    def test_no_field_returns_none(self, tmp_path):
+        from src.agent.stack import _parse_package_manager_field
+        pkg = _write_pkg(tmp_path)
+        assert _parse_package_manager_field(pkg) is None
+
+    def test_missing_file_returns_none(self, tmp_path):
+        from src.agent.stack import _parse_package_manager_field
+        assert _parse_package_manager_field(tmp_path / "nope.json") is None
+
+    def test_malformed_field_returns_none(self, tmp_path):
+        from src.agent.stack import _parse_package_manager_field
+        pkg = _write_pkg(tmp_path)
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "yarn"  # no version
+        pkg.write_text(json.dumps(data))
+        assert _parse_package_manager_field(pkg) is None
+
+
+class TestDetectYarnMajor:
+    def test_package_manager_field_wins(self, tmp_path):
+        from src.agent.stack import detect_yarn_major
+        pkg = _write_pkg(tmp_path)
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "yarn@4.5.0"
+        pkg.write_text(json.dumps(data))
+        assert detect_yarn_major(tmp_path, pkg) == 4
+
+    def test_yarnrc_yml_implies_berry(self, tmp_path):
+        from src.agent.stack import detect_yarn_major
+        pkg = _write_pkg(tmp_path)
+        (tmp_path / ".yarnrc.yml").write_text("nodeLinker: node-modules\n")
+        assert detect_yarn_major(tmp_path, pkg) == 2
+
+    def test_field_takes_priority_over_yarnrc(self, tmp_path):
+        from src.agent.stack import detect_yarn_major
+        pkg = _write_pkg(tmp_path)
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "yarn@1.22.19"
+        pkg.write_text(json.dumps(data))
+        (tmp_path / ".yarnrc.yml").write_text("")
+        assert detect_yarn_major(tmp_path, pkg) == 1
+
+    def test_non_yarn_field_returns_none(self, tmp_path):
+        from src.agent.stack import detect_yarn_major
+        pkg = _write_pkg(tmp_path)
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "pnpm@9"
+        pkg.write_text(json.dumps(data))
+        assert detect_yarn_major(tmp_path, pkg) is None
+
+    def test_no_signals_returns_none(self, tmp_path):
+        from src.agent.stack import detect_yarn_major
+        pkg = _write_pkg(tmp_path)
+        assert detect_yarn_major(tmp_path, pkg) is None
+
+
 class TestBuildInstallCommand:
     @pytest.mark.parametrize(
         "pm,has_lock,expected",
@@ -99,6 +173,40 @@ class TestBuildInstallCommand:
         from src.agent.stack import build_install_command
         assert build_install_command(pm, has_lock) == expected
 
+    def test_yarn_berry_uses_immutable(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("yarn", True, yarn_major=4) == [
+            "yarn", "install", "--immutable",
+        ]
+
+    def test_yarn_classic_uses_frozen_lockfile(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("yarn", True, yarn_major=1) == [
+            "yarn", "install", "--frozen-lockfile",
+        ]
+
+    def test_yarn_unknown_major_uses_frozen_lockfile(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("yarn", True, yarn_major=None) == [
+            "yarn", "install", "--frozen-lockfile",
+        ]
+
+    def test_yarn_berry_no_lockfile_plain_install(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("yarn", False, yarn_major=4) == ["yarn", "install"]
+
+    def test_pnpm_ignores_yarn_major(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("pnpm", True, yarn_major=4) == [
+            "pnpm", "install", "--frozen-lockfile",
+        ]
+
+    def test_yarn_major_2_is_immutable(self):
+        from src.agent.stack import build_install_command
+        assert build_install_command("yarn", True, yarn_major=2) == [
+            "yarn", "install", "--immutable",
+        ]
+
 
 class TestBuildDevCommand:
     def test_next_has_no_host_flag(self):
@@ -113,10 +221,14 @@ class TestBuildDevCommand:
         from src.agent.stack import build_dev_command
         assert build_dev_command("pnpm", "vite") == ["pnpm", "run", "dev", "--host"]
 
-    @pytest.mark.parametrize("framework", ["vite", "astro", "sveltekit"])
+    @pytest.mark.parametrize("framework", ["vite", "astro", "sveltekit", "remix"])
     def test_host_flag_frameworks(self, framework):
         from src.agent.stack import build_dev_command
         assert "--host" in build_dev_command("yarn", framework)
+
+    def test_remix_npm_uses_double_dash(self):
+        from src.agent.stack import build_dev_command
+        assert build_dev_command("npm", "remix") == ["npm", "run", "dev", "--", "--host"]
 
 
 class TestBuildDevEnv:
@@ -147,6 +259,31 @@ class TestBuildLaunchProfile:
         assert profile.install_command == ["pnpm", "install", "--frozen-lockfile"]
         assert profile.dev_command == ["pnpm", "run", "dev", "--host"]
         assert profile.default_port == 5173
+
+    def test_yarn_berry_threads_immutable(self, tmp_path):
+        from src.agent.stack import build_launch_profile
+        (tmp_path / "yarn.lock").write_text("")
+        pkg = _write_pkg(
+            tmp_path, deps={"next": "14.0.0"}, scripts={"dev": "next dev"}
+        )
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "yarn@4.5.0"
+        pkg.write_text(json.dumps(data))
+        profile = build_launch_profile(tmp_path, pkg)
+        assert profile.package_manager == "yarn"
+        assert profile.install_command == ["yarn", "install", "--immutable"]
+
+    def test_yarn_classic_threads_frozen_lockfile(self, tmp_path):
+        from src.agent.stack import build_launch_profile
+        (tmp_path / "yarn.lock").write_text("")
+        pkg = _write_pkg(
+            tmp_path, deps={"next": "14.0.0"}, scripts={"dev": "next dev"}
+        )
+        data = json.loads(pkg.read_text())
+        data["packageManager"] = "yarn@1.22.19"
+        pkg.write_text(json.dumps(data))
+        profile = build_launch_profile(tmp_path, pkg)
+        assert profile.install_command == ["yarn", "install", "--frozen-lockfile"]
 
     def test_npm_next_defaults(self, tmp_path):
         from src.agent.stack import build_launch_profile

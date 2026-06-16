@@ -439,6 +439,45 @@ class TestFindImporters:
         result = _find_importers(["Modal"], set())
         assert result == []
 
+    def test_stem_anchored_does_not_match_superstring(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "a.tsx").write_text("import x from '../components/reindex';")
+        (tmp_path / "b.tsx").write_text("import y from '../components/index';")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers(["index"], set())
+        assert "b.tsx" in result
+        assert "a.tsx" not in result
+
+    def test_directory_import_resolves(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "page.tsx").write_text("import { Modal } from '../components/Modal/index';")
+
+        from src.agent.routes import _find_importers
+
+        result = _find_importers(["Modal"], set())
+        assert "page.tsx" in result
+
+    def test_honors_passed_source_extensions(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("src.agent.routes.REPO_DIR", str(tmp_path))
+
+        (tmp_path / "Page.svelte").write_text("import Card from './Card.svelte';")
+        (tmp_path / "Other.ts").write_text("import Card from './Card';")
+
+        from src.agent.routes import _find_importers
+
+        # Default extensions exclude .svelte
+        default = _find_importers(["Card"], set())
+        assert "Page.svelte" not in default
+        assert "Other.ts" in default
+
+        # When .svelte is allowed, the svelte importer is found
+        extended = _find_importers(["Card"], set(), (".ts", ".tsx", ".js", ".jsx", ".svelte"))
+        assert "Page.svelte" in extended
+
 
 class TestExtractJson:
     def test_plain_json(self):

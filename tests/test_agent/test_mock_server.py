@@ -8,6 +8,7 @@ from src.agent.mock_server import (
     get_mock_writer,
     register_mock_writer,
     restore_runtime_files,
+    write_astro_allowed_hosts,
     write_dev_origin_allowlist,
     write_next_allowed_origin,
     write_server_mocks,
@@ -110,6 +111,24 @@ def test_write_vite_allowed_hosts_patches_define_config(tmp_path):
 
 def test_write_vite_allowed_hosts_skips_when_no_config(tmp_path):
     assert write_vite_allowed_hosts(tmp_path, "54.1.2.3") == []
+
+
+def test_write_astro_allowed_hosts_patches_define_config(tmp_path):
+    cfg = tmp_path / "astro.config.ts"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({\n  integrations: [],\n})\n"
+    )
+    generated = write_astro_allowed_hosts(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "vite: { server: { allowedHosts: ['54.1.2.3'] } }" in content
+    assert "astro.config.ts" in generated
+
+
+def test_write_astro_allowed_hosts_skips_localhost(tmp_path):
+    cfg = tmp_path / "astro.config.ts"
+    cfg.write_text("import { defineConfig } from 'astro/config'\nexport default defineConfig({})\n")
+    assert write_astro_allowed_hosts(tmp_path, "localhost") == []
+    assert "allowedHosts" not in cfg.read_text()
 
 
 def test_write_dev_origin_allowlist_dispatches_by_framework(tmp_path):
@@ -388,12 +407,65 @@ def test_registry_changed_paths_dispatch_next_vs_vite():
     assert get_mock_writer("vite").changed_api_paths(diff) == set()
 
 
-@pytest.mark.parametrize("framework", ("sveltekit", "astro"))
-def test_sveltekit_astro_allowlist_parity_noop(tmp_path, framework):
-    # Regression: detect_framework emits sveltekit/astro (never vite), so even
-    # with a Vite-shaped config present their allowlist MUST stay a no-op — they
-    # do NOT inherit vite's allowedHosts patch in Phase 0.
+@pytest.mark.parametrize("framework", ("sveltekit", "remix"))
+def test_sveltekit_remix_patch_vite_config_allowlist(tmp_path, framework):
+    # Phase 1 behavior change (replaces the Phase-0 parity no-op lock):
+    # SvelteKit and Remix run on Vite, so their dev-origin allowlist now patches
+    # vite.config.* server.allowedHosts (reusing write_vite_allowed_hosts).
     cfg = tmp_path / "vite.config.ts"
     cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
-    assert get_mock_writer(framework).write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
+    generated = get_mock_writer(framework).write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "allowedHosts: ['54.1.2.3']" in content
+    assert "plugins: []" in content
+    assert "vite.config.ts" in generated
+
+
+def test_astro_patches_astro_config_vite_allowlist(tmp_path):
+    # Astro proxies Vite; the allowlist belongs under vite.server in astro.config.
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({\n  integrations: [],\n})\n"
+    )
+    generated = get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    content = cfg.read_text()
+    assert "vite: { server: { allowedHosts: ['54.1.2.3'] } }" in content
+    assert "integrations: []" in content
+    assert "astro.config.mjs" in generated
+
+
+def test_astro_falls_back_to_vite_config(tmp_path):
+    # No astro.config present: fall back to patching vite.config.* directly.
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({})\n")
+    generated = get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert "vite.config.ts" in generated
+    assert "allowedHosts: ['54.1.2.3']" in cfg.read_text()
+
+
+def test_astro_skips_unrecognized_config_shape(tmp_path):
+    # Conservative guard: an astro.config with no defineConfig({ shape is skipped.
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text("export default {}\n")
+    assert get_mock_writer("astro").write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
     assert "allowedHosts" not in cfg.read_text()
+
+
+@pytest.mark.parametrize("framework", ("sveltekit", "remix"))
+def test_sveltekit_remix_allowlist_idempotent(tmp_path, framework):
+    cfg = tmp_path / "vite.config.ts"
+    cfg.write_text("import { defineConfig } from 'vite'\nexport default defineConfig({\n  plugins: [],\n})\n")
+    writer = get_mock_writer(framework)
+    writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    # Re-running when allowedHosts is already present is a no-op.
+    assert writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
+
+
+def test_astro_allowlist_idempotent(tmp_path):
+    cfg = tmp_path / "astro.config.mjs"
+    cfg.write_text(
+        "import { defineConfig } from 'astro/config'\nexport default defineConfig({})\n"
+    )
+    writer = get_mock_writer("astro")
+    writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3")
+    assert writer.write_dev_origin_allowlist(tmp_path, "54.1.2.3") == []
