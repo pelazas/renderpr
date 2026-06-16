@@ -19,7 +19,7 @@ from src.agent.config import (
 logger = logging.getLogger(__name__)
 
 # Frameworks whose dev server needs a `--host` CLI flag to bind 0.0.0.0.
-_HOST_FLAG_FRAMEWORKS = frozenset({"vite", "astro", "sveltekit"})
+_HOST_FLAG_FRAMEWORKS = frozenset({"vite", "astro", "sveltekit", "remix"})
 
 
 @dataclass

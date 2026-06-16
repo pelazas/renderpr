@@ -221,10 +221,14 @@ class TestBuildDevCommand:
         from src.agent.stack import build_dev_command
         assert build_dev_command("pnpm", "vite") == ["pnpm", "run", "dev", "--host"]
 
-    @pytest.mark.parametrize("framework", ["vite", "astro", "sveltekit"])
+    @pytest.mark.parametrize("framework", ["vite", "astro", "sveltekit", "remix"])
     def test_host_flag_frameworks(self, framework):
         from src.agent.stack import build_dev_command
         assert "--host" in build_dev_command("yarn", framework)
+
+    def test_remix_npm_uses_double_dash(self):
+        from src.agent.stack import build_dev_command
+        assert build_dev_command("npm", "remix") == ["npm", "run", "dev", "--", "--host"]
 
 
 class TestBuildDevEnv:
