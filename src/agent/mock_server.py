@@ -304,9 +304,8 @@ def _wrap_changed_route(repo_path: Path, route_file: Path, route_rel: Path, api_
     return generated
 
 
-def write_unmocked_api_fallbacks(
+def _next_write_unmocked_api_fallbacks(
     repo_dir: Path | str,
-    framework: str = "next",
     mocks: dict | None = None,
     diff: str | None = None,
 ) -> list[str]:
@@ -318,9 +317,6 @@ def write_unmocked_api_fallbacks(
     their real handler still runs, so a genuine break surfaces, and only a thrown
     exception degrades to empty data. Untouched routes get the benign `[]` stub.
     """
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        return []
-
     repo_path = Path(repo_dir)
     api_dir = repo_path / "src" / "app" / "api"
     if not api_dir.is_dir():
@@ -347,13 +343,10 @@ def write_unmocked_api_fallbacks(
     return generated
 
 
-def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list[str]:
+def _next_write_unmocked_banner(repo_dir: Path | str) -> list[str]:
     """Inject a small client script that shows an in-page notice when a route's
     data came from an unmocked-fallback response. Best-effort: skips cleanly if
     there's no recognizable root layout `<body>` to attach it to."""
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        return []
-
     repo_path = Path(repo_dir)
     layout = next((repo_path / name for name in _LAYOUT_CANDIDATES if (repo_path / name).exists()), None)
     if layout is None:
@@ -404,13 +397,8 @@ def _mock_route_path(api_path: str) -> Path | None:
     return Path("src/app") / Path(*parts) / "route.ts"
 
 
-def write_server_mocks(repo_dir: Path | str, mocks: dict | None, framework: str = "next", diff: str | None = None) -> list[str]:
+def _next_write_server_mocks(repo_dir: Path | str, mocks: dict | None, diff: str | None = None) -> list[str]:
     if not mocks:
-        return []
-    if framework not in _SERVER_MOCK_FRAMEWORKS:
-        # SPA/other frameworks fetch client-side; visual.py's page.route()
-        # interception already covers them, so don't write Next route handlers.
-        logger.info("Skipping server mock files for framework %s (browser-layer mocks cover it)", framework)
         return []
 
     repo_path = Path(repo_dir)
@@ -542,21 +530,6 @@ def write_vite_allowed_hosts(repo_dir: Path | str, public_ip: str) -> list[str]:
     return generated
 
 
-def write_dev_origin_allowlist(repo_dir: Path | str, public_ip: str, framework: str) -> list[str]:
-    """Allow the Fargate task's public IP as a dev-server origin, per framework.
-
-    Next uses allowedDevOrigins; Vite uses server.allowedHosts (best-effort); CRA
-    already handles it via DANGEROUSLY_DISABLE_HOST_CHECK; other frameworks need
-    nothing or aren't supported, so they degrade to a no-op.
-    """
-    if framework == "next":
-        return write_next_allowed_origin(repo_dir, public_ip)
-    if framework == "vite":
-        return write_vite_allowed_hosts(repo_dir, public_ip)
-    logger.info("No dev-origin allowlist needed for framework %s", framework)
-    return []
-
-
 def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> None:
     repo_path = Path(repo_dir)
     generated = list(dict.fromkeys(generated_files))
@@ -590,3 +563,64 @@ def restore_runtime_files(repo_dir: Path | str, generated_files: list[str]) -> N
             logger.info("Deleted runtime-generated file: %s", rel)
         except OSError:
             logger.warning("Failed to delete runtime file %s", rel, exc_info=True)
+
+
+# --- Framework writers ------------------------------------------------------
+
+
+class NextMockWriter(MockWriter):
+    """Next.js writer carrying the on-disk preview-servicing logic.
+
+    Wraps the module-level Next helpers; the previous ``_SERVER_MOCK_FRAMEWORKS``
+    gate is gone — the gate is now simply which writer you got from the registry.
+    """
+
+    framework = "next"
+
+    def write_server_mocks(
+        self, repo_dir: Path | str, mocks: dict | None, diff: str | None = None
+    ) -> list[str]:
+        return _next_write_server_mocks(repo_dir, mocks, diff=diff)
+
+    def write_unmocked_fallbacks(
+        self, repo_dir: Path | str, mocks: dict | None = None, diff: str | None = None
+    ) -> list[str]:
+        return _next_write_unmocked_api_fallbacks(repo_dir, mocks=mocks, diff=diff)
+
+    def write_banner(self, repo_dir: Path | str) -> list[str]:
+        return _next_write_unmocked_banner(repo_dir)
+
+    def write_dev_origin_allowlist(self, repo_dir: Path | str, public_ip: str) -> list[str]:
+        return write_next_allowed_origin(repo_dir, public_ip)
+
+    def changed_api_paths(self, diff: str | None) -> set[str]:
+        return changed_api_paths(diff)
+
+
+register_mock_writer("next", NextMockWriter())
+
+
+# --- Backward-compat module shims -------------------------------------------
+# External callers (main.py, visual.py, tests) import these module-level names
+# and monkeypatch some of them; they dispatch through the registry so the
+# framework gate lives in one place.
+
+
+def write_server_mocks(
+    repo_dir: Path | str, mocks: dict | None, framework: str = "next", diff: str | None = None
+) -> list[str]:
+    return get_mock_writer(framework).write_server_mocks(repo_dir, mocks, diff=diff)
+
+
+def write_unmocked_api_fallbacks(
+    repo_dir: Path | str, framework: str = "next", mocks: dict | None = None, diff: str | None = None
+) -> list[str]:
+    return get_mock_writer(framework).write_unmocked_fallbacks(repo_dir, mocks=mocks, diff=diff)
+
+
+def write_unmocked_banner(repo_dir: Path | str, framework: str = "next") -> list[str]:
+    return get_mock_writer(framework).write_banner(repo_dir)
+
+
+def write_dev_origin_allowlist(repo_dir: Path | str, public_ip: str, framework: str) -> list[str]:
+    return get_mock_writer(framework).write_dev_origin_allowlist(repo_dir, public_ip)
