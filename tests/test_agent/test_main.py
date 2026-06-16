@@ -45,6 +45,13 @@ class _MockCommandServer:
 
 def _mock_all_deps(monkeypatch, posted_body=None):
     monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
+    # AWS-backed helpers that run() invokes directly — mock them so the suite is
+    # hermetic and never reaches real SSM/ECS (without these, the tests only pass
+    # on a machine that happens to hold real renderpr AWS credentials).
+    monkeypatch.setattr("src.agent.main._fetch_command_token", lambda: "fake-command-token")
+    monkeypatch.setattr("src.agent.network.get_task_arn", lambda: "arn:aws:ecs:eu-west-1:0:task/abc")
+    monkeypatch.setattr("src.agent.registration.register_task", lambda *a, **kw: None)
+    monkeypatch.setattr("src.agent.registration.deregister_task", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")
     monkeypatch.setattr("src.agent.main._clone_repo", lambda *a, **kw: None)
     monkeypatch.setattr("src.agent.main._start_dev_server", lambda *a, **kw: None)
@@ -167,6 +174,66 @@ class TestUntrustedSubprocessEnv:
 
         assert env["FOO"] == "1"
         assert env["HOST"] == "0.0.0.0"  # later overlay wins over earlier and ambient
+
+
+class TestRunnerPrivilegeDrop:
+    def _wire(self, monkeypatch, can_drop):
+        import subprocess
+        import httpx
+        from src.agent import main as m
+
+        monkeypatch.setattr(m, "_can_drop_privileges", lambda: can_drop)
+        monkeypatch.setattr(m, "NPM_CACHE_ENABLED", False)  # force the install path
+        monkeypatch.setattr("os.path.exists", lambda p: True)
+        # Pin a known, non-runner ambient HOME so the not-root assertion is
+        # deterministic: GitHub-hosted runners themselves run as a user whose HOME
+        # is /home/runner (== RUNNER_HOME), which would otherwise collide with the
+        # check that no runner HOME overlay was applied when privileges aren't dropped.
+        monkeypatch.setenv("HOME", "/home/ambient-user")
+
+        run_calls: list[list] = []
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: (run_calls.append(list(a[0])), type("R", (), {"returncode": 0})())[1],
+        )
+        popen_calls: list[dict] = []
+
+        def mock_popen(*a, **kw):
+            popen_calls.append(kw)
+            return _mock_process()
+
+        monkeypatch.setattr(subprocess, "Popen", mock_popen)
+        monkeypatch.setattr(httpx, "Client", lambda *a, **kw: _mock_client(httpx.Response(200)))
+        return popen_calls, run_calls
+
+    def test_drops_to_runner_when_root(self, monkeypatch):
+        from src.agent import main as m
+
+        popen_calls, run_calls = self._wire(monkeypatch, can_drop=True)
+        m._start_dev_server(_default_profile())
+
+        install_kw, dev_kw = popen_calls[0], popen_calls[1]
+        assert install_kw["user"] == m.RUNNER_UID and install_kw["group"] == m.RUNNER_GID
+        assert dev_kw["user"] == m.RUNNER_UID and dev_kw["group"] == m.RUNNER_GID
+        # Untrusted children get a writable HOME and never the credential pointers.
+        assert dev_kw["env"]["HOME"] == m.RUNNER_HOME
+        assert "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI" not in dev_kw["env"]
+        # The repo tree is handed to the runner before any untrusted process runs.
+        assert any(c[:2] == ["chown", "-R"] for c in run_calls)
+
+    def test_no_drop_when_not_root(self, monkeypatch):
+        from src.agent import main as m
+
+        popen_calls, run_calls = self._wire(monkeypatch, can_drop=False)
+        m._start_dev_server(_default_profile())
+
+        install_kw, dev_kw = popen_calls[0], popen_calls[1]
+        assert install_kw.get("user") is None and install_kw.get("group") is None
+        assert dev_kw.get("user") is None and dev_kw.get("group") is None
+        # No runner HOME overlay: the child keeps the ambient HOME, not /home/runner.
+        assert dev_kw["env"].get("HOME") == "/home/ambient-user"
+        assert dev_kw["env"].get("HOME") != m.RUNNER_HOME
+        assert not any(c[:2] == ["chown", "-R"] for c in run_calls)
 
 
 class TestGetInstallationToken:
@@ -1230,6 +1297,16 @@ _BACKEND_DIFF = "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n@
 
 
 class TestDiscoveryIntegration:
+    @pytest.fixture(autouse=True)
+    def _no_real_aws(self, monkeypatch):
+        # These tests drive run() with their own partial mocks (they deliberately
+        # exercise real discovery), so neutralize the AWS-backed helpers run()
+        # calls directly — otherwise they reach real SSM/ECS.
+        monkeypatch.setattr("src.agent.main._fetch_command_token", lambda: "fake-command-token")
+        monkeypatch.setattr("src.agent.network.get_task_arn", lambda: "arn:aws:ecs:eu-west-1:0:task/abc")
+        monkeypatch.setattr("src.agent.registration.register_task", lambda *a, **kw: None)
+        monkeypatch.setattr("src.agent.registration.deregister_task", lambda *a, **kw: None)
+
     def test_no_frontend_skips_and_posts_comment(self, monkeypatch):
         monkeypatch.setattr("src.agent.main._fetch_secrets", lambda: {"app_id": "1", "private_key": "k", "openrouter_api_key": "o"})
         monkeypatch.setattr("src.agent.main._get_installation_token", lambda *a, **kw: "fake-token")

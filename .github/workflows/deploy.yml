@@ -3,6 +3,18 @@ name: Deploy
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual escape hatch: force a full `cdk deploy` even when the paths-filter sees
+  # no infra change. Needed when an infra change shipped in a commit whose deploy
+  # was skipped/failed (e.g. blocked at the test gate), leaving it undeployed —
+  # later pushes diff against that commit and never re-detect it.
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: "Run cdk deploy regardless of changed paths"
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,6 +23,13 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # boto3 needs a region to construct clients, and dummy creds keep moto-backed
+    # tests hermetic (never reaching real AWS). Locally these come from the dev's
+    # AWS config; CI must set them explicitly.
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: testing
+      AWS_SECRET_ACCESS_KEY: testing
     steps:
       - uses: actions/checkout@v4
 
@@ -21,14 +40,16 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r src/agent/requirements.txt
-          pip install pytest moto
+          pip install -r requirements.txt
 
       - name: Run tests
-        run: python -m pytest tests/ -v 2>&1 | tail -50
+        run: python -m pytest tests/ -q
 
   deploy:
     needs: test
+    # Deploy on a push to main or a manual force-deploy; on pull_request the test
+    # job runs as a gate but we never deploy PR code.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -37,8 +58,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Only meaningful on push; on workflow_dispatch there's no before-commit to
+      # diff against, so we skip the filter and rely on the force input instead.
       - uses: dorny/paths-filter@v3
         id: filter
+        if: github.event_name == 'push'
         with:
           filters: |
             infra:
@@ -47,22 +71,32 @@ jobs:
               - 'Dockerfile'
               - '.github/workflows/deploy.yml'
 
-      - name: Skip deploy if no infra changes
-        if: steps.filter.outputs.infra == 'false'
-        run: echo "No infra changes, skipping deploy"
+      - name: Decide whether to deploy
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force_deploy }}" = "true" ]; then
+            echo "Forced deploy via workflow_dispatch"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.filter.outputs.infra }}" = "true" ]; then
+            echo "Infra paths changed; deploying"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No infra changes and not forced; skipping deploy"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/setup-node@v4
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         with:
           node-version: 20
 
       - uses: actions/setup-python@v5
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         with:
           python-version: "3.12"
 
       - name: Configure AWS credentials
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -70,7 +104,7 @@ jobs:
           aws-region: eu-west-1
 
       - name: Install dependencies
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         run: npm ci
 
       # The CloudFront URL-signing public key is read by the CDK stack at synth
@@ -78,13 +112,13 @@ jobs:
       # so materialize it from a repo variable. The matching private key lives in
       # SSM (created by scripts/setup-cloudfront-key.sh).
       - name: Materialize CloudFront signing public key
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         env:
           CLOUDFRONT_PUBLIC_KEY: ${{ vars.CLOUDFRONT_PUBLIC_KEY }}
         run: printf '%s\n' "$CLOUDFRONT_PUBLIC_KEY" > cloudfront-public-key.pem
 
       - name: Deploy
-        if: steps.filter.outputs.infra == 'true'
+        if: steps.gate.outputs.run == 'true'
         env:
           AWS_NODEJS_CONNECTION_TIMEOUT: '30000'
           AWS_NODEJS_REQUEST_TIMEOUT: '30000'
