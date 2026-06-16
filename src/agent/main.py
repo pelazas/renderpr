@@ -861,7 +861,10 @@ def run() -> None:
 
         repo_secrets = load_repo_secrets(installation_id, repo_full_name, is_fork)
         frontend_root = str(Path(discovery["package_json_path"]).parent)
-        injected_env, missing_env = build_injected_env(frontend_root, repo_config["env"], repo_secrets)
+        injected_env, missing_env = build_injected_env(
+            frontend_root, repo_config["env"], repo_secrets,
+            framework=discovery["launch_profile"].framework,
+        )
         env_local_rel = write_env_local(frontend_root, injected_env, REPO_DIR)
         if env_local_rel:
             _runtime_generated_files.add(env_local_rel)
