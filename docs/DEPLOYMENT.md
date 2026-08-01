@@ -154,11 +154,23 @@ aws ssm put-parameter \
   --overwrite
 ```
 
-### 7. Update GitHub App Webhook URL
+### 7. Cap ECR Storage Growth
+
+Run this once per bootstrapped account:
+
+```bash
+./scripts/setup-ecr-lifecycle.sh
+```
+
+Every `cdk deploy` pushes a new container image to the bootstrap asset repository and never removes the old one. The repository ships with a lifecycle rule that expires only *untagged* images, but CDK tags every asset with its content hash, so that rule never matches and storage grows without bound.
+
+The script adds a rule that keeps the 5 most recent images and expires the rest. The deployed image is always the newest, so it is never expired; the extra copies exist as rollback targets. Override the count with `KEEP=10 ./scripts/setup-ecr-lifecycle.sh`.
+
+### 8. Update GitHub App Webhook URL
 
 Copy the API Gateway URL from the CDK output and set it as your GitHub App's Webhook URL in the GitHub App settings.
 
-### 8. Verify
+### 9. Verify
 
 1. Push a PR to a watched repository
 2. Comment `@renderpr review` on the PR

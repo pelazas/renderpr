@@ -36,7 +36,8 @@ renderpr/
 │   ├── DEPLOYMENT.md             # AWS deployment guide
 │   └── WORKFLOW.md               # Agent runtime workflow
 ├── scripts/
-│   └── setup-secrets.sh          # Post-deploy secret injection
+│   ├── setup-secrets.sh          # Post-deploy secret injection
+│   └── setup-ecr-lifecycle.sh    # Cap CDK asset repo growth
 ├── Dockerfile                    # Fargate container image (Python + Node)
 ├── requirements.txt              # Python dependencies
 ├── AGENTS.md                     # This file
